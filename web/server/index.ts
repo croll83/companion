@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { createRoutes } from "./routes.js";
+import { createMessagesAPI } from "./api-messages.js";
 import { CliLauncher } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
@@ -123,9 +124,18 @@ const server = Bun.serve<SocketData>({
   },
 });
 
+// ── HTTP API server (Anthropic-compatible /v1/messages) ────────────────────
+const apiPort = port - 1;
+const messagesApp = createMessagesAPI(wsBridge, launcher);
+const apiServer = Bun.serve({
+  port: apiPort,
+  fetch: messagesApp.fetch,
+});
+
 console.log(`Server running on http://localhost:${server.port}`);
 console.log(`  CLI WebSocket:     ws://localhost:${server.port}/ws/cli/:sessionId`);
 console.log(`  Browser WebSocket: ws://localhost:${server.port}/ws/browser/:sessionId`);
+console.log(`  Messages API:      http://localhost:${apiServer.port}/v1/messages`);
 
 if (process.env.NODE_ENV !== "production") {
   console.log("Dev mode: frontend at http://localhost:5174");

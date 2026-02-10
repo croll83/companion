@@ -1,0 +1,14 @@
+node_modules/
+web/node_modules/
+web/dist/
+dist/
+.git/
+.github/
+*.tsbuildinfo
+.DS_Store
+bun.lockb
+package-lock.json
+.env
+.dev-*.pid
+.dev-*.log
+screenshot.png

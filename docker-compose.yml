@@ -1,0 +1,17 @@
+services:
+  companion:
+    build: .
+    network_mode: host
+    environment:
+      - PORT=3456
+      # Default working directory for Claude Code sessions launched via /v1/messages
+      - CLAUDE_CWD=/workspace
+    volumes:
+      # Persist Claude auth across container restarts (run "claude login" once after first start)
+      - claude-config:/root/.claude
+      # Mount openclaw workspace as working directory for Claude Code sessions
+      - /home/jarvis/.openclaw/workspace/dev:/workspace
+    restart: unless-stopped
+
+volumes:
+  claude-config:

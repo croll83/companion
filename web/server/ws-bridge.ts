@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import type {
   CLIMessage,
   CLISystemInitMessage,
@@ -43,6 +44,8 @@ interface Session {
   messageHistory: BrowserIncomingMessage[];
   /** Messages queued while waiting for CLI to connect */
   pendingMessages: string[];
+  /** Event emitter for HTTP/SSE consumers to subscribe to CLI messages */
+  emitter: EventEmitter;
 }
 
 function makeDefaultState(sessionId: string): SessionState {
@@ -109,6 +112,7 @@ export class WsBridge {
         pendingPermissions: new Map(p.pendingPermissions || []),
         messageHistory: p.messageHistory || [],
         pendingMessages: p.pendingMessages || [],
+        emitter: new EventEmitter(),
       };
       this.sessions.set(p.id, session);
       count++;
@@ -144,6 +148,7 @@ export class WsBridge {
         pendingPermissions: new Map(),
         messageHistory: [],
         pendingMessages: [],
+        emitter: new EventEmitter(),
       };
       this.sessions.set(sessionId, session);
     }
@@ -160,6 +165,69 @@ export class WsBridge {
 
   isCliConnected(sessionId: string): boolean {
     return !!this.sessions.get(sessionId)?.cliSocket;
+  }
+
+  /** Get the event emitter for a session (for HTTP/SSE consumers). */
+  getSessionEmitter(sessionId: string): EventEmitter | null {
+    return this.sessions.get(sessionId)?.emitter ?? null;
+  }
+
+  /** Send a user message to the CLI programmatically (used by /v1/messages). */
+  sendUserMessage(sessionId: string, content: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+
+    session.messageHistory.push({
+      type: "user_message",
+      content,
+      timestamp: Date.now(),
+    });
+
+    const ndjson = JSON.stringify({
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+      session_id: session.state.session_id || "",
+    });
+    this.sendToCLI(session, ndjson);
+    this.persistSession(session);
+    return true;
+  }
+
+  /** Change the model on a running CLI session and wait for CLI acknowledgment. */
+  async setModel(sessionId: string, model: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+
+    const requestId = randomUUID();
+    const ndjson = JSON.stringify({
+      type: "control_request",
+      request_id: requestId,
+      request: { subtype: "set_model", model },
+    });
+
+    // Wait for the CLI to respond with a control_response matching our request_id
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        session.emitter.off("cli_message", listener);
+        console.warn(`[ws-bridge] set_model timed out for session ${sessionId}`);
+        resolve(false);
+      }, 5000);
+
+      const listener = (msg: CLIMessage) => {
+        if (
+          msg.type === "control_response" &&
+          (msg as any).response?.request_id === requestId
+        ) {
+          clearTimeout(timeout);
+          session.emitter.off("cli_message", listener);
+          resolve(true);
+        }
+      };
+
+      session.emitter.on("cli_message", listener);
+      this.sendToCLI(session, ndjson);
+    });
   }
 
   removeSession(sessionId: string) {
@@ -310,6 +378,9 @@ export class WsBridge {
   // ── CLI message routing ─────────────────────────────────────────────────
 
   private routeCLIMessage(session: Session, msg: CLIMessage) {
+    // Emit raw CLI message for HTTP/SSE consumers
+    session.emitter.emit("cli_message", msg);
+
     switch (msg.type) {
       case "system":
         this.handleSystemMessage(session, msg);

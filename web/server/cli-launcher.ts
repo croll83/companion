@@ -110,7 +110,7 @@ export class CliLauncher {
    */
   launch(options: LaunchOptions = {}): SdkSessionInfo {
     const sessionId = randomUUID();
-    const cwd = options.cwd || process.cwd();
+    const cwd = options.cwd || process.env.CLAUDE_CWD || process.cwd();
 
     const info: SdkSessionInfo = {
       sessionId,
