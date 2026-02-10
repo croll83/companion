@@ -253,27 +253,8 @@ export function createMessagesAPI(
                     index: blockIndex,
                   });
                   blockIndex++;
-                } else if (block.type === "tool_use") {
-                  // Represent tool_use as a text block with description
-                  sendSSE("content_block_start", {
-                    type: "content_block_start",
-                    index: blockIndex,
-                    content_block: { type: "text", text: "" },
-                  });
-                  sendSSE("content_block_delta", {
-                    type: "content_block_delta",
-                    index: blockIndex,
-                    delta: {
-                      type: "text_delta",
-                      text: `[Tool: ${block.name}] ${JSON.stringify(block.input)}`,
-                    },
-                  });
-                  sendSSE("content_block_stop", {
-                    type: "content_block_stop",
-                    index: blockIndex,
-                  });
-                  blockIndex++;
                 }
+                // tool_use blocks are internal to Claude Code — skip them
               }
             }
 
