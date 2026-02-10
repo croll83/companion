@@ -158,7 +158,7 @@ export function createRoutes(launcher: CliLauncher, wsBridge: WsBridge, sessionS
   });
 
   api.get("/fs/home", (c) => {
-    return c.json({ home: homedir(), cwd: process.cwd() });
+    return c.json({ home: homedir(), cwd: process.env.CLAUDE_CWD || process.cwd() });
   });
 
   // ─── Environments (~/.companion/envs/) ────────────────────────────
