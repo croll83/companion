@@ -1,6 +1,11 @@
 services:
   companion:
-    build: .
+    build:
+      context: .
+      args:
+        # Must match host user UID/GID so bind-mounted files have correct ownership
+        - HOST_UID=1000
+        - HOST_GID=1000
     network_mode: host
     environment:
       - PORT=3456

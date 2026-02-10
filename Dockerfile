@@ -1,8 +1,8 @@
 FROM oven/bun:1 AS base
 
-# Install git, curl, Node.js (for Claude Code npm package), and gosu (for privilege dropping)
+# Install git, curl and Node.js (needed for Claude Code npm package)
 RUN apt-get update && \
-    apt-get install -y curl git nodejs npm gosu && \
+    apt-get install -y curl git nodejs npm && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code via npm (native installer unreliable in Docker)
@@ -25,11 +25,14 @@ COPY web/ ./web/
 # ── Build frontend (vite) ────────────────────────────────────────────
 RUN cd web && bun run build
 
-# ── Create non-root user ─────────────────────────────────────────────
+# ── Create non-root user matching host UID/GID ───────────────────────
 # Required: --dangerously-skip-permissions refuses to run as root.
-# Create a 'companion' user with home dir for Claude config.
-RUN groupadd -r companion && \
-    useradd -r -g companion -m -d /home/companion -s /bin/bash companion
+# UID/GID must match the host user so bind-mounted files have correct ownership.
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
+RUN groupadd -g ${HOST_GID} companion && \
+    useradd -l -u ${HOST_UID} -g ${HOST_GID} -m -d /home/companion -s /bin/bash companion
 
 # Ensure the companion user owns the app directory
 RUN chown -R companion:companion /app
@@ -39,10 +42,6 @@ RUN mkdir -p /workspace && chown companion:companion /workspace
 
 # Create .claude config dir for the companion user
 RUN mkdir -p /home/companion/.claude && chown -R companion:companion /home/companion/.claude
-
-# ── Entrypoint (fixes volume permissions then drops to companion user) ─
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
 
 # ── Runtime ───────────────────────────────────────────────────────────
 WORKDIR /app/web
@@ -55,6 +54,7 @@ ENV HOME=/home/companion
 # Messages API (/v1/messages): 3455 (PORT - 1)
 EXPOSE 3456 3455
 
-# Start as root (entrypoint drops to companion after fixing perms)
-ENTRYPOINT ["/entrypoint.sh"]
+# Switch to non-root user
+USER companion
+
 CMD ["bun", "run", "start"]
