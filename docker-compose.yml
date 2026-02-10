@@ -1,11 +1,6 @@
 services:
   companion:
-    build:
-      context: .
-      args:
-        # Must match host user UID/GID so bind-mounted files have correct ownership
-        - HOST_UID=1000
-        - HOST_GID=1000
+    build: .
     network_mode: host
     environment:
       - PORT=3456
@@ -17,7 +12,7 @@ services:
       - MAX_SESSIONS=3
     volumes:
       # Persist Claude auth across container restarts (run "claude login" once after first start)
-      - claude-config:/home/companion/.claude
+      - claude-config:/home/bun/.claude
       # Mount openclaw workspace as working directory for Claude Code sessions
       - /home/jarvis/.openclaw/workspace:/workspace
     restart: unless-stopped

@@ -25,36 +25,32 @@ COPY web/ ./web/
 # ── Build frontend (vite) ────────────────────────────────────────────
 RUN cd web && bun run build
 
-# ── Create non-root user matching host UID/GID ───────────────────────
-# Required: --dangerously-skip-permissions refuses to run as root.
-# UID/GID must match the host user so bind-mounted files have correct ownership.
+# ── Non-root user (UID 1000) ──────────────────────────────────────────
+# --dangerously-skip-permissions requires non-root. UID 1000 must match the
+# host user so bind-mounted files have correct ownership.
+# If UID 1000 already exists (e.g. 'bun' in oven/bun), reuse it; otherwise create one.
 ARG HOST_UID=1000
-ARG HOST_GID=1000
-
-RUN (groupadd -g ${HOST_GID} companion 2>/dev/null || true) && \
-    useradd -l -u ${HOST_UID} -g ${HOST_GID} -m -d /home/companion -s /bin/bash companion
-
-# Ensure the companion user owns the app directory
-RUN chown -R companion:companion /app
-
-# Create /workspace with correct ownership (mount point for host workspace)
-RUN mkdir -p /workspace && chown companion:companion /workspace
-
-# Create .claude config dir for the companion user
-RUN mkdir -p /home/companion/.claude && chown -R companion:companion /home/companion/.claude
+RUN EXISTING=$(getent passwd ${HOST_UID} | cut -d: -f1) && \
+    if [ -z "$EXISTING" ]; then \
+      groupadd -g ${HOST_UID} companion && \
+      useradd -l -u ${HOST_UID} -g ${HOST_UID} -m -s /bin/bash companion; \
+      EXISTING=companion; \
+    fi && \
+    HOME_DIR=$(getent passwd ${HOST_UID} | cut -d: -f6) && \
+    chown -R ${HOST_UID}:${HOST_UID} /app && \
+    mkdir -p /workspace && chown ${HOST_UID}:${HOST_UID} /workspace && \
+    mkdir -p "$HOME_DIR/.claude" && chown -R ${HOST_UID}:${HOST_UID} "$HOME_DIR/.claude"
 
 # ── Runtime ───────────────────────────────────────────────────────────
 WORKDIR /app/web
 
 ENV NODE_ENV=production
 ENV PORT=3456
-ENV HOME=/home/companion
-
 # Main server (WS + Web UI):  3456
 # Messages API (/v1/messages): 3455 (PORT - 1)
 EXPOSE 3456 3455
 
-# Switch to non-root user
-USER companion
+# Switch to non-root user (by UID, works regardless of username)
+USER 1000
 
 CMD ["bun", "run", "start"]
