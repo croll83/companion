@@ -12,7 +12,7 @@ services:
       - MAX_SESSIONS=3
     volumes:
       # Persist Claude auth across container restarts (run "claude login" once after first start)
-      - claude-config:/root/.claude
+      - claude-config:/home/companion/.claude
       # Mount openclaw workspace as working directory for Claude Code sessions
       - /home/jarvis/.openclaw/workspace:/workspace
     restart: unless-stopped
