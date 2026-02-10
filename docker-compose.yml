@@ -6,11 +6,15 @@ services:
       - PORT=3456
       # Default working directory for Claude Code sessions launched via /v1/messages
       - CLAUDE_CWD=/workspace
+      # Auto-approve all tool permissions (safe: runs in container sandbox)
+      - DANGEROUSLY_SKIP_PERMISSIONS=1
+      # Max concurrent CLI sessions for /v1/messages pool (default: 3)
+      - MAX_SESSIONS=3
     volumes:
       # Persist Claude auth across container restarts (run "claude login" once after first start)
       - claude-config:/root/.claude
       # Mount openclaw workspace as working directory for Claude Code sessions
-      - /home/jarvis/.openclaw/workspace/dev:/workspace
+      - /home/jarvis/.openclaw/workspace:/workspace
     restart: unless-stopped
 
 volumes:

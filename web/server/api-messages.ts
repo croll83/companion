@@ -50,6 +50,9 @@ function extractTextContent(content: string | AnthropicContentBlock[]): string {
 /** Timeout (ms) for a session to produce a `result` message before we close the SSE. */
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Max concurrent CLI sessions. Set via MAX_SESSIONS env var. */
+const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || "3", 10);
+
 /**
  * Creates a Hono app that exposes POST /v1/messages
  * compatible with the Anthropic Messages API (SSE streaming).
@@ -113,27 +116,36 @@ export function createMessagesAPI(
       ? (typeof body.system === "string" ? body.system : extractTextContent(body.system))
       : undefined;
 
-    // Find an existing active session or create one
+    // Find an active session that is NOT busy, or spawn a new one
     const sessions = launcher.listSessions();
-    const activeSession = sessions.find(
+    const activeSessions = sessions.filter(
       (s) => s.state !== "exited" && !s.archived,
+    );
+    const freeSession = activeSessions.find(
+      (s) => !wsBridge.isBusy(s.sessionId),
     );
 
     let sessionId: string;
-    let isNewSession = false;
 
-    if (activeSession) {
-      sessionId = activeSession.sessionId;
+    if (freeSession) {
+      sessionId = freeSession.sessionId;
+    } else if (activeSessions.length >= MAX_SESSIONS) {
+      // All sessions busy and at limit → reject
+      return c.json(
+        { type: "error", error: { type: "overloaded_error", message: `All ${MAX_SESSIONS} sessions are busy. Try again later.` } },
+        429,
+      );
     } else {
-      // Launch a new CLI session, defaulting cwd to /workspace if available
+      // All busy but under limit → spawn a new CLI session
       const cwd = process.env.CLAUDE_CWD || undefined;
       const newSession = launcher.launch({ model, cwd });
       sessionId = newSession.sessionId;
-      isNewSession = true;
+      console.log(`[api-messages] All sessions busy, spawned new session ${sessionId} (${activeSessions.length + 1}/${MAX_SESSIONS})`);
     }
 
-    // Ensure the WsBridge has the session
+    // Ensure the WsBridge has the session and mark it as busy
     wsBridge.getOrCreateSession(sessionId);
+    wsBridge.markBusy(sessionId, true);
 
     // Send initialize with appendSystemPrompt (only works once per session, before first message)
     if (systemText && !wsBridge.isInitialized(sessionId)) {
@@ -335,6 +347,7 @@ export function createMessagesAPI(
           const cleanup = () => {
             clearTimeout(sessionTimeout);
             emitter.off("cli_message", onMessage);
+            wsBridge.markBusy(sessionId, false);
           };
 
           // Subscribe before sending the message

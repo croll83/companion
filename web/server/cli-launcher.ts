@@ -207,6 +207,11 @@ export class CliLauncher {
       }
     }
 
+    // Auto-approve all tool permissions when DANGEROUSLY_SKIP_PERMISSIONS is set
+    if (process.env.DANGEROUSLY_SKIP_PERMISSIONS === "1") {
+      args.push("--dangerously-skip-permissions");
+    }
+
     // Inject CLAUDE.md guardrails for worktree sessions
     if (info.isWorktree && info.branch) {
       this.injectWorktreeGuardrails(info.cwd, info.branch, info.repoRoot || "");

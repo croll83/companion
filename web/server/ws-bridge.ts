@@ -48,6 +48,8 @@ interface Session {
   emitter: EventEmitter;
   /** Whether the `initialize` control_request has been sent for this session */
   initialized: boolean;
+  /** Whether the session is currently processing a message (busy lock for API consumers) */
+  busy: boolean;
 }
 
 function makeDefaultState(sessionId: string): SessionState {
@@ -116,6 +118,7 @@ export class WsBridge {
         pendingMessages: p.pendingMessages || [],
         emitter: new EventEmitter(),
         initialized: true, // restored sessions are already initialized
+        busy: false,
       };
       this.sessions.set(p.id, session);
       count++;
@@ -153,6 +156,7 @@ export class WsBridge {
         pendingMessages: [],
         emitter: new EventEmitter(),
         initialized: false,
+        busy: false,
       };
       this.sessions.set(sessionId, session);
     }
@@ -243,6 +247,17 @@ export class WsBridge {
       session.emitter.on("cli_message", listener);
       this.sendToCLI(session, ndjson);
     });
+  }
+
+  /** Mark a session as busy or free (for API session pooling). */
+  markBusy(sessionId: string, busy: boolean): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.busy = busy;
+  }
+
+  /** Check if a session is currently busy processing a message. */
+  isBusy(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.busy ?? false;
   }
 
   /** Check if a session has been initialized. */
@@ -509,35 +524,27 @@ export class WsBridge {
       session.state.slash_commands = init.slash_commands ?? [];
       session.state.skills = init.skills ?? [];
 
-      // Resolve git info from session cwd
+      // Resolve git info from session cwd (stdio piped to suppress stderr noise in logs)
+      const gitOpts = { cwd: session.state.cwd, encoding: "utf-8" as const, timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] as const };
       if (session.state.cwd) {
         try {
-          session.state.git_branch = execSync("git rev-parse --abbrev-ref HEAD", {
-            cwd: session.state.cwd,
-            encoding: "utf-8",
-            timeout: 3000,
-          }).trim();
+          session.state.git_branch = execSync("git rev-parse --abbrev-ref HEAD", gitOpts).trim();
 
           // Detect if in a worktree
           try {
-            const gitDir = execSync("git rev-parse --git-dir", {
-              cwd: session.state.cwd, encoding: "utf-8", timeout: 3000,
-            }).trim();
+            const gitDir = execSync("git rev-parse --git-dir", gitOpts).trim();
             session.state.is_worktree = gitDir.includes("/worktrees/");
           } catch { /* ignore */ }
 
           // Get repo root
           try {
-            session.state.repo_root = execSync("git rev-parse --show-toplevel", {
-              cwd: session.state.cwd, encoding: "utf-8", timeout: 3000,
-            }).trim();
+            session.state.repo_root = execSync("git rev-parse --show-toplevel", gitOpts).trim();
           } catch { /* ignore */ }
 
           // Ahead/behind remote
           try {
             const counts = execSync(
-              "git rev-list --left-right --count @{upstream}...HEAD",
-              { cwd: session.state.cwd, encoding: "utf-8", timeout: 3000 },
+              "git rev-list --left-right --count @{upstream}...HEAD", gitOpts,
             ).trim();
             const [behind, ahead] = counts.split(/\s+/).map(Number);
             session.state.git_ahead = ahead || 0;
@@ -585,6 +592,9 @@ export class WsBridge {
   }
 
   private handleResultMessage(session: Session, msg: CLIResultMessage) {
+    // Release busy lock — session is free for new API requests
+    session.busy = false;
+
     // Update session cost/turns
     session.state.total_cost_usd = msg.total_cost_usd;
     session.state.num_turns = msg.num_turns;
