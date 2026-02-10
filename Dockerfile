@@ -31,7 +31,7 @@ RUN cd web && bun run build
 ARG HOST_UID=1000
 ARG HOST_GID=1000
 
-RUN groupadd -g ${HOST_GID} companion && \
+RUN (groupadd -g ${HOST_GID} companion 2>/dev/null || true) && \
     useradd -l -u ${HOST_UID} -g ${HOST_GID} -m -d /home/companion -s /bin/bash companion
 
 # Ensure the companion user owns the app directory
