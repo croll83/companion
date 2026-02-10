@@ -5,12 +5,11 @@ RUN apt-get update && \
     apt-get install -y curl git && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code native binary
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/root/.local/bin:${PATH}"
+# Install Claude Code via npm (native installer unreliable in Docker)
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Verify claude is available
-RUN claude --version || true
+RUN claude --version
 
 WORKDIR /app
 
