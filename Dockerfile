@@ -1,8 +1,8 @@
 FROM oven/bun:1 AS base
 
-# Install git and curl (needed by companion server and Claude Code installer)
+# Install git, curl and Node.js (needed for Claude Code npm package)
 RUN apt-get update && \
-    apt-get install -y curl git && \
+    apt-get install -y curl git nodejs npm && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code via npm (native installer unreliable in Docker)
