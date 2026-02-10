@@ -108,14 +108,10 @@ export function createMessagesAPI(
       );
     }
 
-    // Log system prompt if provided (Claude Code manages its own system prompt,
-    // but we log it for debugging purposes)
-    if (body.system) {
-      const systemText = typeof body.system === "string"
-        ? body.system
-        : extractTextContent(body.system);
-      console.log(`[api-messages] System prompt provided (${systemText.length} chars), note: Claude Code manages its own system prompt`);
-    }
+    // Extract system prompt text if provided
+    const systemText = body.system
+      ? (typeof body.system === "string" ? body.system : extractTextContent(body.system))
+      : undefined;
 
     // Find an existing active session or create one
     const sessions = launcher.listSessions();
@@ -124,6 +120,7 @@ export function createMessagesAPI(
     );
 
     let sessionId: string;
+    let isNewSession = false;
 
     if (activeSession) {
       sessionId = activeSession.sessionId;
@@ -132,10 +129,19 @@ export function createMessagesAPI(
       const cwd = process.env.CLAUDE_CWD || undefined;
       const newSession = launcher.launch({ model, cwd });
       sessionId = newSession.sessionId;
+      isNewSession = true;
     }
 
     // Ensure the WsBridge has the session
     wsBridge.getOrCreateSession(sessionId);
+
+    // Send initialize with appendSystemPrompt (only works once per session, before first message)
+    if (systemText && !wsBridge.isInitialized(sessionId)) {
+      console.log(`[api-messages] Sending appendSystemPrompt (${systemText.length} chars) for session ${sessionId}`);
+      await wsBridge.initialize(sessionId, systemText);
+    } else if (systemText) {
+      console.log(`[api-messages] System prompt provided (${systemText.length} chars) but session already initialized, skipping`);
+    }
 
     // Switch model if specified in the request (await CLI acknowledgment)
     if (model) {

@@ -46,6 +46,8 @@ interface Session {
   pendingMessages: string[];
   /** Event emitter for HTTP/SSE consumers to subscribe to CLI messages */
   emitter: EventEmitter;
+  /** Whether the `initialize` control_request has been sent for this session */
+  initialized: boolean;
 }
 
 function makeDefaultState(sessionId: string): SessionState {
@@ -113,6 +115,7 @@ export class WsBridge {
         messageHistory: p.messageHistory || [],
         pendingMessages: p.pendingMessages || [],
         emitter: new EventEmitter(),
+        initialized: true, // restored sessions are already initialized
       };
       this.sessions.set(p.id, session);
       count++;
@@ -149,6 +152,7 @@ export class WsBridge {
         messageHistory: [],
         pendingMessages: [],
         emitter: new EventEmitter(),
+        initialized: false,
       };
       this.sessions.set(sessionId, session);
     }
@@ -192,6 +196,58 @@ export class WsBridge {
     this.sendToCLI(session, ndjson);
     this.persistSession(session);
     return true;
+  }
+
+  /** Send `initialize` control_request with appendSystemPrompt (once per session, before first user message). */
+  async initialize(sessionId: string, appendSystemPrompt?: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    if (session.initialized) {
+      console.log(`[ws-bridge] Session ${sessionId} already initialized, skipping`);
+      return false;
+    }
+
+    const requestId = randomUUID();
+    const request: Record<string, unknown> = { subtype: "initialize" };
+    if (appendSystemPrompt) {
+      request.appendSystemPrompt = appendSystemPrompt;
+    }
+
+    const ndjson = JSON.stringify({
+      type: "control_request",
+      request_id: requestId,
+      request,
+    });
+
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        session.emitter.off("cli_message", listener);
+        console.warn(`[ws-bridge] initialize timed out for session ${sessionId}`);
+        session.initialized = true; // mark as initialized even on timeout to avoid retries
+        resolve(false);
+      }, 10000);
+
+      const listener = (msg: CLIMessage) => {
+        if (
+          msg.type === "control_response" &&
+          (msg as any).response?.request_id === requestId
+        ) {
+          clearTimeout(timeout);
+          session.emitter.off("cli_message", listener);
+          session.initialized = true;
+          console.log(`[ws-bridge] Session ${sessionId} initialized with appendSystemPrompt (${appendSystemPrompt?.length ?? 0} chars)`);
+          resolve(true);
+        }
+      };
+
+      session.emitter.on("cli_message", listener);
+      this.sendToCLI(session, ndjson);
+    });
+  }
+
+  /** Check if a session has been initialized. */
+  isInitialized(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.initialized ?? false;
   }
 
   /** Change the model on a running CLI session and wait for CLI acknowledgment. */
@@ -431,6 +487,9 @@ export class WsBridge {
 
     if (subtype === "init") {
       const init = msg as unknown as CLISystemInitMessage;
+      // Mark session as initialized (CLI has sent system/init)
+      session.initialized = true;
+
       // Keep the launcher-assigned session_id as the canonical ID.
       // The CLI may report its own internal session_id which differs
       // from the launcher UUID, causing duplicate entries in the sidebar.
