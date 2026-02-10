@@ -74,7 +74,7 @@ PLEASE, TAKE CARE ABOUT YOUR SECURITY, this is not for newbie.
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/nicekid1/clawd-companion.git
+git clone https://github.com/croll83/clawd-companion.git
 cd clawd-companion
 ```
 
@@ -124,7 +124,7 @@ This starts an OAuth flow in the browser. Complete the login — the session is 
 curl --no-buffer -X POST http://localhost:3455/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "sonnet",
     "stream": true,
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "hello, what model are you?"}]
@@ -144,8 +144,8 @@ Edit your `openclaw.json` (usually at `~/.openclaw/openclaw.json`) and add insid
   "api": "anthropic-messages",
   "models": [
     {
-      "id": "claude-sonnet-4-20250514",
-      "name": "Claude Sonnet 4 (Companion)",
+      "id": "sonnet",
+      "name": "Claude Sonnet Latest (Companion)",
       "reasoning": false,
       "input": ["text"],
       "contextWindow": 200000,
@@ -179,7 +179,7 @@ docker compose restart openclaw
 
 From OpenClaw you can now select:
 
-- `claude-companion/claude-sonnet-4-20250514` — Sonnet 4
+- `claude-companion/sonnet` — Sonnet Latest
 - `claude-companion/claude-opus-4-6` — Opus 4.6
 
 Or set them as default in `openclaw.json`:
