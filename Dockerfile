@@ -54,4 +54,5 @@ EXPOSE 3456 3455
 # Switch to non-root user (by UID, works regardless of username)
 USER 1000
 
-CMD ["bun", "run", "start"]
+# Ensure sandbox dir exists at runtime (bind-mount overwrites build-time dirs)
+CMD ["sh", "-c", "mkdir -p ${CLAUDE_API_CWD:-/workspace/claude-sandbox} && exec bun run start"]
