@@ -39,6 +39,7 @@ RUN EXISTING=$(getent passwd ${HOST_UID} | cut -d: -f1) && \
     HOME_DIR=$(getent passwd ${HOST_UID} | cut -d: -f6) && \
     chown -R ${HOST_UID}:${HOST_UID} /app && \
     mkdir -p /workspace && chown ${HOST_UID}:${HOST_UID} /workspace && \
+    mkdir -p /workspace/claude-sandbox && chown ${HOST_UID}:${HOST_UID} /workspace/claude-sandbox && \
     mkdir -p "$HOME_DIR/.claude" && chown -R ${HOST_UID}:${HOST_UID} "$HOME_DIR/.claude"
 
 # ── Runtime ───────────────────────────────────────────────────────────

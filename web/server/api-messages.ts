@@ -184,16 +184,17 @@ export function createMessagesAPI(
     }
 
     // Spawn a new CLI process for this request.
-    // --system-prompt-file replaces the agentic default prompt → Claude sees only openclaw's prompt
-    // --model is passed directly to CLI (no need for setModel WebSocket round-trip)
-    // NOTE: we do NOT pass --tools "" so that native tool_use blocks can flow through
-    //       to openclaw. Claude Code's built-in tools are neutralized by the system prompt
-    //       replacement (no agentic instructions = no Bash/Edit/Task usage).
-    const cwd = process.env.CLAUDE_CWD || undefined;
+    // Key isolation for API sessions (pure LLM mode):
+    //   --tools ""              → disables ALL built-in tools (Bash, Edit, Task, etc.)
+    //   --system-prompt-file    → replaces agentic prompt with openclaw's prompt
+    //   cwd = sandbox           → empty dir, no TOOLS.md/SOUL.md/skills/ from openclaw
+    const apiCwd = process.env.CLAUDE_API_CWD
+      || join(process.env.CLAUDE_CWD || "/workspace", "claude-sandbox");
     const newSession = launcher.launch({
       model,
-      cwd,
+      cwd: apiCwd,
       source: "api",
+      tools: "",           // disable all built-in tools → pure LLM
       systemPromptFile,
     });
     const sessionId = newSession.sessionId;

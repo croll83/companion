@@ -36,6 +36,8 @@ export interface LaunchOptions {
   env?: Record<string, string>;
   /** How this session was created */
   source?: "dashboard" | "api";
+  /** Restrict built-in tools. Use "" to disable all, "default" for all, or comma-separated names */
+  tools?: string;
   /** Path to a file containing the system prompt (CLI --system-prompt-file flag).
    *  Replaces the entire default agentic prompt. Print mode only. */
   systemPromptFile?: string;
@@ -213,6 +215,11 @@ export class CliLauncher {
       for (const tool of options.allowedTools) {
         args.push("--allowedTools", tool);
       }
+    }
+
+    // --tools restricts which built-in tools are available (empty string = none)
+    if (options.tools !== undefined) {
+      args.push("--tools", options.tools);
     }
 
     // --system-prompt-file replaces the entire default agentic prompt with file contents.

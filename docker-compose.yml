@@ -4,8 +4,10 @@ services:
     network_mode: host
     environment:
       - PORT=3456
-      # Default working directory for Claude Code sessions launched via /v1/messages
+      # Working directory for dashboard sessions (has full openclaw workspace)
       - CLAUDE_CWD=/workspace
+      # Isolated sandbox for API sessions — empty dir, no openclaw files (TOOLS.md, SOUL.md, skills/)
+      - CLAUDE_API_CWD=/workspace/claude-sandbox
       # Auto-approve all tool permissions (safe: runs in container sandbox)
       - DANGEROUSLY_SKIP_PERMISSIONS=1
       # Max concurrent CLI sessions for /v1/messages pool (default: 3)
