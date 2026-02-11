@@ -94,9 +94,13 @@ function extractLastMessageContent(content: string | unknown[]): string {
     if (block.type === "text" && typeof block.text === "string") {
       parts.push(block.text);
     } else if (block.type === "tool_result") {
-      const resultContent = typeof block.content === "string"
+      let resultContent = typeof block.content === "string"
         ? block.content
         : JSON.stringify(block.content);
+      // Truncate verbose tool results to save context space
+      if (resultContent.length > 2000) {
+        resultContent = resultContent.slice(0, 2000) + "\n...[truncated]";
+      }
       parts.push(
         `<prior_tool_output tool_use_id="${block.tool_use_id}">${resultContent}</prior_tool_output>`,
       );
@@ -129,9 +133,24 @@ function buildConversationContext(
     return { systemPrompt: systemText, lastUserMessage };
   }
 
+  // Cap conversation history to prevent context overflow.
+  // OpenClaw may send 100+ messages (especially after tool retry loops).
+  // We keep only the most recent turns — enough for context, not enough to overflow.
+  const MAX_HISTORY_MESSAGES = 20;
+  const MAX_TOOL_OUTPUT_CHARS = 2000;
+  const cappedMessages = priorMessages.length > MAX_HISTORY_MESSAGES
+    ? priorMessages.slice(-MAX_HISTORY_MESSAGES)
+    : priorMessages;
+
+  if (priorMessages.length > MAX_HISTORY_MESSAGES) {
+    console.log(
+      `[api-messages] history capped: ${priorMessages.length} → ${MAX_HISTORY_MESSAGES} messages`,
+    );
+  }
+
   // Format prior messages as conversation history.
   // Content can be string, or array with text/tool_use/tool_result blocks.
-  const historyLines = priorMessages.map((msg) => {
+  const historyLines = cappedMessages.map((msg) => {
     const role = msg.role === "assistant" ? "assistant" : "user";
     const content = msg.content;
 
@@ -148,9 +167,13 @@ function buildConversationContext(
         return `<prior_tool_call name="${block.name}" id="${block.id}">${JSON.stringify(block.input)}</prior_tool_call>`;
       }
       if (block.type === "tool_result") {
-        const resultContent = typeof block.content === "string"
+        let resultContent = typeof block.content === "string"
           ? block.content
           : JSON.stringify(block.content);
+        // Truncate verbose tool results to save context space
+        if (resultContent.length > MAX_TOOL_OUTPUT_CHARS) {
+          resultContent = resultContent.slice(0, MAX_TOOL_OUTPUT_CHARS) + "\n...[truncated]";
+        }
         return `<prior_tool_output tool_use_id="${block.tool_use_id}">${resultContent}</prior_tool_output>`;
       }
       return "";
