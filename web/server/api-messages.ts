@@ -132,25 +132,23 @@ export function createMessagesAPI(
       );
     }
 
-    // Spawn a new CLI process for this request
+    // Spawn a new CLI process for this request.
+    // --tools "" disables ALL built-in tools (Bash, Read, Edit, Task, etc.)
+    // --system-prompt replaces the agentic default prompt → pure LLM mode
+    // --model is passed directly to CLI (no need for setModel WebSocket round-trip)
     const cwd = process.env.CLAUDE_CWD || undefined;
-    const newSession = launcher.launch({ model, cwd, source: "api" });
+    const newSession = launcher.launch({
+      model,
+      cwd,
+      source: "api",
+      tools: "",                     // disable all tools → no subagents, no file ops
+      systemPrompt: systemText,      // replace agentic prompt via CLI flag
+    });
     const sessionId = newSession.sessionId;
-    console.log(`[api-messages] Spawned one-shot session ${sessionId} (${inFlightApiSessions.length + 1}/${MAX_SESSIONS})`);
+    console.log(`[api-messages] Spawned one-shot LLM session ${sessionId} (tools=none, system=${systemText?.length ?? 0} chars, ${inFlightApiSessions.length + 1}/${MAX_SESSIONS})`);
 
-    // Ensure the WsBridge has the session
+    // Ensure the WsBridge has the session entry for message routing
     wsBridge.getOrCreateSession(sessionId);
-
-    // Initialize with systemPrompt in "replace" mode (replaces Claude Code's built-in agentic prompt → pure LLM)
-    if (systemText) {
-      console.log(`[api-messages] Sending systemPrompt/replace (${systemText.length} chars) for session ${sessionId}`);
-      await wsBridge.initialize(sessionId, systemText, "replace");
-    }
-
-    // Switch model if specified in the request (await CLI acknowledgment)
-    if (model) {
-      await wsBridge.setModel(sessionId, model);
-    }
 
     const emitter = wsBridge.getSessionEmitter(sessionId);
     if (!emitter) {

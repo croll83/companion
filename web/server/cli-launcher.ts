@@ -36,6 +36,10 @@ export interface LaunchOptions {
   env?: Record<string, string>;
   /** How this session was created */
   source?: "dashboard" | "api";
+  /** Restrict built-in tools. Use "" to disable all, "default" for all, or comma-separated names */
+  tools?: string;
+  /** Replace the entire system prompt (CLI --system-prompt flag) */
+  systemPrompt?: string;
   /** Pre-resolved worktree info from the session creation flow */
   worktreeInfo?: {
     isWorktree: boolean;
@@ -210,6 +214,16 @@ export class CliLauncher {
       for (const tool of options.allowedTools) {
         args.push("--allowedTools", tool);
       }
+    }
+
+    // --tools restricts which built-in tools are available (empty string = none)
+    if (options.tools !== undefined) {
+      args.push("--tools", options.tools);
+    }
+
+    // --system-prompt replaces the entire default agentic prompt
+    if (options.systemPrompt) {
+      args.push("--system-prompt", options.systemPrompt);
     }
 
     // Auto-approve all tool permissions when DANGEROUSLY_SKIP_PERMISSIONS is set
