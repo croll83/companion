@@ -41,6 +41,32 @@ interface AnthropicMessagesBody {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Format tool definitions for the system prompt in a human-readable way.
+ * Instead of dumping raw JSON schemas (which Claude may misinterpret when
+ * injected as text), we produce a clear markdown-style listing with
+ * parameter names, types, and descriptions.
+ */
+function formatToolDefsForPrompt(tools: unknown[]): string {
+  return (tools as Array<Record<string, unknown>>).map((tool) => {
+    const name = tool.name as string;
+    const desc = (tool.description as string) || "";
+    const schema = (tool.input_schema || tool.parameters) as Record<string, unknown> | undefined;
+    const props = (schema?.properties || {}) as Record<string, Record<string, unknown>>;
+    const required = Array.isArray(schema?.required) ? (schema.required as string[]) : [];
+
+    const paramLines = Object.entries(props).map(([key, prop]) => {
+      const type = prop.type || "string";
+      const propDesc = prop.description || "";
+      const isRequired = required.includes(key);
+      const reqTag = isRequired ? " [REQUIRED]" : "";
+      return `  - ${key} (${type})${reqTag}: ${propDesc}`;
+    }).join("\n");
+
+    return `### ${name}\n${desc}${paramLines ? `\nParameters:\n${paramLines}` : ""}`;
+  }).join("\n\n");
+}
+
 /** Extract plain text from a message content field (string or content blocks). */
 function extractTextContent(content: string | AnthropicContentBlock[]): string {
   if (typeof content === "string") return content;
@@ -72,11 +98,11 @@ function extractLastMessageContent(content: string | unknown[]): string {
         ? block.content
         : JSON.stringify(block.content);
       parts.push(
-        `---TOOL_RESULT---\ntool_use_id: ${block.tool_use_id}\n${resultContent}\n---END_TOOL_RESULT---`,
+        `<prior_tool_output tool_use_id="${block.tool_use_id}">${resultContent}</prior_tool_output>`,
       );
     } else if (block.type === "tool_use") {
       parts.push(
-        `---TOOL_USE---\n${JSON.stringify({ id: block.id, name: block.name, input: block.input })}\n---END_TOOL_USE---`,
+        `<prior_tool_call name="${block.name}" id="${block.id}">${JSON.stringify(block.input)}</prior_tool_call>`,
       );
     }
   }
@@ -119,13 +145,13 @@ function buildConversationContext(
         return block.text;
       }
       if (block.type === "tool_use") {
-        return `---TOOL_USE---\n${JSON.stringify({ id: block.id, name: block.name, input: block.input })}\n---END_TOOL_USE---`;
+        return `<prior_tool_call name="${block.name}" id="${block.id}">${JSON.stringify(block.input)}</prior_tool_call>`;
       }
       if (block.type === "tool_result") {
         const resultContent = typeof block.content === "string"
           ? block.content
           : JSON.stringify(block.content);
-        return `---TOOL_RESULT---\ntool_use_id: ${block.tool_use_id}\n${resultContent}\n---END_TOOL_RESULT---`;
+        return `<prior_tool_output tool_use_id="${block.tool_use_id}">${resultContent}</prior_tool_output>`;
       }
       return "";
     }).filter(Boolean).join("\n");
@@ -222,38 +248,72 @@ export function createMessagesAPI(
     //   2. OpenClaw executes the tool and sends tool_result in next request
     //   3. Bridge lets Claude make MORE tool_use calls if needed
     //   4. OpenClaw decides when the loop ends (stop_reason: "end_turn")
-    // Loop protection is handled by OpenClaw (maxTurns) + SESSION_TIMEOUT_MS.
+    //
+    // Safeguard: if conversation has too many tool turns (e.g. retry loop on errors),
+    // force end_turn to prevent infinite loops. OpenClaw has only timeout-based
+    // protection (600s), so this bridge-side limit is essential.
+    const MAX_TOOL_TURNS = 10;
+    const toolTurnCount = messages.filter((m) => {
+      if (!Array.isArray(m.content)) return false;
+      return (m.content as unknown as Record<string, unknown>[]).some(
+        (b) => b.type === "tool_use" || b.type === "tool_result",
+      );
+    }).length;
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-    const allowToolUseInResponse = hasTools;
+    const allowToolUseInResponse = hasTools && toolTurnCount < MAX_TOOL_TURNS;
+
+    if (toolTurnCount >= MAX_TOOL_TURNS) {
+      console.log(
+        `[api-messages] tool turn limit reached (${toolTurnCount}/${MAX_TOOL_TURNS}), forcing end_turn`,
+      );
+    }
     if (hasTools) {
-      const toolDefs = JSON.stringify(body.tools, null, 2);
+      const toolDefs = formatToolDefsForPrompt(body.tools as unknown[]);
       const toolInstruction = `
 
 <tool_definitions>
 You have access to the following tools. When you need to use a tool, output EXACTLY this format:
 
 ---TOOL_USE---
-{"id":"toolu_<unique_id>","name":"<tool_name>","input":{<parameters>}}
+{"id":"toolu_<unique_id>","name":"<tool_name>","input":{<parameters_object>}}
+---END_TOOL_USE---
+
+EXAMPLES:
+---TOOL_USE---
+{"id":"toolu_abc123","name":"read","input":{"path":"/skills/SKILL.md"}}
+---END_TOOL_USE---
+
+---TOOL_USE---
+{"id":"toolu_def456","name":"exec","input":{"command":"ls -la /workspace"}}
 ---END_TOOL_USE---
 
 Available tools:
 ${toolDefs}
 
 CRITICAL RULES:
-- Output ONLY the ---TOOL_USE--- block when calling a tool, with NO additional text before or after
+- The "input" field MUST be a JSON object with named parameters — NEVER a string
+- ALWAYS include required parameters: "read" needs "path", "write" needs "path"+"content", "exec" needs "command"
+- Output ONLY the ---TOOL_USE--- block when calling a tool
 - NEVER simulate or invent tool output — just request the tool and STOP
 - NEVER wrap the block in markdown code fences
 - The "id" must start with "toolu_" followed by a unique string
 - After outputting ---TOOL_USE---, STOP generating. Wait for the tool result.
 - You may output a short text message before the tool block to explain what you're doing
-- When you receive a ---TOOL_RESULT---, read the result and respond to the user in natural language. Do NOT call another tool unless absolutely necessary for a DIFFERENT purpose. NEVER re-call the same tool.
+- The <conversation_history> may contain <prior_tool_call> and <prior_tool_output> tags — those are COMPLETED past actions. Do NOT repeat them. Use ---TOOL_USE--- format ONLY for NEW tool calls.
+- If you already received a result (shown as <prior_tool_output>), DO NOT call the same tool again. Use the existing result to respond.
+- If a tool returns an error, do NOT retry more than once. Instead, explain the issue to the user.
 </tool_definitions>`;
 
       systemText = systemText ? systemText + toolInstruction : toolInstruction;
     }
 
-    const { systemPrompt: fullSystemPrompt, lastUserMessage: lastMessageText } =
+    const { systemPrompt: fullSystemPrompt, lastUserMessage: rawLastMessage } =
       buildConversationContext(systemText, messages);
+
+    // When tool turn limit is reached, prepend an instruction to stop calling tools
+    const lastMessageText = toolTurnCount >= MAX_TOOL_TURNS
+      ? `IMPORTANT: Tool call limit reached. Do NOT call any more tools. Summarize what you know from the conversation history and respond to the user in natural language.\n\n${rawLastMessage}`
+      : rawLastMessage;
 
     if (!lastMessageText) {
       return c.json(
