@@ -37,6 +37,7 @@ interface AnthropicMessagesBody {
   top_k?: number;
   stop_sequences?: string[];
   metadata?: Record<string, unknown>;
+  tools?: unknown[];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -69,11 +70,34 @@ function buildConversationContext(
     return { systemPrompt: systemText, lastUserMessage };
   }
 
-  // Format prior messages as conversation history
+  // Format prior messages as conversation history.
+  // Content can be string, or array with text/tool_use/tool_result blocks.
   const historyLines = priorMessages.map((msg) => {
     const role = msg.role === "assistant" ? "assistant" : "user";
-    const text = extractTextContent(msg.content);
-    return `[${role}]: ${text}`;
+    const content = msg.content;
+
+    if (typeof content === "string") {
+      return `[${role}]: ${content}`;
+    }
+
+    // Array content — may contain text, tool_use, tool_result blocks
+    const parts = (content as unknown as Record<string, unknown>[]).map((block) => {
+      if (block.type === "text" && typeof block.text === "string") {
+        return block.text;
+      }
+      if (block.type === "tool_use") {
+        return `---TOOL_USE---\n${JSON.stringify({ id: block.id, name: block.name, input: block.input })}\n---END_TOOL_USE---`;
+      }
+      if (block.type === "tool_result") {
+        const resultContent = typeof block.content === "string"
+          ? block.content
+          : JSON.stringify(block.content);
+        return `---TOOL_RESULT---\ntool_use_id: ${block.tool_use_id}\n${resultContent}\n---END_TOOL_RESULT---`;
+      }
+      return "";
+    }).filter(Boolean).join("\n");
+
+    return `[${role}]: ${parts}`;
   }).join("\n");
 
   const historyBlock = `\n\n<conversation_history>\n${historyLines}\n</conversation_history>`;
@@ -141,9 +165,39 @@ export function createMessagesAPI(
     // Extract system prompt + conversation history.
     // OpenClaw sends full messages[] on every call. Claude Code CLI only accepts
     // one user message, so we embed prior turns in the system prompt.
-    const systemText = body.system
+    let systemText = body.system
       ? (typeof body.system === "string" ? body.system : extractTextContent(body.system))
       : undefined;
+
+    // Tool fallback: Claude Code CLI can't accept custom tool definitions via API,
+    // so we inject them into the system prompt. Claude will output structured
+    // ---TOOL_USE--- blocks that the bridge converts to native tool_use SSE events.
+    const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+    if (hasTools) {
+      const toolDefs = JSON.stringify(body.tools, null, 2);
+      const toolInstruction = `
+
+<tool_definitions>
+You have access to the following tools. When you need to use a tool, output EXACTLY this format:
+
+---TOOL_USE---
+{"id":"toolu_<unique_id>","name":"<tool_name>","input":{<parameters>}}
+---END_TOOL_USE---
+
+Available tools:
+${toolDefs}
+
+CRITICAL RULES:
+- Output ONLY the ---TOOL_USE--- block when calling a tool, with NO additional text before or after
+- NEVER simulate or invent tool output — just request the tool and STOP
+- NEVER wrap the block in markdown code fences
+- The "id" must start with "toolu_" followed by a unique string
+- After outputting ---TOOL_USE---, STOP generating. Wait for the tool result.
+- You may output a short text message before the tool block to explain what you're doing
+</tool_definitions>`;
+
+      systemText = systemText ? systemText + toolInstruction : toolInstruction;
+    }
 
     const { systemPrompt: fullSystemPrompt, lastUserMessage: lastMessageText } =
       buildConversationContext(systemText, messages);
@@ -270,6 +324,81 @@ export function createMessagesAPI(
 
           let contentBlockStarted = false;
           let blockIndex = 0;
+          let foundToolUse = false;
+
+          /** Emit a text content block via SSE */
+          const emitTextBlock = (text: string) => {
+            sendSSE("content_block_start", {
+              type: "content_block_start",
+              index: blockIndex,
+              content_block: { type: "text", text: "" },
+            });
+            sendSSE("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "text_delta", text },
+            });
+            sendSSE("content_block_stop", {
+              type: "content_block_stop",
+              index: blockIndex,
+            });
+            blockIndex++;
+          };
+
+          /** Emit a tool_use content block via SSE */
+          const emitToolUseBlock = (toolCall: { id?: string; name: string; input?: unknown }) => {
+            const toolId = toolCall.id || `toolu_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+            sendSSE("content_block_start", {
+              type: "content_block_start",
+              index: blockIndex,
+              content_block: {
+                type: "tool_use",
+                id: toolId,
+                name: toolCall.name,
+                input: toolCall.input || {},
+              },
+            });
+            sendSSE("content_block_stop", {
+              type: "content_block_stop",
+              index: blockIndex,
+            });
+            blockIndex++;
+            foundToolUse = true;
+          };
+
+          /**
+           * Process a text block that may contain ---TOOL_USE--- markers.
+           * Splits into text and tool_use parts, emitting each as the appropriate SSE block.
+           */
+          const processTextBlock = (text: string) => {
+            if (!hasTools) {
+              // No tools in request — emit as plain text (fast path)
+              emitTextBlock(text);
+              return;
+            }
+
+            // Split on ---TOOL_USE---...---END_TOOL_USE--- markers
+            const parts = text.split(/(---TOOL_USE---[\s\S]*?---END_TOOL_USE---)/);
+            for (const part of parts) {
+              const toolMatch = part.match(/^---TOOL_USE---\s*\n?([\s\S]*?)\n?\s*---END_TOOL_USE---$/);
+              if (toolMatch) {
+                try {
+                  const toolCall = JSON.parse(toolMatch[1].trim());
+                  if (toolCall.name) {
+                    emitToolUseBlock(toolCall);
+                    continue;
+                  }
+                } catch {
+                  // JSON parse failed — fall through to text
+                }
+              }
+              // Regular text (skip empty/whitespace-only parts)
+              const trimmed = part.trim();
+              if (trimmed) {
+                emitTextBlock(trimmed);
+              }
+            }
+          };
 
           const onMessage = (msg: CLIMessage) => {
             if (closed) { cleanup(); return; }
@@ -279,23 +408,7 @@ export function createMessagesAPI(
               const assistantMsg = msg as CLIAssistantMessage;
               for (const block of assistantMsg.message.content) {
                 if (block.type === "text") {
-                  // Start a new content block
-                  sendSSE("content_block_start", {
-                    type: "content_block_start",
-                    index: blockIndex,
-                    content_block: { type: "text", text: "" },
-                  });
-                  // Send the full text as a delta
-                  sendSSE("content_block_delta", {
-                    type: "content_block_delta",
-                    index: blockIndex,
-                    delta: { type: "text_delta", text: block.text },
-                  });
-                  sendSSE("content_block_stop", {
-                    type: "content_block_stop",
-                    index: blockIndex,
-                  });
-                  blockIndex++;
+                  processTextBlock(block.text);
                 }
                 // tool_use blocks are internal to Claude Code — skip them
               }
@@ -355,7 +468,7 @@ export function createMessagesAPI(
               sendSSE("message_delta", {
                 type: "message_delta",
                 delta: {
-                  stop_reason: "end_turn",
+                  stop_reason: foundToolUse ? "tool_use" : "end_turn",
                 },
                 usage: {
                   input_tokens: resultMsg.usage?.input_tokens ?? 0,
