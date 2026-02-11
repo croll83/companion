@@ -36,10 +36,9 @@ export interface LaunchOptions {
   env?: Record<string, string>;
   /** How this session was created */
   source?: "dashboard" | "api";
-  /** Restrict built-in tools. Use "" to disable all, "default" for all, or comma-separated names */
-  tools?: string;
-  /** Replace the entire system prompt (CLI --system-prompt flag) */
-  systemPrompt?: string;
+  /** Path to a file containing the system prompt (CLI --system-prompt-file flag).
+   *  Replaces the entire default agentic prompt. Print mode only. */
+  systemPromptFile?: string;
   /** Pre-resolved worktree info from the session creation flow */
   worktreeInfo?: {
     isWorktree: boolean;
@@ -216,14 +215,10 @@ export class CliLauncher {
       }
     }
 
-    // --tools restricts which built-in tools are available (empty string = none)
-    if (options.tools !== undefined) {
-      args.push("--tools", options.tools);
-    }
-
-    // --system-prompt replaces the entire default agentic prompt
-    if (options.systemPrompt) {
-      args.push("--system-prompt", options.systemPrompt);
+    // --system-prompt-file replaces the entire default agentic prompt with file contents.
+    // Avoids ARG_MAX limits when system prompt + conversation history is very long.
+    if (options.systemPromptFile) {
+      args.push("--system-prompt-file", options.systemPromptFile);
     }
 
     // Auto-approve all tool permissions when DANGEROUSLY_SKIP_PERMISSIONS is set

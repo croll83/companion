@@ -1,6 +1,9 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { randomUUID } from "node:crypto";
+import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { WsBridge } from "./ws-bridge.js";
 import type { CliLauncher } from "./cli-launcher.js";
 import type {
@@ -168,17 +171,30 @@ export function createMessagesAPI(
       );
     }
 
+    // Write system prompt + conversation history to a temp file.
+    // Using --system-prompt-file avoids ARG_MAX limits for long prompts.
+    const tmpDir = join(tmpdir(), "clawd-companion");
+    mkdirSync(tmpDir, { recursive: true });
+    // Generate a unique ID for the temp file (sessionId not yet available)
+    const tempId = randomUUID();
+    let systemPromptFile: string | undefined;
+    if (fullSystemPrompt) {
+      systemPromptFile = join(tmpDir, `sysprompt-${tempId}.txt`);
+      writeFileSync(systemPromptFile, fullSystemPrompt, "utf-8");
+    }
+
     // Spawn a new CLI process for this request.
-    // --tools "" disables ALL built-in tools (Bash, Read, Edit, Task, etc.)
-    // --system-prompt replaces the agentic default prompt → pure LLM mode
+    // --system-prompt-file replaces the agentic default prompt → Claude sees only openclaw's prompt
     // --model is passed directly to CLI (no need for setModel WebSocket round-trip)
+    // NOTE: we do NOT pass --tools "" so that native tool_use blocks can flow through
+    //       to openclaw. Claude Code's built-in tools are neutralized by the system prompt
+    //       replacement (no agentic instructions = no Bash/Edit/Task usage).
     const cwd = process.env.CLAUDE_CWD || undefined;
     const newSession = launcher.launch({
       model,
       cwd,
       source: "api",
-      tools: "",                      // disable all tools → no subagents, no file ops
-      systemPrompt: fullSystemPrompt, // system prompt + conversation history injected
+      systemPromptFile,
     });
     const sessionId = newSession.sessionId;
     console.log(`[api-messages] one-shot ${sessionId} | ${messages.length - 1} prior turns | system ${fullSystemPrompt?.length ?? 0} chars | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
@@ -358,6 +374,10 @@ export function createMessagesAPI(
             launcher.kill(sessionId).catch(() => {});
             wsBridge.closeSession(sessionId);
             launcher.removeSession(sessionId);
+            // Clean up temp system prompt file
+            if (systemPromptFile) {
+              try { unlinkSync(systemPromptFile); } catch { /* ignore */ }
+            }
           };
 
           // Subscribe before sending the message
