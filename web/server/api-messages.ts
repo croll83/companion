@@ -217,16 +217,14 @@ export function createMessagesAPI(
     // so we inject them into the system prompt. Claude will output structured
     // ---TOOL_USE--- blocks that the bridge converts to native tool_use SSE events.
     //
-    // IMPORTANT: If the last message is a tool_result, this is a follow-up after
-    // tool execution. We still inject tool definitions (Claude needs context) but
-    // we disable tool_use parsing in the response — Claude MUST respond with text,
-    // not another tool call, to prevent infinite tool loops.
-    const lastIsToolResult = Array.isArray(lastMsgContent)
-      && (lastMsgContent as unknown as Record<string, unknown>[]).some((b) => b.type === "tool_result");
+    // OpenClaw manages the tool execution loop:
+    //   1. Bridge returns tool_use SSE blocks + stop_reason: "tool_use"
+    //   2. OpenClaw executes the tool and sends tool_result in next request
+    //   3. Bridge lets Claude make MORE tool_use calls if needed
+    //   4. OpenClaw decides when the loop ends (stop_reason: "end_turn")
+    // Loop protection is handled by OpenClaw (maxTurns) + SESSION_TIMEOUT_MS.
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-    // Allow tool_use parsing in response ONLY when tools exist AND last msg is NOT a tool_result.
-    // This prevents infinite loops: tool_result → tool_use → tool_result → ...
-    const allowToolUseInResponse = hasTools && !lastIsToolResult;
+    const allowToolUseInResponse = hasTools;
     if (hasTools) {
       const toolDefs = JSON.stringify(body.tools, null, 2);
       const toolInstruction = `
