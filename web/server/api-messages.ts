@@ -52,6 +52,39 @@ function extractTextContent(content: string | AnthropicContentBlock[]): string {
 }
 
 /**
+ * Extract content from the last message, handling ALL block types.
+ * Unlike extractTextContent (which only extracts text blocks), this also
+ * handles tool_result and tool_use blocks — formatting them as structured
+ * text that Claude can understand.
+ *
+ * This is needed because OpenClaw sends full message history. After a tool_use
+ * response, the next user message contains tool_result blocks (not text).
+ */
+function extractLastMessageContent(content: string | unknown[]): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const parts: string[] = [];
+  for (const block of content as Record<string, unknown>[]) {
+    if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    } else if (block.type === "tool_result") {
+      const resultContent = typeof block.content === "string"
+        ? block.content
+        : JSON.stringify(block.content);
+      parts.push(
+        `---TOOL_RESULT---\ntool_use_id: ${block.tool_use_id}\n${resultContent}\n---END_TOOL_RESULT---`,
+      );
+    } else if (block.type === "tool_use") {
+      parts.push(
+        `---TOOL_USE---\n${JSON.stringify({ id: block.id, name: block.name, input: block.input })}\n---END_TOOL_USE---`,
+      );
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
  * Build a combined system prompt with conversation history injected.
  * OpenClaw sends full messages[] history on every call, but Claude Code CLI
  * only accepts one user message at a time via WebSocket. We embed prior turns
@@ -62,7 +95,8 @@ function buildConversationContext(
   messages: AnthropicMessage[],
 ): { systemPrompt: string | undefined; lastUserMessage: string } {
   const lastMsg = messages[messages.length - 1];
-  const lastUserMessage = lastMsg ? extractTextContent(lastMsg.content) : "";
+  // Use extractLastMessageContent to handle ALL block types (text, tool_result, tool_use)
+  const lastUserMessage = lastMsg ? extractLastMessageContent(lastMsg.content) : "";
 
   // If there's only 1 message (or no prior turns), just return system + last message
   const priorMessages = messages.slice(0, -1);
@@ -161,6 +195,17 @@ export function createMessagesAPI(
         400,
       );
     }
+
+    // Debug: log incoming request shape to understand what openclaw sends
+    const lastMsgContent = messages[messages.length - 1]?.content;
+    const lastMsgTypes = Array.isArray(lastMsgContent)
+      ? (lastMsgContent as unknown as Record<string, unknown>[]).map((b) => b.type)
+      : typeof lastMsgContent;
+    console.log(
+      `[api-messages] incoming: ${messages.length} msgs, ` +
+      `tools: ${body.tools?.length ?? 0}, ` +
+      `last: role=${messages[messages.length - 1]?.role} types=${JSON.stringify(lastMsgTypes)}`,
+    );
 
     // Extract system prompt + conversation history.
     // OpenClaw sends full messages[] on every call. Claude Code CLI only accepts
