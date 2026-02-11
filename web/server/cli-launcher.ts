@@ -23,6 +23,8 @@ export interface SdkSessionInfo {
   repoRoot?: string;
   /** Branch this session is working on */
   branch?: string;
+  /** How this session was created: "dashboard" (browser UI) or "api" (/v1/messages) */
+  source?: "dashboard" | "api";
 }
 
 export interface LaunchOptions {
@@ -32,6 +34,8 @@ export interface LaunchOptions {
   claudeBinary?: string;
   allowedTools?: string[];
   env?: Record<string, string>;
+  /** How this session was created */
+  source?: "dashboard" | "api";
   /** Pre-resolved worktree info from the session creation flow */
   worktreeInfo?: {
     isWorktree: boolean;
@@ -119,6 +123,7 @@ export class CliLauncher {
       permissionMode: options.permissionMode,
       cwd,
       createdAt: Date.now(),
+      source: options.source ?? "dashboard",
     };
 
     // Store worktree metadata if provided

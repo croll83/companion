@@ -64,7 +64,7 @@ const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || "3", 10);
  *   - messages (required) — conversation messages
  *   - stream (required, must be true) — SSE streaming
  *   - model — model selector, forwarded to CLI via set_model
- *   - system — system prompt (logged, not directly usable by Claude Code)
+ *   - system — system prompt, sent via initialize(replace) to override CLI's built-in prompt
  *   - max_tokens, temperature, top_p, top_k — accepted & ignored (CLI controls these)
  *   - stop_sequences, metadata — accepted & ignored
  *
@@ -116,43 +116,35 @@ export function createMessagesAPI(
       ? (typeof body.system === "string" ? body.system : extractTextContent(body.system))
       : undefined;
 
-    // Find an active session that is NOT busy, or spawn a new one
-    const sessions = launcher.listSessions();
-    const activeSessions = sessions.filter(
-      (s) => s.state !== "exited" && !s.archived,
-    );
-    const freeSession = activeSessions.find(
-      (s) => !wsBridge.isBusy(s.sessionId),
+    // ── One-shot session: spawn a fresh CLI process for each request ──
+    // This mimics real LLM providers (stateless). Each request gets its own
+    // CLI process with its own system prompt. No session reuse, no state leak.
+
+    // Check concurrency limit (count only in-flight API sessions)
+    const inFlightApiSessions = launcher.listSessions().filter(
+      (s) => s.state !== "exited" && !s.archived && s.source === "api",
     );
 
-    let sessionId: string;
-
-    if (freeSession) {
-      sessionId = freeSession.sessionId;
-    } else if (activeSessions.length >= MAX_SESSIONS) {
-      // All sessions busy and at limit → reject
+    if (inFlightApiSessions.length >= MAX_SESSIONS) {
       return c.json(
-        { type: "error", error: { type: "overloaded_error", message: `All ${MAX_SESSIONS} sessions are busy. Try again later.` } },
+        { type: "error", error: { type: "overloaded_error", message: `All ${MAX_SESSIONS} API sessions are in-flight. Try again later.` } },
         429,
       );
-    } else {
-      // All busy but under limit → spawn a new CLI session
-      const cwd = process.env.CLAUDE_CWD || undefined;
-      const newSession = launcher.launch({ model, cwd });
-      sessionId = newSession.sessionId;
-      console.log(`[api-messages] All sessions busy, spawned new session ${sessionId} (${activeSessions.length + 1}/${MAX_SESSIONS})`);
     }
 
-    // Ensure the WsBridge has the session and mark it as busy
-    wsBridge.getOrCreateSession(sessionId);
-    wsBridge.markBusy(sessionId, true);
+    // Spawn a new CLI process for this request
+    const cwd = process.env.CLAUDE_CWD || undefined;
+    const newSession = launcher.launch({ model, cwd, source: "api" });
+    const sessionId = newSession.sessionId;
+    console.log(`[api-messages] Spawned one-shot session ${sessionId} (${inFlightApiSessions.length + 1}/${MAX_SESSIONS})`);
 
-    // Send initialize with systemPrompt in "replace" mode (overrides Claude Code's built-in agentic prompt → pure LLM)
-    if (systemText && !wsBridge.isInitialized(sessionId)) {
+    // Ensure the WsBridge has the session
+    wsBridge.getOrCreateSession(sessionId);
+
+    // Initialize with systemPrompt in "replace" mode (replaces Claude Code's built-in agentic prompt → pure LLM)
+    if (systemText) {
       console.log(`[api-messages] Sending systemPrompt/replace (${systemText.length} chars) for session ${sessionId}`);
       await wsBridge.initialize(sessionId, systemText, "replace");
-    } else if (systemText) {
-      console.log(`[api-messages] System prompt provided (${systemText.length} chars) but session already initialized, skipping`);
     }
 
     // Switch model if specified in the request (await CLI acknowledgment)
@@ -328,7 +320,10 @@ export function createMessagesAPI(
           const cleanup = () => {
             clearTimeout(sessionTimeout);
             emitter.off("cli_message", onMessage);
-            wsBridge.markBusy(sessionId, false);
+            // Kill the one-shot CLI process and clean up session
+            launcher.kill(sessionId).catch(() => {});
+            wsBridge.closeSession(sessionId);
+            launcher.removeSession(sessionId);
           };
 
           // Subscribe before sending the message
