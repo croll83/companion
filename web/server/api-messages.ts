@@ -47,6 +47,41 @@ function extractTextContent(content: string | AnthropicContentBlock[]): string {
     .join("\n");
 }
 
+/**
+ * Build a combined system prompt with conversation history injected.
+ * OpenClaw sends full messages[] history on every call, but Claude Code CLI
+ * only accepts one user message at a time via WebSocket. We embed prior turns
+ * in the system prompt so Claude has full multi-turn context.
+ */
+function buildConversationContext(
+  systemText: string | undefined,
+  messages: AnthropicMessage[],
+): { systemPrompt: string | undefined; lastUserMessage: string } {
+  const lastMsg = messages[messages.length - 1];
+  const lastUserMessage = lastMsg ? extractTextContent(lastMsg.content) : "";
+
+  // If there's only 1 message (or no prior turns), just return system + last message
+  const priorMessages = messages.slice(0, -1);
+  if (priorMessages.length === 0) {
+    return { systemPrompt: systemText, lastUserMessage };
+  }
+
+  // Format prior messages as conversation history
+  const historyLines = priorMessages.map((msg) => {
+    const role = msg.role === "assistant" ? "assistant" : "user";
+    const text = extractTextContent(msg.content);
+    return `[${role}]: ${text}`;
+  }).join("\n");
+
+  const historyBlock = `\n\n<conversation_history>\n${historyLines}\n</conversation_history>`;
+
+  const combinedPrompt = systemText
+    ? systemText + historyBlock
+    : historyBlock.trim();
+
+  return { systemPrompt: combinedPrompt, lastUserMessage };
+}
+
 /** Timeout (ms) for a session to produce a `result` message before we close the SSE. */
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -63,8 +98,8 @@ const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || "3", 10);
  * Supported Anthropic body fields:
  *   - messages (required) — conversation messages
  *   - stream (required, must be true) — SSE streaming
- *   - model — model selector, forwarded to CLI via set_model
- *   - system — system prompt, sent via initialize(replace) to override CLI's built-in prompt
+ *   - model — model selector, forwarded to CLI via --model flag
+ *   - system — system prompt, combined with conversation history and passed via --system-prompt
  *   - max_tokens, temperature, top_p, top_k — accepted & ignored (CLI controls these)
  *   - stop_sequences, metadata — accepted & ignored
  *
@@ -100,9 +135,15 @@ export function createMessagesAPI(
       );
     }
 
-    // Extract the last user message text (handles both string and content-block arrays)
-    const lastMsg = messages[messages.length - 1];
-    const lastMessageText = lastMsg ? extractTextContent(lastMsg.content) : "";
+    // Extract system prompt + conversation history.
+    // OpenClaw sends full messages[] on every call. Claude Code CLI only accepts
+    // one user message, so we embed prior turns in the system prompt.
+    const systemText = body.system
+      ? (typeof body.system === "string" ? body.system : extractTextContent(body.system))
+      : undefined;
+
+    const { systemPrompt: fullSystemPrompt, lastUserMessage: lastMessageText } =
+      buildConversationContext(systemText, messages);
 
     if (!lastMessageText) {
       return c.json(
@@ -110,11 +151,6 @@ export function createMessagesAPI(
         400,
       );
     }
-
-    // Extract system prompt text if provided
-    const systemText = body.system
-      ? (typeof body.system === "string" ? body.system : extractTextContent(body.system))
-      : undefined;
 
     // ── One-shot session: spawn a fresh CLI process for each request ──
     // This mimics real LLM providers (stateless). Each request gets its own
@@ -141,11 +177,11 @@ export function createMessagesAPI(
       model,
       cwd,
       source: "api",
-      tools: "",                     // disable all tools → no subagents, no file ops
-      systemPrompt: systemText,      // replace agentic prompt via CLI flag
+      tools: "",                      // disable all tools → no subagents, no file ops
+      systemPrompt: fullSystemPrompt, // system prompt + conversation history injected
     });
     const sessionId = newSession.sessionId;
-    console.log(`[api-messages] Spawned one-shot LLM session ${sessionId} (tools=none, system=${systemText?.length ?? 0} chars, ${inFlightApiSessions.length + 1}/${MAX_SESSIONS})`);
+    console.log(`[api-messages] one-shot ${sessionId} | ${messages.length - 1} prior turns | system ${fullSystemPrompt?.length ?? 0} chars | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
 
     // Ensure the WsBridge has the session entry for message routing
     wsBridge.getOrCreateSession(sessionId);
