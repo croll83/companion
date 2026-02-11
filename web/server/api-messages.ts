@@ -217,7 +217,17 @@ export function createMessagesAPI(
     // Tool fallback: Claude Code CLI can't accept custom tool definitions via API,
     // so we inject them into the system prompt. Claude will output structured
     // ---TOOL_USE--- blocks that the bridge converts to native tool_use SSE events.
+    //
+    // IMPORTANT: If the last message is a tool_result, this is a follow-up after
+    // tool execution. We still inject tool definitions (Claude needs context) but
+    // we disable tool_use parsing in the response — Claude MUST respond with text,
+    // not another tool call, to prevent infinite tool loops.
+    const lastIsToolResult = Array.isArray(lastMsgContent)
+      && (lastMsgContent as unknown as Record<string, unknown>[]).some((b) => b.type === "tool_result");
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+    // Allow tool_use parsing in response ONLY when tools exist AND last msg is NOT a tool_result.
+    // This prevents infinite loops: tool_result → tool_use → tool_result → ...
+    const allowToolUseInResponse = hasTools && !lastIsToolResult;
     if (hasTools) {
       const toolDefs = JSON.stringify(body.tools, null, 2);
       const toolInstruction = `
@@ -239,6 +249,7 @@ CRITICAL RULES:
 - The "id" must start with "toolu_" followed by a unique string
 - After outputting ---TOOL_USE---, STOP generating. Wait for the tool result.
 - You may output a short text message before the tool block to explain what you're doing
+- When you receive a ---TOOL_RESULT---, read the result and respond to the user in natural language. Do NOT call another tool unless absolutely necessary for a DIFFERENT purpose. NEVER re-call the same tool.
 </tool_definitions>`;
 
       systemText = systemText ? systemText + toolInstruction : toolInstruction;
@@ -416,8 +427,8 @@ CRITICAL RULES:
            * Splits into text and tool_use parts, emitting each as the appropriate SSE block.
            */
           const processTextBlock = (text: string) => {
-            if (!hasTools) {
-              // No tools in request — emit as plain text (fast path)
+            if (!allowToolUseInResponse) {
+              // No tools, or last msg was tool_result → emit as plain text (prevents loops)
               emitTextBlock(text);
               return;
             }
