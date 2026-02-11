@@ -381,6 +381,14 @@ CRITICAL RULES:
           let contentBlockStarted = false;
           let blockIndex = 0;
           let foundToolUse = false;
+          // When tools are present, we MUST parse the full assistant message to detect
+          // ---TOOL_USE--- markers. Stream events (token-by-token) can't be parsed for
+          // tool markers since they arrive in fragments. So when tools exist:
+          //   - Skip stream_event emissions (don't forward tokens to OpenClaw)
+          //   - Wait for the complete "assistant" message
+          //   - Parse it for tool_use markers → emit proper SSE blocks
+          // When no tools: stream_event tokens go through normally for real-time streaming.
+          let streamedViaAssistant = false;
 
           /** Emit a text content block via SSE */
           const emitTextBlock = (text: string) => {
@@ -459,19 +467,30 @@ CRITICAL RULES:
           const onMessage = (msg: CLIMessage) => {
             if (closed) { cleanup(); return; }
 
-            // assistant message — contains full content blocks
+            // assistant message — contains full content blocks.
+            // When tools are active, this is the PRIMARY emission path (stream_event is skipped).
+            // When no tools, this may duplicate text already streamed — skip if stream already emitted.
             if (msg.type === "assistant") {
               const assistantMsg = msg as CLIAssistantMessage;
-              for (const block of assistantMsg.message.content) {
-                if (block.type === "text") {
-                  processTextBlock(block.text);
+              if (hasTools) {
+                // TOOLS PATH: Parse complete text for ---TOOL_USE--- markers.
+                // Stream events were suppressed, so this is the only emission.
+                streamedViaAssistant = true;
+                for (const block of assistantMsg.message.content) {
+                  if (block.type === "text") {
+                    processTextBlock(block.text);
+                  }
+                  // tool_use blocks are internal to Claude Code — skip them
                 }
-                // tool_use blocks are internal to Claude Code — skip them
               }
+              // NO-TOOLS PATH: text was already streamed via stream_event — don't duplicate
             }
 
-            // stream_event — token-by-token streaming (when --verbose)
-            if (msg.type === "stream_event") {
+            // stream_event — token-by-token streaming
+            // ONLY used when NO tools are present. When tools exist, we need the complete
+            // text to parse ---TOOL_USE--- markers, so we skip streaming and wait for
+            // the "assistant" message instead.
+            if (msg.type === "stream_event" && !hasTools) {
               const streamMsg = msg as CLIStreamEventMessage;
               const event = streamMsg.event as Record<string, unknown>;
 
