@@ -147,10 +147,10 @@ export function createMessagesAPI(
     wsBridge.getOrCreateSession(sessionId);
     wsBridge.markBusy(sessionId, true);
 
-    // Send initialize with appendSystemPrompt (only works once per session, before first message)
+    // Send initialize with systemPrompt in "replace" mode (overrides Claude Code's built-in agentic prompt → pure LLM)
     if (systemText && !wsBridge.isInitialized(sessionId)) {
-      console.log(`[api-messages] Sending appendSystemPrompt (${systemText.length} chars) for session ${sessionId}`);
-      await wsBridge.initialize(sessionId, systemText);
+      console.log(`[api-messages] Sending systemPrompt/replace (${systemText.length} chars) for session ${sessionId}`);
+      await wsBridge.initialize(sessionId, systemText, "replace");
     } else if (systemText) {
       console.log(`[api-messages] System prompt provided (${systemText.length} chars) but session already initialized, skipping`);
     }

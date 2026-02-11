@@ -202,8 +202,12 @@ export class WsBridge {
     return true;
   }
 
-  /** Send `initialize` control_request with appendSystemPrompt (once per session, before first user message). */
-  async initialize(sessionId: string, appendSystemPrompt?: string): Promise<boolean> {
+  /**
+   * Send `initialize` control_request with system prompt (once per session, before first user message).
+   * @param mode - "replace" sends `systemPrompt` (replaces built-in prompt, LLM-only mode).
+   *               "append" sends `appendSystemPrompt` (adds to built-in prompt, keeps agentic tools).
+   */
+  async initialize(sessionId: string, prompt?: string, mode: "replace" | "append" = "append"): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     if (session.initialized) {
@@ -213,8 +217,12 @@ export class WsBridge {
 
     const requestId = randomUUID();
     const request: Record<string, unknown> = { subtype: "initialize" };
-    if (appendSystemPrompt) {
-      request.appendSystemPrompt = appendSystemPrompt;
+    if (prompt) {
+      if (mode === "replace") {
+        request.systemPrompt = prompt;
+      } else {
+        request.appendSystemPrompt = prompt;
+      }
     }
 
     const ndjson = JSON.stringify({
@@ -239,7 +247,7 @@ export class WsBridge {
           clearTimeout(timeout);
           session.emitter.off("cli_message", listener);
           session.initialized = true;
-          console.log(`[ws-bridge] Session ${sessionId} initialized with appendSystemPrompt (${appendSystemPrompt?.length ?? 0} chars)`);
+          console.log(`[ws-bridge] Session ${sessionId} initialized with ${mode === "replace" ? "systemPrompt" : "appendSystemPrompt"} (${prompt?.length ?? 0} chars)`);
           resolve(true);
         }
       };
