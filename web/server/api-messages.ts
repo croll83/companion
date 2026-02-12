@@ -276,12 +276,20 @@ export function createMessagesAPI(
     // force end_turn to prevent infinite loops. OpenClaw has only timeout-based
     // protection (600s), so this bridge-side limit is essential.
     const MAX_TOOL_TURNS = 10;
-    const toolTurnCount = messages.filter((m) => {
-      if (!Array.isArray(m.content)) return false;
-      return (m.content as unknown as Record<string, unknown>[]).some(
+    // Count consecutive tool turns from the END of the conversation.
+    // When the user sends a pure-text message (no tool_result), the chain resets.
+    // This way, old tool loops from previous interactions don't block new tool calls.
+    let toolTurnCount = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const content = messages[i].content;
+      if (!Array.isArray(content)) break; // string content = pure text → chain ends
+      const blocks = content as unknown as Record<string, unknown>[];
+      const hasToolBlock = blocks.some(
         (b) => b.type === "tool_use" || b.type === "tool_result",
       );
-    }).length;
+      if (!hasToolBlock) break; // only text blocks → chain ends
+      toolTurnCount++;
+    }
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
     const allowToolUseInResponse = hasTools && toolTurnCount < MAX_TOOL_TURNS;
 
@@ -388,7 +396,8 @@ CRITICAL RULES:
       systemPromptFile,
     });
     const sessionId = newSession.sessionId;
-    console.log(`[api-messages] one-shot ${sessionId} | ${messages.length - 1} prior turns | system ${fullSystemPrompt?.length ?? 0} chars | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
+    const effectivePriorTurns = Math.min(messages.length - 1, 20); // matches MAX_HISTORY_MESSAGES
+    console.log(`[api-messages] one-shot ${sessionId} | ${effectivePriorTurns} prior turns (${messages.length - 1} total) | system ${fullSystemPrompt?.length ?? 0} chars | toolChain=${toolTurnCount} | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
 
     // Ensure the WsBridge has the session entry for message routing
     wsBridge.getOrCreateSession(sessionId);
