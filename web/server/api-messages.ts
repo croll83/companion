@@ -136,7 +136,7 @@ function buildConversationContext(
   // Cap conversation history to prevent context overflow.
   // OpenClaw may send 100+ messages (especially after tool retry loops).
   // We keep only the most recent turns — enough for context, not enough to overflow.
-  const MAX_HISTORY_MESSAGES = 20;
+  const MAX_HISTORY_MESSAGES = 30;
   const MAX_TOOL_OUTPUT_CHARS = 2000;
   const cappedMessages = priorMessages.length > MAX_HISTORY_MESSAGES
     ? priorMessages.slice(-MAX_HISTORY_MESSAGES)
@@ -275,27 +275,32 @@ export function createMessagesAPI(
     // Safeguard: if conversation has too many tool turns (e.g. retry loop on errors),
     // force end_turn to prevent infinite loops. OpenClaw has only timeout-based
     // protection (600s), so this bridge-side limit is essential.
-    const MAX_TOOL_TURNS = 10;
-    // Count consecutive tool turns from the END of the conversation.
-    // When the user sends a pure-text message (no tool_result), the chain resets.
+    const MAX_TOOL_ROUNDS = 25;
+    // Count consecutive tool ROUNDS from the END of the conversation.
+    // A "round" = one assistant message with tool_use (not the user's tool_result reply).
+    // When the user sends a pure-text message (no tool blocks), the chain resets.
     // This way, old tool loops from previous interactions don't block new tool calls.
-    let toolTurnCount = 0;
+    let toolRoundCount = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
-      const content = messages[i].content;
+      const msg = messages[i];
+      const content = msg.content;
       if (!Array.isArray(content)) break; // string content = pure text → chain ends
       const blocks = content as unknown as Record<string, unknown>[];
       const hasToolBlock = blocks.some(
         (b) => b.type === "tool_use" || b.type === "tool_result",
       );
       if (!hasToolBlock) break; // only text blocks → chain ends
-      toolTurnCount++;
+      // Count only assistant messages with tool_use (not user messages with tool_result)
+      if (msg.role === "assistant" && blocks.some((b) => b.type === "tool_use")) {
+        toolRoundCount++;
+      }
     }
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-    const allowToolUseInResponse = hasTools && toolTurnCount < MAX_TOOL_TURNS;
+    const allowToolUseInResponse = hasTools && toolRoundCount < MAX_TOOL_ROUNDS;
 
-    if (toolTurnCount >= MAX_TOOL_TURNS) {
+    if (toolRoundCount >= MAX_TOOL_ROUNDS) {
       console.log(
-        `[api-messages] tool turn limit reached (${toolTurnCount}/${MAX_TOOL_TURNS}), forcing end_turn`,
+        `[api-messages] tool round limit reached (${toolRoundCount}/${MAX_TOOL_ROUNDS}), forcing end_turn`,
       );
     }
     if (hasTools) {
@@ -333,6 +338,14 @@ CRITICAL RULES:
 - The <conversation_history> may contain <prior_tool_call> and <prior_tool_output> tags — those are COMPLETED past actions. Do NOT repeat them. Use ---TOOL_USE--- format ONLY for NEW tool calls.
 - If you already received a result (shown as <prior_tool_output>), DO NOT call the same tool again. Use the existing result to respond.
 - If a tool returns an error, do NOT retry more than once. Instead, explain the issue to the user.
+
+EFFICIENCY RULES:
+- When asked to do something, use the tools DIRECTLY. Do NOT read documentation files first unless you truly don't know how to proceed.
+- For "exec" tool: just run the command. Don't read files to "understand" how exec works.
+- For "read" tool: just read the file directly. Don't explore the directory structure first.
+- Be CONCISE in your tool calls. One tool call should accomplish one clear action.
+- If you receive a tool result with the information the user asked for, RESPOND IMMEDIATELY with that information. Do NOT make additional tool calls unless strictly necessary.
+- Prefer fewer, more targeted tool calls over many exploratory ones.
 </tool_definitions>`;
 
       systemText = systemText ? systemText + toolInstruction : toolInstruction;
@@ -341,8 +354,8 @@ CRITICAL RULES:
     const { systemPrompt: fullSystemPrompt, lastUserMessage: rawLastMessage } =
       buildConversationContext(systemText, messages);
 
-    // When tool turn limit is reached, prepend an instruction to stop calling tools
-    const lastMessageText = toolTurnCount >= MAX_TOOL_TURNS
+    // When tool round limit is reached, prepend an instruction to stop calling tools
+    const lastMessageText = toolRoundCount >= MAX_TOOL_ROUNDS
       ? `IMPORTANT: Tool call limit reached. Do NOT call any more tools. Summarize what you know from the conversation history and respond to the user in natural language.\n\n${rawLastMessage}`
       : rawLastMessage;
 
@@ -397,7 +410,7 @@ CRITICAL RULES:
     });
     const sessionId = newSession.sessionId;
     const effectivePriorTurns = Math.min(messages.length - 1, 20); // matches MAX_HISTORY_MESSAGES
-    console.log(`[api-messages] one-shot ${sessionId} | ${effectivePriorTurns} prior turns (${messages.length - 1} total) | system ${fullSystemPrompt?.length ?? 0} chars | toolChain=${toolTurnCount} | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
+    console.log(`[api-messages] one-shot ${sessionId} | ${effectivePriorTurns} prior turns (${messages.length - 1} total) | system ${fullSystemPrompt?.length ?? 0} chars | toolRounds=${toolRoundCount}/${MAX_TOOL_ROUNDS} | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
 
     // Ensure the WsBridge has the session entry for message routing
     wsBridge.getOrCreateSession(sessionId);
