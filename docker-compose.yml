@@ -17,6 +17,8 @@ services:
       - claude-config:/home/bun/.claude
       # Mount openclaw workspace as working directory for Claude Code sessions
       - /home/jarvis/.openclaw/workspace:/workspace
+      # Built-in OpenClaw skills (read-only) — not in /workspace, needed for system prompt injection
+      - /usr/lib/node_modules/openclaw/skills:/openclaw-skills:ro
     restart: unless-stopped
 
 volumes:

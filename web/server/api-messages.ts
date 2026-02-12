@@ -51,10 +51,40 @@ let skillCache: { skills: SkillInfo[]; loadedAt: number } | null = null;
 const SKILL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
 
 /**
- * Load SKILL.md files from the workspace skills directory.
+ * Load the eligible skills allowlist from .eligible-skills.json.
+ * This file is generated on the host by running:
+ *   openclaw skills --json | python3 -c "..."
+ * and written to the workspace (mounted into the container).
+ *
+ * Returns null if no allowlist exists (= load ALL skills, no filtering).
+ * Returns a Set of skill names if the file exists.
+ */
+function loadEligibleSkillNames(): Set<string> | null {
+  const workspaceDir = process.env.CLAUDE_CWD || "/workspace";
+  const eligibleFile = join(workspaceDir, ".eligible-skills.json");
+  if (!existsSync(eligibleFile)) return null;
+
+  try {
+    const raw = readFileSync(eligibleFile, "utf-8");
+    const names = JSON.parse(raw);
+    if (Array.isArray(names)) {
+      return new Set(names as string[]);
+    }
+  } catch (err) {
+    console.log(`[api-messages] failed to read .eligible-skills.json: ${err}`);
+  }
+  return null;
+}
+
+/**
+ * Load SKILL.md files from workspace and built-in skill directories.
  * OpenClaw injects skill documentation into the system prompt for Gemini
  * (via formatSkillsForPrompt), but does NOT include them in body.system
  * when calling the bridge. We replicate this by reading from disk.
+ *
+ * If .eligible-skills.json exists in the workspace, only skills listed
+ * there are loaded (matching OpenClaw's "ready" status). Otherwise all
+ * skills with a SKILL.md are loaded.
  *
  * Skills are cached in memory for 5 minutes to avoid re-reading on every request.
  */
@@ -62,48 +92,84 @@ function loadSkills(): SkillInfo[] {
   if (skillCache && Date.now() - skillCache.loadedAt < SKILL_CACHE_TTL_MS) {
     return skillCache.skills;
   }
+
+  const eligibleNames = loadEligibleSkillNames();
+  const skillsByName = new Map<string, SkillInfo>();
+
+  // Scan multiple skill directories.
+  // Built-in skills are loaded first (lower priority), workspace skills override them.
+  const skillDirs: string[] = [];
+
+  // 1. Built-in OpenClaw skills (lower priority — loaded first, can be overridden)
+  const builtinDir = process.env.OPENCLAW_SKILLS_DIR || "/openclaw-skills";
+  if (existsSync(builtinDir)) skillDirs.push(builtinDir);
+
+  // 2. Workspace skills (higher priority — loaded second, overrides built-in)
   const workspaceDir = process.env.CLAUDE_CWD || "/workspace";
-  const skillsDir = join(workspaceDir, "skills");
-  if (!existsSync(skillsDir)) {
+  const wsSkillsDir = join(workspaceDir, "skills");
+  if (existsSync(wsSkillsDir)) skillDirs.push(wsSkillsDir);
+
+  if (skillDirs.length === 0) {
     skillCache = { skills: [], loadedAt: Date.now() };
     return [];
   }
 
-  const skills: SkillInfo[] = [];
-  for (const entry of readdirSync(skillsDir)) {
-    const skillDir = join(skillsDir, entry);
-    try {
-      if (!statSync(skillDir).isDirectory()) continue;
-    } catch { continue; }
-    const skillFile = join(skillDir, "SKILL.md");
-    if (!existsSync(skillFile)) continue;
+  let skipped = 0;
+  for (const skillsDir of skillDirs) {
+    for (const entry of readdirSync(skillsDir)) {
+      const skillDir = join(skillsDir, entry);
+      try {
+        if (!statSync(skillDir).isDirectory()) continue;
+      } catch { continue; }
+      const skillFile = join(skillDir, "SKILL.md");
+      if (!existsSync(skillFile)) continue;
 
-    try {
-      const raw = readFileSync(skillFile, "utf-8");
-      // Parse YAML frontmatter: ---\n...\n---\n<body>
-      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-      if (!fmMatch) {
-        // No frontmatter — use entire file as content
-        skills.push({ name: entry, description: "", content: raw.trim() });
+      // If we have an eligible allowlist, skip skills not in it.
+      // Check both the directory name and (later) the frontmatter name.
+      if (eligibleNames && !eligibleNames.has(entry)) {
+        skipped++;
         continue;
       }
 
-      const frontmatter = fmMatch[1];
-      const body = fmMatch[2].trim();
-      const nameMatch = frontmatter.match(/^name:\s*(.+)$/m);
-      const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
+      try {
+        const raw = readFileSync(skillFile, "utf-8");
+        // Parse YAML frontmatter: ---\n...\n---\n<body>
+        const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+        let name: string, description: string, body: string;
+        if (!fmMatch) {
+          // No frontmatter — use entire file as content
+          name = entry;
+          description = "";
+          body = raw.trim();
+        } else {
+          const frontmatter = fmMatch[1];
+          body = fmMatch[2].trim();
+          name = frontmatter.match(/^name:\s*(.+)$/m)?.[1]?.trim() || entry;
+          description = frontmatter.match(/^description:\s*(.+)$/m)?.[1]?.trim() || "";
+        }
 
-      skills.push({
-        name: nameMatch?.[1]?.trim() || entry,
-        description: descMatch?.[1]?.trim() || "",
-        content: body,
-      });
-    } catch (err) {
-      console.log(`[api-messages] failed to read skill ${entry}: ${err}`);
+        // Double-check: if the frontmatter name differs from the dir name,
+        // verify the frontmatter name is also eligible
+        if (eligibleNames && !eligibleNames.has(name) && !eligibleNames.has(entry)) {
+          skipped++;
+          continue;
+        }
+
+        // Map by name — later entries (workspace) override earlier (built-in)
+        skillsByName.set(name, { name, description, content: body });
+      } catch (err) {
+        console.log(`[api-messages] failed to read skill ${entry}: ${err}`);
+      }
     }
   }
 
-  console.log(`[api-messages] loaded ${skills.length} skills: ${skills.map(s => s.name).join(", ")}`);
+  const skills = Array.from(skillsByName.values());
+  const filterMsg = eligibleNames
+    ? ` (filtered by .eligible-skills.json: ${eligibleNames.size} eligible, ${skipped} skipped)`
+    : " (no filter — loading all)";
+  console.log(
+    `[api-messages] loaded ${skills.length} skills from ${skillDirs.length} dirs${filterMsg}: ${skills.map((s) => s.name).join(", ")}`,
+  );
   skillCache = { skills, loadedAt: Date.now() };
   return skills;
 }
@@ -420,12 +486,32 @@ EFFICIENCY RULES:
     // ── Inject skill documentation into system prompt ──
     // OpenClaw injects skills for Gemini via formatSkillsForPrompt(), but does NOT
     // include them in body.system when calling the bridge. We load SKILL.md files
-    // from the workspace and inject them so Claude knows how to use skills directly.
+    // from the workspace (+ built-in) and inject them so Claude knows how to use skills directly.
+    const MAX_SKILL_CHARS = parseInt(process.env.MAX_SKILL_CHARS || "60000", 10);
     const skills = loadSkills();
     if (skills.length > 0) {
-      const skillBlocks = skills.map((s) =>
+      // Build skill blocks, respecting the char cap
+      const allBlocks = skills.map((s) =>
         `## Skill: ${s.name}\n${s.description}\n\n${s.content}`,
-      ).join("\n\n---\n\n");
+      );
+      let skillBlocks: string;
+      const fullText = allBlocks.join("\n\n---\n\n");
+      if (fullText.length <= MAX_SKILL_CHARS) {
+        skillBlocks = fullText;
+      } else {
+        // Truncate: keep skills that fit within the cap
+        let accumulated = 0;
+        const kept: string[] = [];
+        for (const block of allBlocks) {
+          if (accumulated + block.length + 7 > MAX_SKILL_CHARS) break; // +7 for "\n\n---\n\n"
+          kept.push(block);
+          accumulated += block.length + 7;
+        }
+        skillBlocks = kept.join("\n\n---\n\n");
+        console.log(
+          `[api-messages] skills truncated: ${allBlocks.length} → ${kept.length} (${fullText.length} > ${MAX_SKILL_CHARS} cap)`,
+        );
+      }
 
       const skillSection = `\n\n<workspace_skills>
 The following skills are available in your workspace. Use them DIRECTLY — do NOT read SKILL.md files, the full documentation is already provided here.
