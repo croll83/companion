@@ -489,9 +489,14 @@ CRITICAL RULES:
             blockIndex++;
           };
 
-          /** Emit a tool_use content block via SSE */
+          /** Emit a tool_use content block via SSE.
+           *  Per Anthropic SSE spec, the input is NOT read from content_block_start.
+           *  Instead, it must be streamed via input_json_delta events in content_block_delta.
+           *  Without this, OpenClaw/pi-ai receives empty input {} → tool validation fails.
+           */
           const emitToolUseBlock = (toolCall: { id?: string; name: string; input?: unknown }) => {
             const toolId = toolCall.id || `toolu_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+            // 1. content_block_start — input is empty (SDK ignores it here)
             sendSSE("content_block_start", {
               type: "content_block_start",
               index: blockIndex,
@@ -499,9 +504,20 @@ CRITICAL RULES:
                 type: "tool_use",
                 id: toolId,
                 name: toolCall.name,
-                input: toolCall.input || {},
+                input: {},
               },
             });
+            // 2. input_json_delta — THIS is where the SDK reads the input from
+            const inputJson = JSON.stringify(toolCall.input || {});
+            sendSSE("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: {
+                type: "input_json_delta",
+                partial_json: inputJson,
+              },
+            });
+            // 3. content_block_stop
             sendSSE("content_block_stop", {
               type: "content_block_stop",
               index: blockIndex,
