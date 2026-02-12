@@ -525,25 +525,50 @@ CRITICAL RULES:
             for (const part of parts) {
               const toolMatch = part.match(/^---TOOL_USE---\s*\n?([\s\S]*?)\n?\s*---END_TOOL_USE---$/);
               if (toolMatch) {
-                if (allowToolUseInResponse) {
+                // Only emit ONE tool_use per response. After the first, strip the rest.
+                // OpenClaw manages the tool loop — it calls the bridge N times, not N tools at once.
+                if (allowToolUseInResponse && !foundToolUse) {
                   try {
                     const toolCall = JSON.parse(toolMatch[1].trim());
                     if (toolCall.name) {
-                      console.log(`[api-messages] parsed tool_use: ${toolCall.name}`);
+                      // ── Normalize input: fix common format errors ──
+                      // Claude may put params at the wrong level or use wrong names
+                      if (!toolCall.input || typeof toolCall.input !== "object") {
+                        // Params might be at top level instead of inside `input`
+                        const { id, name, ...rest } = toolCall;
+                        if (Object.keys(rest).length > 0) {
+                          toolCall.input = typeof toolCall.input === "string"
+                            ? { command: toolCall.input }
+                            : rest;
+                        } else {
+                          toolCall.input = {};
+                        }
+                      }
+                      // Normalize: "cmd" → "command" for exec tool
+                      if (toolCall.name === "exec" && !toolCall.input.command && toolCall.input.cmd) {
+                        toolCall.input.command = toolCall.input.cmd;
+                        delete toolCall.input.cmd;
+                      }
+                      console.log(`[api-messages] parsed tool_use: ${toolCall.name} | ${JSON.stringify(toolCall).slice(0, 500)}`);
                       emitToolUseBlock(toolCall);
                       continue;
                     }
                   } catch {
                     console.log(`[api-messages] tool_use JSON parse failed, stripping`);
                   }
+                } else if (foundToolUse) {
+                  console.log(`[api-messages] extra tool_use after first, stripping`);
                 }
-                // Tools not allowed or parse failed → STRIP markers, don't show to user
-                console.log(`[api-messages] stripping tool_use markers (allowToolUse=${allowToolUseInResponse})`);
+                // Tools not allowed, already emitted one, or parse failed → STRIP
+                if (!foundToolUse) {
+                  console.log(`[api-messages] stripping tool_use markers (allowToolUse=${allowToolUseInResponse})`);
+                }
                 continue;
               }
-              // Regular text (skip empty/whitespace-only parts)
+              // Regular text — only emit if we haven't found a tool_use yet.
+              // After tool_use, any trailing text (apologies, retries) is noise.
               const trimmed = part.trim();
-              if (trimmed) {
+              if (trimmed && !foundToolUse) {
                 emitTextBlock(trimmed);
               }
             }
