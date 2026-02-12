@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { randomUUID } from "node:crypto";
-import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { writeFileSync, mkdirSync, unlinkSync, readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { WsBridge } from "./ws-bridge.js";
@@ -37,6 +37,75 @@ interface AnthropicMessagesBody {
   stop_sequences?: string[];
   metadata?: Record<string, unknown>;
   tools?: unknown[];
+}
+
+// ─── Skill loader ────────────────────────────────────────────────────────────
+
+interface SkillInfo {
+  name: string;
+  description: string;
+  content: string; // full SKILL.md body (after YAML frontmatter)
+}
+
+let skillCache: { skills: SkillInfo[]; loadedAt: number } | null = null;
+const SKILL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
+
+/**
+ * Load SKILL.md files from the workspace skills directory.
+ * OpenClaw injects skill documentation into the system prompt for Gemini
+ * (via formatSkillsForPrompt), but does NOT include them in body.system
+ * when calling the bridge. We replicate this by reading from disk.
+ *
+ * Skills are cached in memory for 5 minutes to avoid re-reading on every request.
+ */
+function loadSkills(): SkillInfo[] {
+  if (skillCache && Date.now() - skillCache.loadedAt < SKILL_CACHE_TTL_MS) {
+    return skillCache.skills;
+  }
+  const workspaceDir = process.env.CLAUDE_CWD || "/workspace";
+  const skillsDir = join(workspaceDir, "skills");
+  if (!existsSync(skillsDir)) {
+    skillCache = { skills: [], loadedAt: Date.now() };
+    return [];
+  }
+
+  const skills: SkillInfo[] = [];
+  for (const entry of readdirSync(skillsDir)) {
+    const skillDir = join(skillsDir, entry);
+    try {
+      if (!statSync(skillDir).isDirectory()) continue;
+    } catch { continue; }
+    const skillFile = join(skillDir, "SKILL.md");
+    if (!existsSync(skillFile)) continue;
+
+    try {
+      const raw = readFileSync(skillFile, "utf-8");
+      // Parse YAML frontmatter: ---\n...\n---\n<body>
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+      if (!fmMatch) {
+        // No frontmatter — use entire file as content
+        skills.push({ name: entry, description: "", content: raw.trim() });
+        continue;
+      }
+
+      const frontmatter = fmMatch[1];
+      const body = fmMatch[2].trim();
+      const nameMatch = frontmatter.match(/^name:\s*(.+)$/m);
+      const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
+
+      skills.push({
+        name: nameMatch?.[1]?.trim() || entry,
+        description: descMatch?.[1]?.trim() || "",
+        content: body,
+      });
+    } catch (err) {
+      console.log(`[api-messages] failed to read skill ${entry}: ${err}`);
+    }
+  }
+
+  console.log(`[api-messages] loaded ${skills.length} skills: ${skills.map(s => s.name).join(", ")}`);
+  skillCache = { skills, loadedAt: Date.now() };
+  return skills;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -340,15 +409,32 @@ CRITICAL RULES:
 - If a tool returns an error, do NOT retry more than once. Instead, explain the issue to the user.
 
 EFFICIENCY RULES:
-- When asked to do something, use the tools DIRECTLY. Do NOT read documentation files first unless you truly don't know how to proceed.
-- For "exec" tool: just run the command. Don't read files to "understand" how exec works.
-- For "read" tool: just read the file directly. Don't explore the directory structure first.
-- Be CONCISE in your tool calls. One tool call should accomplish one clear action.
-- If you receive a tool result with the information the user asked for, RESPOND IMMEDIATELY with that information. Do NOT make additional tool calls unless strictly necessary.
+- Skill documentation is already provided in your system prompt under <workspace_skills>. Do NOT use the "read" tool to read SKILL.md files — use the documentation already available to you.
+- If you receive a tool result with the information the user asked for, RESPOND IMMEDIATELY. Do NOT make extra tool calls.
 - Prefer fewer, more targeted tool calls over many exploratory ones.
 </tool_definitions>`;
 
       systemText = systemText ? systemText + toolInstruction : toolInstruction;
+    }
+
+    // ── Inject skill documentation into system prompt ──
+    // OpenClaw injects skills for Gemini via formatSkillsForPrompt(), but does NOT
+    // include them in body.system when calling the bridge. We load SKILL.md files
+    // from the workspace and inject them so Claude knows how to use skills directly.
+    const skills = loadSkills();
+    if (skills.length > 0) {
+      const skillBlocks = skills.map((s) =>
+        `## Skill: ${s.name}\n${s.description}\n\n${s.content}`,
+      ).join("\n\n---\n\n");
+
+      const skillSection = `\n\n<workspace_skills>
+The following skills are available in your workspace. Use them DIRECTLY — do NOT read SKILL.md files, the full documentation is already provided here.
+
+${skillBlocks}
+</workspace_skills>`;
+
+      systemText = systemText ? systemText + skillSection : skillSection;
+      console.log(`[api-messages] injected ${skills.length} skills (${skillBlocks.length} chars)`);
     }
 
     const { systemPrompt: fullSystemPrompt, lastUserMessage: rawLastMessage } =
@@ -409,7 +495,7 @@ EFFICIENCY RULES:
       systemPromptFile,
     });
     const sessionId = newSession.sessionId;
-    const effectivePriorTurns = Math.min(messages.length - 1, 20); // matches MAX_HISTORY_MESSAGES
+    const effectivePriorTurns = Math.min(messages.length - 1, 30); // matches MAX_HISTORY_MESSAGES
     console.log(`[api-messages] one-shot ${sessionId} | ${effectivePriorTurns} prior turns (${messages.length - 1} total) | system ${fullSystemPrompt?.length ?? 0} chars | toolRounds=${toolRoundCount}/${MAX_TOOL_ROUNDS} | ${inFlightApiSessions.length + 1}/${MAX_SESSIONS}`);
 
     // Ensure the WsBridge has the session entry for message routing
