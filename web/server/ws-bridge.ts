@@ -721,7 +721,7 @@ export class WsBridge {
   }
 
   /** Cancel a pending disconnect debounce timer for a session, if any. */
-  private cancelDisconnectTimer(sessionId: string): boolean {
+  cancelDisconnectTimer(sessionId: string): boolean {
     const timer = this.disconnectTimers.get(sessionId);
     if (!timer) return false;
     clearTimeout(timer);
@@ -839,6 +839,10 @@ export class WsBridge {
         this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
       }
       session.pendingPermissions.clear();
+
+      // Request auto-relaunch regardless of browser state — the proactive
+      // keepalive in the orchestrator ensures headless sessions stay alive.
+      companionBus.emit("session:relaunch-needed", { sessionId });
     }, WsBridge.DISCONNECT_DEBOUNCE_MS));
   }
 

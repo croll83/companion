@@ -31,6 +31,9 @@ const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
 
+// Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
+const KEEPALIVE_BASE_DELAY_MS = 3_000;
+
 const VSCODE_EDITOR_CONTAINER_PORT = 13337;
 const CODEX_APP_SERVER_CONTAINER_PORT = Number(
   process.env.COMPANION_CODEX_CONTAINER_WS_PORT || "4502",
@@ -127,6 +130,12 @@ export class SessionOrchestrator {
   // Prevents repeated "keeps crashing" warnings for dead sessions.
   private relaunchExhaustedNotified = new Set<string>();
 
+  // Tracks sessions intentionally killed (idle-kill, manual delete/archive)
+  // so the proactive keepalive doesn't relaunch them.
+  private intentionalKills = new Set<string>();
+  // Timers for proactive keepalive relaunches (for cancellation on delete)
+  private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   // Idempotency guard for initialize()
   private _initialized = false;
 
@@ -179,6 +188,14 @@ export class SessionOrchestrator {
       }
     });
 
+    // Proactive keepalive: auto-relaunch crashed CLI processes even without
+    // a browser connected. This ensures long-running sessions (agents, cron
+    // jobs) stay alive. Intentional kills (idle-kill, manual delete/archive)
+    // are excluded via the intentionalKills set.
+    companionBus.on("session:exited", ({ sessionId }) => {
+      this.scheduleProactiveRelaunch(sessionId);
+    });
+
     // Start watching PRs when git info is resolved
     companionBus.on("session:git-info-ready", ({ sessionId, cwd, branch }) => {
       this.prPoller.watch(sessionId, cwd, branch);
@@ -196,6 +213,10 @@ export class SessionOrchestrator {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
       log.info("orchestrator", "Idle-killing session (preserving container)", { sessionId, reason: "no browsers, no activity" });
+      this.intentionalKills.add(sessionId);
+      // Cancel the CLI disconnect debounce timer so it doesn't fire
+      // session:relaunch-needed after we intentionally kill the process.
+      this.wsBridge.cancelDisconnectTimer(sessionId);
       await this.launcher.kill(sessionId);
       // Clear relaunch counters so the session gets a fresh budget when the user
       // returns. Idle-kill is intentional cleanup, not a crash — the session
@@ -666,6 +687,9 @@ export class SessionOrchestrator {
       }
     }
 
+    this.intentionalKills.add(sessionId);
+    this.cancelKeepaliveTimer(sessionId);
+    this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
     containerManager.removeContainer(sessionId);
     this.prPoller.unwatch(sessionId);
@@ -680,6 +704,9 @@ export class SessionOrchestrator {
   // ── Delete ─────────────────────────────────────────────────────────────────
 
   async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
+    this.intentionalKills.add(sessionId);
+    this.cancelKeepaliveTimer(sessionId);
+    this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
     containerManager.removeContainer(sessionId);
     const worktreeResult = this.cleanupWorktree(sessionId, true);
@@ -690,6 +717,7 @@ export class SessionOrchestrator {
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
+    this.intentionalKills.delete(sessionId);
     return { ok: true, worktree: worktreeResult };
   }
 
@@ -799,6 +827,10 @@ export class SessionOrchestrator {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
+          // Clear intentionalKills so future crashes can use proactive keepalive.
+          // After a successful relaunch, the session is alive again — any prior
+          // idle-kill intent no longer applies.
+          this.intentionalKills.delete(sessionId);
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
@@ -806,6 +838,70 @@ export class SessionOrchestrator {
       }
     } else {
       this.relaunchingSet.delete(sessionId);
+    }
+  }
+
+  // ── Private: Proactive keepalive ────────────────────────────────────────────
+
+  /**
+   * Schedules a proactive relaunch of a crashed CLI process, regardless of
+   * whether any browsers are connected. Uses exponential backoff (3s, 6s, 12s)
+   * based on the auto-relaunch attempt count.
+   *
+   * Skips relaunch for:
+   * - Intentional kills (idle-kill, manual delete/archive)
+   * - Archived sessions
+   * - Sessions that have exhausted their relaunch budget
+   */
+  private scheduleProactiveRelaunch(sessionId: string): void {
+    // Skip if this was an intentional kill. Use has() instead of delete() so
+    // the guard is preserved for handleAutoRelaunch (debounce path fires later).
+    if (this.intentionalKills.has(sessionId)) return;
+
+    const info = this.launcher.getSession(sessionId);
+    if (!info || info.archived) return;
+
+    // Skip if already at relaunch limit
+    if (this.relaunchExhaustedNotified.has(sessionId)) return;
+
+    // Skip if a relaunch is already in progress (e.g. triggered by browser reconnect)
+    if (this.relaunchingSet.has(sessionId)) return;
+
+    // Exponential backoff: 3s → 6s → 12s based on attempt count
+    const attempt = this.autoRelaunchCounts.get(sessionId) ?? 0;
+    const delay = KEEPALIVE_BASE_DELAY_MS * Math.pow(2, attempt);
+
+    log.info("orchestrator", "Scheduling proactive keepalive relaunch", {
+      sessionId,
+      attempt: attempt + 1,
+      maxAttempts: MAX_AUTO_RELAUNCHES,
+      delayMs: delay,
+    });
+
+    // Cancel any existing keepalive timer for this session
+    this.cancelKeepaliveTimer(sessionId);
+
+    const timer = setTimeout(async () => {
+      this.keepaliveTimers.delete(sessionId);
+
+      // Re-check conditions — state may have changed during the delay
+      const freshInfo = this.launcher.getSession(sessionId);
+      if (!freshInfo || freshInfo.archived) return;
+      if (freshInfo.state === "connected" || freshInfo.state === "running") return;
+
+      // Delegate to the existing auto-relaunch mechanism which handles
+      // budget, PID checks, state transitions, and cooldowns.
+      await this.handleAutoRelaunch(sessionId);
+    }, delay);
+
+    this.keepaliveTimers.set(sessionId, timer);
+  }
+
+  private cancelKeepaliveTimer(sessionId: string): void {
+    const timer = this.keepaliveTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.keepaliveTimers.delete(sessionId);
     }
   }
 
