@@ -466,10 +466,16 @@ export class WsBridge {
         } else {
           session.stateMachine.transition("ready", "compaction_ended");
         }
-        // Claude status messages may include permissionMode (not in the typed interface)
+        // Claude status messages may include permissionMode (not in the typed interface).
+        // When the CLI changes mode autonomously (e.g. after ExitPlanMode approval),
+        // we must broadcast the update so browsers sync their UI (plan toggle, etc.).
         const permMode = (msg as unknown as { permissionMode?: string }).permissionMode;
-        if (permMode) {
+        if (permMode && permMode !== session.state.permissionMode) {
           session.state.permissionMode = permMode;
+          this.broadcastToBrowsers(session, {
+            type: "session_update",
+            session: { permissionMode: permMode },
+          });
         }
         this.persistSession(session);
       }
