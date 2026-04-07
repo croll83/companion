@@ -1,4 +1,4 @@
-import { useState, useMemo, type ComponentProps } from "react";
+import { useState, useMemo, useCallback, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
@@ -87,19 +87,27 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
 
   const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
 
+  const plainText = useMemo(() => getMessagePlainText(message), [message]);
+
   if (blocks.length === 0 && message.content) {
     return (
-      <div className="flex items-start gap-3">
+      <div className="group/msg flex items-start gap-3 relative">
         <AssistantAvatar />
         <div className="flex-1 min-w-0">
           <MarkdownContent text={message.content} />
         </div>
+        {message.content && (
+          <CopyButton
+            text={message.content}
+            className="opacity-0 group-hover/msg:opacity-100 absolute top-0 right-0 w-7 h-7 text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+          />
+        )}
       </div>
     );
   }
 
   return (
-    <div className="flex items-start gap-3">
+    <div className="group/msg flex items-start gap-3 relative">
       <AssistantAvatar />
       <div className="flex-1 min-w-0 space-y-3">
         {grouped.map((group, i) => {
@@ -115,8 +123,53 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           return <ToolGroupBlock key={i} name={group.name} items={group.items} />;
         })}
       </div>
+      {plainText && (
+        <CopyButton
+          text={plainText}
+          className="opacity-0 group-hover/msg:opacity-100 absolute top-0 right-0 w-7 h-7 text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+        />
+      )}
     </div>
   );
+}
+
+function CopyButton({ text, className = "" }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`flex items-center justify-center rounded-md transition-all cursor-pointer ${className}`}
+      title="Copy"
+    >
+      {copied ? (
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5 text-green-500">
+          <path d="M3 8.5l3 3 7-7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+          <rect x="5" y="5" width="8" height="8" rx="1.5" />
+          <path d="M3 11V3.5A1.5 1.5 0 014.5 2H11" strokeLinecap="round" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+function getMessagePlainText(message: ChatMessage): string {
+  const blocks = message.contentBlocks || [];
+  if (blocks.length === 0) return message.content || "";
+  return blocks
+    .filter((b) => b.type === "text")
+    .map((b) => (b as { text: string }).text)
+    .join("\n\n");
 }
 
 function AssistantAvatar() {
@@ -182,13 +235,20 @@ function MarkdownContent({ text }: { text: string }) {
 
             if (isBlock) {
               const lang = match?.[1] || "";
+              const codeText = typeof children === "string" ? children : String(children ?? "").replace(/\n$/, "");
               return (
-                <div className="my-2 rounded-lg overflow-hidden border border-cc-border">
-                  {lang && (
-                    <div className="px-3 py-1.5 bg-cc-code-bg/80 border-b border-cc-border text-[10px] text-cc-muted font-mono-code uppercase tracking-wider">
-                      {lang}
-                    </div>
-                  )}
+                <div className="group/code my-2 rounded-lg overflow-hidden border border-cc-border relative">
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-cc-code-bg/80 border-b border-cc-border">
+                    {lang ? (
+                      <span className="text-[10px] text-cc-muted font-mono-code uppercase tracking-wider">{lang}</span>
+                    ) : (
+                      <span />
+                    )}
+                    <CopyButton
+                      text={codeText}
+                      className="opacity-0 group-hover/code:opacity-100 w-6 h-6 text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+                    />
+                  </div>
                   <pre className="px-3 py-2.5 bg-cc-code-bg text-cc-code-fg text-[13px] font-mono-code leading-relaxed overflow-x-auto">
                     <code>{children}</code>
                   </pre>

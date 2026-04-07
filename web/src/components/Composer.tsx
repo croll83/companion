@@ -135,6 +135,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
     textareaRef.current?.focus();
   }
 
+  const isMobile = typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
   function handleKeyDown(e: React.KeyboardEvent) {
     // Slash menu navigation
     if (slashMenuOpen && filteredCommands.length > 0) {
@@ -170,9 +172,20 @@ export function Composer({ sessionId }: { sessionId: string }) {
       toggleMode();
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+
+    if (e.key === "Enter") {
+      if (isMobile) {
+        // Mobile: Enter sends, Shift+Enter for newline
+        if (e.shiftKey) return; // let default newline happen
+        e.preventDefault();
+        handleSend();
+      } else {
+        // Desktop: Enter sends, Shift+Enter for newline (unchanged)
+        if (!e.shiftKey) {
+          e.preventDefault();
+          handleSend();
+        }
+      }
     }
   }
 
