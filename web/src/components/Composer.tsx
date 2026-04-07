@@ -5,6 +5,10 @@ import { api } from "../api.js";
 
 let idCounter = 0;
 
+const isMobile = () =>
+  typeof navigator !== "undefined" &&
+  (navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
+
 interface ImageAttachment {
   name: string;
   base64: string;
@@ -170,9 +174,17 @@ export function Composer({ sessionId }: { sessionId: string }) {
       toggleMode();
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    if (e.key === "Enter") {
+      if (isMobile()) {
+        // Mobile: Enter = newline (natural behavior), only send via button
+        // No preventDefault — let the textarea insert the newline
+        return;
+      }
+      // Desktop: Enter = send, Shift+Enter = newline
+      if (!e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
     }
   }
 
