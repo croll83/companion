@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
+import { CopyButton } from "./CopyButton.js";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.role === "system") {
@@ -82,24 +83,45 @@ function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
   return groups;
 }
 
+function getMessageText(message: ChatMessage): string {
+  if (message.content) return message.content;
+  const blocks = message.contentBlocks || [];
+  return blocks
+    .map((b) => {
+      if (b.type === "text") return b.text;
+      if (b.type === "thinking") return b.thinking;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function AssistantMessage({ message }: { message: ChatMessage }) {
   const blocks = message.contentBlocks || [];
 
   const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
+  const fullText = useMemo(() => getMessageText(message), [message]);
 
   if (blocks.length === 0 && message.content) {
     return (
-      <div className="flex items-start gap-3">
+      <div className="group/msg flex items-start gap-3">
         <AssistantAvatar />
         <div className="flex-1 min-w-0">
           <MarkdownContent text={message.content} />
         </div>
+        {fullText && (
+          <CopyButton
+            text={fullText}
+            size="sm"
+            className="opacity-0 group-hover/msg:opacity-100 transition-opacity shrink-0 mt-1"
+          />
+        )}
       </div>
     );
   }
 
   return (
-    <div className="flex items-start gap-3">
+    <div className="group/msg flex items-start gap-3">
       <AssistantAvatar />
       <div className="flex-1 min-w-0 space-y-3">
         {grouped.map((group, i) => {
@@ -115,6 +137,13 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           return <ToolGroupBlock key={i} name={group.name} items={group.items} />;
         })}
       </div>
+      {fullText && (
+        <CopyButton
+          text={fullText}
+          size="sm"
+          className="opacity-0 group-hover/msg:opacity-100 transition-opacity shrink-0 mt-1"
+        />
+      )}
     </div>
   );
 }
@@ -182,13 +211,15 @@ function MarkdownContent({ text }: { text: string }) {
 
             if (isBlock) {
               const lang = match?.[1] || "";
+              const codeText = typeof children === "string" ? children.replace(/\n$/, "") : String(children ?? "").replace(/\n$/, "");
               return (
-                <div className="my-2 rounded-lg overflow-hidden border border-cc-border">
-                  {lang && (
-                    <div className="px-3 py-1.5 bg-cc-code-bg/80 border-b border-cc-border text-[10px] text-cc-muted font-mono-code uppercase tracking-wider">
-                      {lang}
-                    </div>
-                  )}
+                <div className="my-2 rounded-lg overflow-hidden border border-cc-border group/code">
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-cc-code-bg/80 border-b border-cc-border">
+                    <span className="text-[10px] text-cc-muted font-mono-code uppercase tracking-wider">
+                      {lang || "code"}
+                    </span>
+                    <CopyButton text={codeText} size="sm" />
+                  </div>
                   <pre className="px-3 py-2.5 bg-cc-code-bg text-cc-code-fg text-[13px] font-mono-code leading-relaxed overflow-x-auto">
                     <code>{children}</code>
                   </pre>
