@@ -15,14 +15,15 @@ export function CopyButton({ text, className = '', size = 'sm', label }: CopyBut
       await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
+    } catch {
       // Fallback for browsers without clipboard API
       const textArea = document.createElement('textarea');
       textArea.value = text;
       document.body.appendChild(textArea);
       textArea.select();
-      document.execCommand('copy');
+      const ok = document.execCommand('copy');
       document.body.removeChild(textArea);
+      if (!ok) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
