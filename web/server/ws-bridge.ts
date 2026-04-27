@@ -652,9 +652,10 @@ export class WsBridge {
         this.persistSession(session);
         this.broadcastToBrowsers(session, { type: "cli_disconnected" });
 
-        // Request auto-relaunch regardless of browser state — proactive
-        // keepalive in the orchestrator ensures headless sessions stay alive.
-        companionBus.emit("session:relaunch-needed", { sessionId });
+        // Relaunch only if a browser is watching this session.
+        if (session.browserSockets.size > 0) {
+          companionBus.emit("session:relaunch-needed", { sessionId });
+        }
       }, WsBridge.CODEX_DISCONNECT_DEBOUNCE_MS));
     });
 
@@ -864,9 +865,10 @@ export class WsBridge {
       }
       session.pendingPermissions.clear();
 
-      // Request auto-relaunch regardless of browser state — the proactive
-      // keepalive in the orchestrator ensures headless sessions stay alive.
-      companionBus.emit("session:relaunch-needed", { sessionId });
+      // Relaunch only if a browser is watching this session.
+      if (session.browserSockets.size > 0) {
+        companionBus.emit("session:relaunch-needed", { sessionId });
+      }
     }, WsBridge.DISCONNECT_DEBOUNCE_MS));
   }
 

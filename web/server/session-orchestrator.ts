@@ -225,8 +225,9 @@ export class SessionOrchestrator {
       await this.handleAutoNaming(sessionId, firstUserMessage);
     });
 
-    // Reconnection watchdog for stale sessions after server restart
-    this.startReconnectionWatchdog();
+    // Reconnection watchdog disabled — sessions relaunch on-demand when a
+    // browser connects (session:relaunch-needed from handleBrowserOpen).
+    // this.startReconnectionWatchdog();
   }
 
   // ── Session Creation ───────────────────────────────────────────────────────
