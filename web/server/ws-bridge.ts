@@ -652,10 +652,7 @@ export class WsBridge {
         this.persistSession(session);
         this.broadcastToBrowsers(session, { type: "cli_disconnected" });
 
-        // Relaunch only if a browser is watching this session.
-        if (session.browserSockets.size > 0) {
-          companionBus.emit("session:relaunch-needed", { sessionId });
-        }
+        // No auto-relaunch — user clicks "Reconnect" in the UI.
       }, WsBridge.CODEX_DISCONNECT_DEBOUNCE_MS));
     });
 
@@ -865,10 +862,8 @@ export class WsBridge {
       }
       session.pendingPermissions.clear();
 
-      // Relaunch only if a browser is watching this session.
-      if (session.browserSockets.size > 0) {
-        companionBus.emit("session:relaunch-needed", { sessionId });
-      }
+      // No auto-relaunch — user clicks "Reconnect" in the UI which calls
+      // POST /api/sessions/:id/relaunch explicitly.
     }, WsBridge.DISCONNECT_DEBOUNCE_MS));
   }
 
