@@ -918,10 +918,11 @@ export class WsBridge {
 
     if (!backendConnected && !this.disconnectTimers.has(sessionId)) {
       // Only signal disconnection if we're not within the debounce window
-      // (CLI may be mid-reconnect — avoid UI flap and spurious relaunch)
+      // (CLI may be mid-reconnect — avoid UI flap and spurious relaunch).
+      // Do NOT auto-relaunch here — the frontend connects a browser WS to
+      // every session on page load, which would relaunch ALL sessions.
+      // Relaunch is triggered explicitly via POST /api/sessions/:id/relaunch.
       this.sendToBrowser(ws, { type: "cli_disconnected" });
-      console.log(`[ws-bridge] Browser connected but backend is dead for session ${sessionId}, requesting relaunch`);
-      companionBus.emit("session:relaunch-needed", { sessionId });
     }
   }
 
