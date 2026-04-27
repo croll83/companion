@@ -188,13 +188,9 @@ export class SessionOrchestrator {
       }
     });
 
-    // Proactive keepalive: auto-relaunch crashed CLI processes even without
-    // a browser connected. This ensures long-running sessions (agents, cron
-    // jobs) stay alive. Intentional kills (idle-kill, manual delete/archive)
-    // are excluded via the intentionalKills set.
-    companionBus.on("session:exited", ({ sessionId }) => {
-      this.scheduleProactiveRelaunch(sessionId);
-    });
+    // Proactive keepalive disabled — sessions only relaunch when a browser
+    // reconnects (session:relaunch-needed). This prevents 20+ idle CLI
+    // processes from consuming all available RAM after a server restart.
 
     // Start watching PRs when git info is resolved
     companionBus.on("session:git-info-ready", ({ sessionId, cwd, branch }) => {
