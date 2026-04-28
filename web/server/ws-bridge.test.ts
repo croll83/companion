@@ -1100,9 +1100,12 @@ describe("CLI handlers", () => {
     vi.useRealTimers();
   });
 
-  it("Codex adapter disconnect: emits session:relaunch-needed regardless of browser count", () => {
+  it("Codex adapter disconnect: does NOT auto-emit session:relaunch-needed", () => {
+    // Auto-relaunch on disconnect was removed to fix a mass-relaunch bug
+    // where 20+ idle CLI processes would respawn after a server restart and
+    // exhaust system RAM. Sessions only relaunch via explicit user action
+    // through POST /api/sessions/:id/relaunch.
     vi.useFakeTimers();
-    // Create session with NO browsers connected
     bridge.getOrCreateSession("s1", "codex");
 
     let disconnectCb: (() => void) | undefined;
@@ -1117,19 +1120,17 @@ describe("CLI handlers", () => {
     };
 
     const relaunchCb = vi.fn();
-    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
 
     bridge.attachBackendAdapter("s1", adapter as any, "codex");
 
-    // Trigger disconnect (no browsers connected)
+    // Trigger disconnect
     disconnectCb!();
-
-    // Advance past debounce
     vi.advanceTimersByTime(5_000);
 
-    // Should still emit relaunch-needed even without browsers
-    expect(relaunchCb).toHaveBeenCalledWith("s1");
+    expect(relaunchCb).not.toHaveBeenCalled();
 
+    off();
     vi.useRealTimers();
   });
 });
@@ -1242,20 +1243,26 @@ describe("Browser handlers", () => {
     expect(permMsg.request.request_id).toBe("req-1");
   });
 
-  it("handleBrowserOpen: triggers relaunch callback when CLI is dead", () => {
+  it("handleBrowserOpen: notifies browser via cli_disconnected without auto-relaunch", () => {
+    // Auto-relaunch on browser open was removed to fix a mass-relaunch bug
+    // (the frontend opens WS for every session on page load, which would
+    // respawn every CLI and exhaust RAM). The browser now shows a Reconnect
+    // banner and the user explicitly POSTs /api/sessions/:id/relaunch.
     const relaunchCb = vi.fn();
-    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
 
     bridge.getOrCreateSession("s1");
     const browser = makeBrowserSocket("s1");
     bridge.handleBrowserOpen(browser, "s1");
 
-    expect(relaunchCb).toHaveBeenCalledWith("s1");
+    expect(relaunchCb).not.toHaveBeenCalled();
 
-    // Also sends cli_disconnected
+    // Browser is told the CLI is gone so it can show the Reconnect UI.
     const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
     const disconnectedMsg = calls.find((c: any) => c.type === "cli_disconnected");
     expect(disconnectedMsg).toBeDefined();
+
+    off();
   });
 
   it("handleBrowserOpen: does NOT relaunch when Codex adapter is attached but still initializing", () => {
@@ -2348,19 +2355,30 @@ describe("Browser message routing", () => {
     expect(cli.send).toHaveBeenCalledTimes(1);
   });
 
-  it("set_model: sends control_request with set_model subtype to CLI", () => {
+  it("set_model (claude): emits session:model-change and does NOT forward to CLI", () => {
+    // The Claude CLI's `set_model` control_request silently no-ops in the
+    // backend, so we intercept at the bridge level and emit a bus event for
+    // the orchestrator to relaunch the CLI with --model. Forwarding to the
+    // CLI is a wasted round-trip and the source of the user-visible bug
+    // where the model selector "did nothing".
+    const handler = vi.fn();
+    const off = companionBus.on("session:model-change", handler);
+
     bridge.handleBrowserMessage(browser, JSON.stringify({
       type: "set_model",
       model: "claude-opus-4-5-20250929",
     }));
 
-    expect(cli.send).toHaveBeenCalledTimes(1);
-    const sentRaw = cli.send.mock.calls[0][0] as string;
-    const sent = JSON.parse(sentRaw.trim());
-    expect(sent.type).toBe("control_request");
-    expect(sent.request_id).toBe("test-uuid");
-    expect(sent.request.subtype).toBe("set_model");
-    expect(sent.request.model).toBe("claude-opus-4-5-20250929");
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: "s1",
+      model: "claude-opus-4-5-20250929",
+    });
+    // Bridge optimistically updates session state and broadcasts to browsers
+    // so other tabs see the new model immediately, before relaunch finishes.
+    expect(bridge.getSession("s1")?.state.model).toBe("claude-opus-4-5-20250929");
+    off();
   });
 
   it("set_permission_mode: sends control_request with set_permission_mode subtype to CLI", () => {
@@ -2379,6 +2397,11 @@ describe("Browser message routing", () => {
   });
 
   it("set_model: deduplicates repeated client_msg_id", () => {
+    // Even though set_model no longer forwards to the CLI, dedup still
+    // matters because each call emits a bus event that triggers a CLI
+    // relaunch. Replays from buggy clients must not cause double-relaunch.
+    const handler = vi.fn();
+    const off = companionBus.on("session:model-change", handler);
     const payload = {
       type: "set_model",
       model: "claude-opus-4-5-20250929",
@@ -2386,7 +2409,8 @@ describe("Browser message routing", () => {
     };
     bridge.handleBrowserMessage(browser, JSON.stringify(payload));
     bridge.handleBrowserMessage(browser, JSON.stringify(payload));
-    expect(cli.send).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledTimes(1);
+    off();
   });
 
   it("set_permission_mode: deduplicates repeated client_msg_id", () => {

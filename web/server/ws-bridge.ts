@@ -1091,6 +1091,25 @@ export class WsBridge {
       return;
     }
 
+    // -- set_model (Claude): the CLI's set_model control_request silently
+    // no-ops, so handle this at the bridge level by emitting an event for
+    // the orchestrator to update the launcher's model and relaunch the CLI.
+    // Codex backend keeps the existing forward-to-adapter behavior since
+    // its set_model implementation works as expected.
+    if (msg.type === "set_model" && session.backendType === "claude") {
+      session.state.model = msg.model;
+      this.persistSession(session);
+      this.broadcastToBrowsers(session, {
+        type: "session_update",
+        session: { model: msg.model },
+      });
+      companionBus.emit("session:model-change", {
+        sessionId: session.id,
+        model: msg.model,
+      });
+      return;
+    }
+
     // -- set_ai_validation: bridge-level, not forwarded to backend --------
     if (msg.type === "set_ai_validation") {
       handleSetAiValidation(session, msg);

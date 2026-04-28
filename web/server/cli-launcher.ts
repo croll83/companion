@@ -1226,6 +1226,20 @@ export class CliLauncher {
   }
 
   /**
+   * Update the model on a session's stored info so the next spawn/relaunch
+   * uses the new value. Used when the user switches models mid-session —
+   * the Claude CLI's `set_model` control_request silently no-ops, so the
+   * caller pairs this with `relaunch()` to actually swap the running CLI.
+   */
+  setModel(sessionId: string, model: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.model = model;
+    this.persistState();
+    return true;
+  }
+
+  /**
    * Remove a session from the internal map (after kill or cleanup).
    */
   removeSession(sessionId: string) {

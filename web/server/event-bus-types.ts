@@ -17,6 +17,9 @@ export interface CompanionEventMap {
   /** CLI WebSocket disconnected and a browser needs a relaunch. */
   "session:relaunch-needed": { sessionId: string };
 
+  /** Browser requested a model change — handled by killing & respawning the CLI with --model. */
+  "session:model-change": { sessionId: string; model: string };
+
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };
 

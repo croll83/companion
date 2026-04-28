@@ -202,6 +202,27 @@ export class SessionOrchestrator {
       await this.handleAutoRelaunch(sessionId);
     });
 
+    // Model change: persist the new model on the session info and relaunch
+    // the CLI with the new --model arg. The Claude CLI's `set_model`
+    // control_request silently no-ops, so we kill & respawn with --resume.
+    companionBus.on("session:model-change", async ({ sessionId, model }) => {
+      const info = this.launcher.getSession(sessionId);
+      if (!info || info.archived) return;
+      if (info.backendType !== "claude") return;
+      log.info("orchestrator", "Model change → relaunching CLI", {
+        sessionId,
+        from: info.model,
+        to: model,
+      });
+      this.launcher.setModel(sessionId, model);
+      this.clearAutoRelaunchCount(sessionId);
+      const session = this.wsBridge.getSession(sessionId);
+      if (session?.stateMachine) {
+        session.stateMachine.transition("starting", "model_change_relaunch");
+      }
+      await this.launcher.relaunch(sessionId);
+    });
+
     // Kill CLI process when idle with no browsers for 24 hours.
     // Only kills the CLI process — containers are preserved so the session
     // can be relaunched without recreating the container.
