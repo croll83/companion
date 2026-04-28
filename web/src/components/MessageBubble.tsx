@@ -97,11 +97,29 @@ function mapToolUsesById(blocks: ContentBlock[]): Map<string, ToolUseInfo> {
   return map;
 }
 
+/**
+ * Build copyable plain-text from an assistant message — concatenates all
+ * `text` blocks (skipping thinking, tool_use, tool_result). Falls back to
+ * `message.content` when no blocks are present (early streaming state).
+ */
+function buildCopyableText(message: ChatMessage): string {
+  const blocks = message.contentBlocks || [];
+  const parts: string[] = [];
+  for (const b of blocks) {
+    if (b.type === "text" && b.text) parts.push(b.text);
+  }
+  if (parts.length === 0 && message.content) return message.content;
+  return parts.join("\n\n");
+}
+
 function AssistantMessage({ message }: { message: ChatMessage }) {
   const blocks = message.contentBlocks || [];
 
   const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
   const toolUseById = useMemo(() => mapToolUsesById(blocks), [blocks]);
+  const copyText = useMemo(() => buildCopyableText(message), [message]);
+  // Don't show copy button while streaming or when there's no text content to copy
+  const showCopy = !message.isStreaming && copyText.trim().length > 0;
 
   if (blocks.length === 0 && message.content) {
     // During streaming thinking phase, render as faded italic inline text
@@ -115,6 +133,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           ) : (
             <MarkdownContent text={message.content} showCursor={!!message.isStreaming} />
           )}
+          {showCopy && <MessageActions text={copyText} />}
         </div>
       </div>
     );
@@ -136,7 +155,26 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           // Grouped tool_uses
           return <ToolGroupBlock key={i} name={group.name} items={group.items} />;
         })}
+        {showCopy && <MessageActions text={copyText} />}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Action bar shown at the bottom of a completed assistant message.
+ * Always visible on mobile (no hover state); subtle on desktop and brightens
+ * when the surrounding message is hovered (via the `group` class on parent).
+ */
+function MessageActions({ text }: { text: string }) {
+  return (
+    <div className="mt-1 -ml-2 flex items-center gap-1">
+      <CopyButton
+        text={text}
+        size="sm"
+        label="Copy message"
+        className="opacity-100 sm:opacity-60 sm:hover:opacity-100"
+      />
     </div>
   );
 }
@@ -221,7 +259,12 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
                         </span>
                       )}
                     </div>
-                    <CopyButton text={String(children).replace(/\n$/, '')} size="sm" className="opacity-70 hover:opacity-100" />
+                    <CopyButton
+                      text={String(children).replace(/\n$/, '')}
+                      size="sm"
+                      label="Copy code"
+                      className="opacity-100 sm:opacity-70 sm:hover:opacity-100"
+                    />
                   </div>
                   <pre className="px-3 sm:px-4 py-2.5 sm:py-3 bg-cc-code-bg text-cc-code-fg text-[12px] sm:text-[13px] font-mono-code leading-relaxed overflow-x-auto">
                     <code>{children}</code>

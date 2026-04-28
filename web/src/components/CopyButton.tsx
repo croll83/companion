@@ -34,7 +34,9 @@ export function CopyButton({ text, className = '', size = 'sm', label }: CopyBut
   return (
     <button
       onClick={handleCopy}
-      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors ${className}`}
+      data-testid="copy-button"
+      aria-label={label || 'Copy to clipboard'}
+      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-cc-muted hover:text-cc-fg hover:bg-cc-fg/[0.06] transition-colors touch-manipulation ${className}`}
       title={label || 'Copy to clipboard'}
     >
       {copied ? (

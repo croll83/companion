@@ -61,27 +61,33 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // All three Claude models should appear as options
-    expect(screen.getByRole("option", { name: /Opus/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Sonnet/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Haiku/ })).toBeInTheDocument();
+    // After PR #651, the Claude lineup is Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5.
+    // Match exact labels because /Opus/ alone now matches multiple entries.
+    expect(screen.getByRole("option", { name: /Opus 4\.7/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Opus 4\.6/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Sonnet 4\.6/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Haiku 4\.5/ })).toBeInTheDocument();
   });
 
   it("marks the current model as selected", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    const opusOption = screen.getByRole("option", { name: /Opus/ });
+    const opusOption = screen.getByRole("option", { name: /Opus 4\.6/ });
     expect(opusOption).toHaveAttribute("aria-selected", "true");
 
-    const sonnetOption = screen.getByRole("option", { name: /Sonnet/ });
+    const sonnetOption = screen.getByRole("option", { name: /Sonnet 4\.6/ });
     expect(sonnetOption).toHaveAttribute("aria-selected", "false");
+
+    // The newly added Opus 4.7 is not the active one in this fixture.
+    const opus47 = screen.getByRole("option", { name: /Opus 4\.7/ });
+    expect(opus47).toHaveAttribute("aria-selected", "false");
   });
 
   it("sends set_model via WebSocket on selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
 
     expect(mockSendToSession).toHaveBeenCalledWith("s1", {
       type: "set_model",
@@ -92,7 +98,7 @@ describe("ModelSwitcher", () => {
   it("optimistically updates the store after selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
 
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     const updatedSessions = mockSetSdkSessions.mock.calls[0][0];
@@ -102,7 +108,7 @@ describe("ModelSwitcher", () => {
   it("does not send when selecting the already-active model", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Opus/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Opus 4\.6/ }));
 
     // Same model — no WS message, no store update
     expect(mockSendToSession).not.toHaveBeenCalled();
