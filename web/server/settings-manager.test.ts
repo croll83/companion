@@ -275,4 +275,47 @@ describe("settings-manager", () => {
     const updated = updateSettings({ anthropicModel: "claude-haiku-3" });
     expect(updated.publicUrl).toBe("https://example.com");
   });
+
+  // ─── cliBridgeMode tests ───────────────────────────────────────────────────
+
+  // The default value remains "loopback" so existing installs are unaffected
+  // by the new "tlsLoopback" option.
+  it("default cliBridgeMode is loopback", () => {
+    expect(getSettings().cliBridgeMode).toBe("loopback");
+  });
+
+  // tlsLoopback is the new opt-in value introduced for Claude Code v2.1.142.
+  // updateSettings must accept and persist it round-trip.
+  it("accepts and persists cliBridgeMode=tlsLoopback", () => {
+    const updated = updateSettings({ cliBridgeMode: "tlsLoopback" });
+    expect(updated.cliBridgeMode).toBe("tlsLoopback");
+
+    const saved = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    expect(saved.cliBridgeMode).toBe("tlsLoopback");
+  });
+
+  // Reading back an existing tlsLoopback selection from disk must not fall
+  // back to the default — this protects users who upgrade after toggling
+  // the new mode.
+  it("loads tlsLoopback from existing settings file", () => {
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ cliBridgeMode: "tlsLoopback" }),
+      "utf-8",
+    );
+    _resetForTest(settingsPath);
+    expect(getSettings().cliBridgeMode).toBe("tlsLoopback");
+  });
+
+  // Unknown / malformed values normalize back to the safe default so we
+  // never spawn the CLI with an undefined bridge mode.
+  it("normalizes unknown cliBridgeMode to loopback", () => {
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ cliBridgeMode: "wormhole" }),
+      "utf-8",
+    );
+    _resetForTest(settingsPath);
+    expect(getSettings().cliBridgeMode).toBe("loopback");
+  });
 });

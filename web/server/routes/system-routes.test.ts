@@ -30,6 +30,27 @@ vi.mock("../service.js", () => ({
   refreshServiceDefinition: vi.fn(),
 }));
 
+// ─── Mock hosts-check ──────────────────────────────────────────────────────
+// Drives the /api/system/hosts-check endpoint without touching the real
+// /etc/hosts on the test machine.
+const mockCheckHostsEntry = vi.hoisted(() => vi.fn());
+vi.mock("../hosts-check.js", () => ({
+  checkHostsEntry: mockCheckHostsEntry,
+}));
+
+// ─── Mock tls-manager (constant only) ──────────────────────────────────────
+vi.mock("../tls-manager.js", () => ({
+  TLS_BRIDGE_HOSTNAME: "beacon.claude-ai.staging.ant.dev",
+  ensureTlsCerts: vi.fn(async () => ({
+    ok: false,
+    caPath: "",
+    certPath: "",
+    keyPath: "",
+    pemPath: "",
+    reason: "test",
+  })),
+}));
+
 import { Hono } from "hono";
 import { getUsageLimits } from "../usage-limits.js";
 import {
@@ -633,5 +654,63 @@ describe("POST /api/sessions/:id/message", () => {
     expect(res2.status).toBe(400);
     const json2 = await res2.json();
     expect(json2.error).toMatch(/content/i);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET /api/system/hosts-check
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("GET /api/system/hosts-check", () => {
+  // Happy path: when /etc/hosts has the expected mapping, the API returns
+  // ok=true plus the path/suggestion so the UI can surface a non-error
+  // confirmation if desired.
+  it("returns ok=true when checkHostsEntry succeeds", async () => {
+    mockCheckHostsEntry.mockReturnValue({
+      ok: true,
+      hostsPath: "/etc/hosts",
+      suggestedCommand: "sudo bash -c 'echo \"127.0.0.1 beacon.claude-ai.staging.ant.dev\" >> /etc/hosts'",
+    });
+
+    const res = await app.request("/api/system/hosts-check");
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.hostsPath).toBe("/etc/hosts");
+    expect(json.hostname).toBe("beacon.claude-ai.staging.ant.dev");
+    expect(mockCheckHostsEntry).toHaveBeenCalledWith("beacon.claude-ai.staging.ant.dev");
+  });
+
+  // Negative path: the front-end uses ok=false + suggestedCommand to render
+  // the configuration banner with a copy-paste command for the user.
+  it("returns ok=false and surfaces the suggestedCommand when mapping is missing", async () => {
+    mockCheckHostsEntry.mockReturnValue({
+      ok: false,
+      hostsPath: "/etc/hosts",
+      suggestedCommand: "sudo bash -c 'echo \"127.0.0.1 beacon.claude-ai.staging.ant.dev\" >> /etc/hosts'",
+    });
+
+    const res = await app.request("/api/system/hosts-check");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(false);
+    expect(json.suggestedCommand).toContain("beacon.claude-ai.staging.ant.dev");
+  });
+
+  // The endpoint accepts an optional `?hostname=` override so future
+  // allowlist additions can be probed without code changes.
+  it("forwards the ?hostname= query param to checkHostsEntry", async () => {
+    mockCheckHostsEntry.mockReturnValue({
+      ok: true,
+      hostsPath: "/etc/hosts",
+      suggestedCommand: "ignored",
+    });
+
+    const res = await app.request("/api/system/hosts-check?hostname=claude.fedstart.com");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.hostname).toBe("claude.fedstart.com");
+    expect(mockCheckHostsEntry).toHaveBeenCalledWith("claude.fedstart.com");
   });
 });

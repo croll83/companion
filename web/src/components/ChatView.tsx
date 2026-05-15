@@ -7,6 +7,7 @@ import { Composer } from "./Composer.js";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { ActivityTray } from "./ActivityTray.js";
+import { HostsBridgeAlert } from "./HostsBridgeAlert.js";
 
 export function ChatView({ sessionId }: { sessionId: string }) {
   const sessionPerms = useStore((s) => s.pendingPermissions.get(sessionId));
@@ -16,6 +17,12 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     (s) => s.connectionStatus.get(sessionId) ?? "disconnected"
   );
   const cliConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
+  // The HostsBridgeAlert only renders for Claude-Code sessions; Codex is
+  // unaffected by the --sdk-url allowlist so showing the banner there would
+  // be a false positive.
+  const backendType = useStore(
+    (s) => s.sdkSessions.find((sdk) => sdk.sessionId === sessionId)?.backendType,
+  );
   const cliReconnecting = useStore(
     (s) => s.cliReconnecting.get(sessionId) ?? false
   );
@@ -58,6 +65,10 @@ export function ChatView({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      {/* Hosts file / TLS bridge alert — only shown for Claude Code sessions
+          when the embedded TLS proxy hostname is missing from /etc/hosts. */}
+      <HostsBridgeAlert backendType={backendType} />
+
       {/* CLI disconnected / reconnecting / error banner */}
       {showCliBanner && (
         <div className="px-4 py-2.5 bg-gradient-to-r from-cc-warning/8 to-cc-warning/4 border-b border-cc-warning/15 flex items-center justify-center gap-3 animate-[fadeSlideIn_0.3s_ease-out]">

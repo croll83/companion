@@ -56,6 +56,12 @@ vi.mock("./ActivityTray.js", () => ({
   ),
 }));
 
+// HostsBridgeAlert performs its own fetching + polling — stub it out so
+// ChatView tests stay focused on the chat view's own behavior.
+vi.mock("./HostsBridgeAlert.js", () => ({
+  HostsBridgeAlert: () => <div data-testid="hosts-bridge-alert" />,
+}));
+
 import { ChatView } from "./ChatView.js";
 
 function setupStore(overrides: {
@@ -102,6 +108,8 @@ function setupStore(overrides: {
     aiResolvedPermissions: aiResolved,
     clearAiResolvedPermissions: vi.fn(),
     setCliReconnecting: mockSetCliReconnecting,
+    // HostsBridgeAlert lookup; default to no sessions so backendType is undefined
+    sdkSessions: [],
   };
 }
 

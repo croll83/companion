@@ -12,6 +12,8 @@ import {
 import { refreshServiceDefinition } from "../service.js";
 import { getSettings } from "../settings-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
+import { checkHostsEntry } from "../hosts-check.js";
+import { TLS_BRIDGE_HOSTNAME } from "../tls-manager.js";
 
 export function registerSystemRoutes(
   api: Hono,
@@ -211,6 +213,22 @@ export function registerSystemRoutes(
     if (!terminalId) return c.json({ error: "terminalId is required" }, 400);
     deps.terminalManager.kill(terminalId);
     return c.json({ ok: true });
+  });
+
+  // ── /etc/hosts loopback diagnostic ───────────────────────────────────────
+  // Used by the UI to render a banner when the embedded TLS proxy's allowlisted
+  // hostname is not mapped to 127.0.0.1, which makes cliBridgeMode=tlsLoopback
+  // unusable. Returns the platform-specific suggestion command so the user can
+  // copy/paste it directly.
+  api.get("/system/hosts-check", (c) => {
+    const hostname = c.req.query("hostname")?.trim() || TLS_BRIDGE_HOSTNAME;
+    const result = checkHostsEntry(hostname);
+    return c.json({
+      ok: result.ok,
+      hostsPath: result.hostsPath,
+      suggestedCommand: result.suggestedCommand,
+      hostname,
+    });
   });
 
   api.post("/sessions/:id/message", async (c) => {

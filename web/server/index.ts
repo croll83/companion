@@ -41,6 +41,8 @@ import { getToken, verifyToken } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
+import { ensureTlsCerts, TLS_BRIDGE_HOSTNAME } from "./tls-manager.js";
+import { checkHostsEntry } from "./hosts-check.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -179,11 +181,10 @@ if (process.env.NODE_ENV === "production") {
   app.get("/*", serveStatic({ path: resolve(distDir, "index.html") }));
 }
 
-const server = Bun.serve<SocketData>({
-  hostname: host,
-  port,
-  idleTimeout: 0, // Disable top-level idle timeout — it kills idle browser WebSockets (code 1006)
-  async fetch(req, server) {
+// Extract fetch/websocket handlers so they can be shared between the main
+// HTTP server and the optional TLS server used for cliBridgeMode=tlsLoopback.
+type AnyBunServer = import("bun").Server<SocketData>;
+const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Response | undefined> => {
     const url = new URL(req.url);
 
     // ── CLI WebSocket — Claude Code CLI connects here via --sdk-url ────
@@ -282,50 +283,112 @@ const server = Bun.serve<SocketData>({
 
     // Hono handles the rest
     return app.fetch(req, server);
+};
+
+const websocketHandlers = {
+  idleTimeout: 0,
+  sendPings: false, // Disable Bun ping timeout that kills CLI connections (code 1006)
+  open(ws: ServerWebSocket<SocketData>) {
+    const data = ws.data;
+    if (data.kind === "cli") {
+      wsBridge.handleCLIOpen(ws, data.sessionId);
+      launcher.markConnected(data.sessionId);
+    } else if (data.kind === "browser") {
+      wsBridge.handleBrowserOpen(ws, data.sessionId);
+    } else if (data.kind === "terminal") {
+      terminalManager.addBrowserSocket(ws);
+    } else if (data.kind === "novnc") {
+      noVncProxy.handleOpen(ws, data.sessionId);
+    }
   },
-  websocket: {
-    idleTimeout: 0,
-    sendPings: false, // Disable Bun ping timeout that kills CLI connections (code 1006)
-    open(ws: ServerWebSocket<SocketData>) {
-      const data = ws.data;
-      if (data.kind === "cli") {
-        wsBridge.handleCLIOpen(ws, data.sessionId);
-        launcher.markConnected(data.sessionId);
-      } else if (data.kind === "browser") {
-        wsBridge.handleBrowserOpen(ws, data.sessionId);
-      } else if (data.kind === "terminal") {
-        terminalManager.addBrowserSocket(ws);
-      } else if (data.kind === "novnc") {
-        noVncProxy.handleOpen(ws, data.sessionId);
-      }
-    },
-    message(ws: ServerWebSocket<SocketData>, msg: string | Buffer) {
-      const data = ws.data;
-      if (data.kind === "cli") {
-        wsBridge.handleCLIMessage(ws, msg);
-      } else if (data.kind === "browser") {
-        wsBridge.handleBrowserMessage(ws, msg);
-      } else if (data.kind === "terminal") {
-        terminalManager.handleBrowserMessage(ws, msg);
-      } else if (data.kind === "novnc") {
-        noVncProxy.handleMessage(ws, msg);
-      }
-    },
-    close(ws: ServerWebSocket<SocketData>, code?: number, _reason?: string) {
-      console.log("[ws-close]", ws.data.kind, "code=" + code);
-      const data = ws.data;
-      if (data.kind === "cli") {
-        wsBridge.handleCLIClose(ws);
-      } else if (data.kind === "browser") {
-        wsBridge.handleBrowserClose(ws);
-      } else if (data.kind === "terminal") {
-        terminalManager.removeBrowserSocket(ws);
-      } else if (data.kind === "novnc") {
-        noVncProxy.handleClose(ws);
-      }
-    },
+  message(ws: ServerWebSocket<SocketData>, msg: string | Buffer) {
+    const data = ws.data;
+    if (data.kind === "cli") {
+      wsBridge.handleCLIMessage(ws, msg);
+    } else if (data.kind === "browser") {
+      wsBridge.handleBrowserMessage(ws, msg);
+    } else if (data.kind === "terminal") {
+      terminalManager.handleBrowserMessage(ws, msg);
+    } else if (data.kind === "novnc") {
+      noVncProxy.handleMessage(ws, msg);
+    }
   },
+  close(ws: ServerWebSocket<SocketData>, code?: number, _reason?: string) {
+    console.log("[ws-close]", ws.data.kind, "code=" + code);
+    const data = ws.data;
+    if (data.kind === "cli") {
+      wsBridge.handleCLIClose(ws);
+    } else if (data.kind === "browser") {
+      wsBridge.handleBrowserClose(ws);
+    } else if (data.kind === "terminal") {
+      terminalManager.removeBrowserSocket(ws);
+    } else if (data.kind === "novnc") {
+      noVncProxy.handleClose(ws);
+    }
+  },
+};
+
+const server = Bun.serve<SocketData>({
+  hostname: host,
+  port,
+  idleTimeout: 0, // Disable top-level idle timeout — it kills idle browser WebSockets (code 1006)
+  fetch: fetchHandler,
+  websocket: websocketHandlers,
 });
+
+// ── Embedded TLS proxy for Claude Code 2.1.142+ --sdk-url allowlist ─────────
+// Claude Code 2.1.142 hardcodes a list of permitted Anthropic hostnames for
+// --sdk-url and rejects ws://127.0.0.1 outright. To keep loopback working we
+// (a) generate a self-signed cert for an allowlisted hostname, (b) listen on
+// TLS port 8443 with that cert, and (c) advise the user to map the hostname
+// to 127.0.0.1 in /etc/hosts. NODE_EXTRA_CA_CERTS makes the spawned CLI
+// trust our cert.
+//
+// All of this is opt-in via `cliBridgeMode === "tlsLoopback"`. If cert
+// generation or the TLS bind fails we log a warning and continue with just
+// the HTTP server — sessions configured for loopback/jsonHandoff still work.
+const tlsPort = Number(process.env.COMPANION_TLS_PORT) || 8443;
+try {
+  const tlsResult = await ensureTlsCerts();
+  if (tlsResult.ok) {
+    launcher.setTlsCaPath(tlsResult.caPath);
+    try {
+      Bun.serve<SocketData>({
+        hostname: host,
+        port: tlsPort,
+        idleTimeout: 0,
+        tls: {
+          cert: Bun.file(tlsResult.certPath),
+          key: Bun.file(tlsResult.keyPath),
+        },
+        fetch: fetchHandler,
+        websocket: websocketHandlers,
+      });
+      console.log(`[server] TLS bridge listening on https://${host}:${tlsPort} (CA: ${tlsResult.caPath})`);
+    } catch (err) {
+      console.warn(
+        `[server] Failed to start TLS bridge on port ${tlsPort}: ${err instanceof Error ? err.message : String(err)}. ` +
+        `cliBridgeMode=tlsLoopback will not work; loopback/jsonHandoff sessions continue normally.`,
+      );
+    }
+  } else {
+    console.warn(
+      `[server] TLS bridge disabled: ${tlsResult.reason}. ` +
+      `cliBridgeMode=tlsLoopback will not work until openssl is available.`,
+    );
+  }
+} catch (err) {
+  console.warn(`[server] ensureTlsCerts threw: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+// ── /etc/hosts diagnostic — warn loudly if the loopback mapping is missing ──
+const hostsCheck = checkHostsEntry(TLS_BRIDGE_HOSTNAME);
+if (!hostsCheck.ok) {
+  console.warn(
+    `[server] WARNING: ${hostsCheck.hostsPath} is missing the ${TLS_BRIDGE_HOSTNAME} → 127.0.0.1 mapping. ` +
+    `Claude Code 2.1.142+ sessions using cliBridgeMode=tlsLoopback will fail to spawn. Run:\n  ${hostsCheck.suggestedCommand}`,
+  );
+}
 
 const authToken = getToken();
 console.log(`Server running on http://${host}:${server.port}`);

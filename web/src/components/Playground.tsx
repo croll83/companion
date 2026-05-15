@@ -12,6 +12,7 @@ import { DiffViewer } from "./DiffViewer.js";
 import { useStore } from "../store.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import { UpdateBanner } from "./UpdateBanner.js";
+import { HostsBridgeAlert } from "./HostsBridgeAlert.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
 import { api } from "../api.js";
@@ -1833,6 +1834,55 @@ export function Playground() {
                   channel: "prerelease",
                 }}
               />
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Hosts Bridge Alert ─────────────────────────────── */}
+        <Section
+          title="Hosts Bridge Alert"
+          description="Banner shown when /etc/hosts is missing the loopback mapping required by Claude Code v2.1.142+ (cliBridgeMode=tlsLoopback). Codex sessions never see this banner."
+        >
+          <div className="space-y-4 max-w-3xl">
+            <Card label="Needs config (Claude, hosts entry missing)">
+              <HostsBridgeAlert
+                backendType="claude"
+                fetcher={async () => ({
+                  ok: false,
+                  hostsPath: "/etc/hosts",
+                  suggestedCommand:
+                    "sudo bash -c 'echo \"127.0.0.1 beacon.claude-ai.staging.ant.dev\" >> /etc/hosts'",
+                  hostname: "beacon.claude-ai.staging.ant.dev",
+                })}
+              />
+            </Card>
+            <Card label="Configured correctly (banner hidden)">
+              <HostsBridgeAlert
+                backendType="claude"
+                fetcher={async () => ({
+                  ok: true,
+                  hostsPath: "/etc/hosts",
+                  suggestedCommand: "no action required",
+                  hostname: "beacon.claude-ai.staging.ant.dev",
+                })}
+              />
+              <p className="text-xs text-cc-muted px-1 py-2">
+                (banner intentionally renders nothing when ok=true)
+              </p>
+            </Card>
+            <Card label="Codex session (banner suppressed)">
+              <HostsBridgeAlert
+                backendType="codex"
+                fetcher={async () => ({
+                  ok: false,
+                  hostsPath: "/etc/hosts",
+                  suggestedCommand: "would be shown for claude only",
+                  hostname: "beacon.claude-ai.staging.ant.dev",
+                })}
+              />
+              <p className="text-xs text-cc-muted px-1 py-2">
+                (banner intentionally renders nothing for non-Claude backends)
+              </p>
             </Card>
           </div>
         </Section>

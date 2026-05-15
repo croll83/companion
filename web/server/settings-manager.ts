@@ -15,11 +15,17 @@ export type UpdateChannel = "stable" | "prerelease";
  * How the companion hands the bridge URL to the spawned Claude Code CLI.
  * - "loopback" (default): pass `--sdk-url ws://127.0.0.1:PORT/...` on argv.
  *   Works on Claude Code v1.2.1+ which rejects the literal "localhost".
+ *   BROKEN on Claude Code v2.1.142+ which restricts --sdk-url to a hardcoded
+ *   list of Anthropic hostnames.
  * - "jsonHandoff": write a temp JSON descriptor and pass its path via the
  *   CLAUDE_BRIDGE_CONFIG env var, mirroring just-every/code's v0.6.98
- *   approach. More robust if Anthropic further restricts --sdk-url.
+ *   approach. Also broken on 2.1.142+ for the same allowlist reason.
+ * - "tlsLoopback": spawn the CLI with `--sdk-url wss://<allowlisted-host>:PORT/...`
+ *   where the hostname is mapped to 127.0.0.1 via /etc/hosts and served by
+ *   an embedded Bun.serve TLS proxy with a self-signed cert trusted via
+ *   NODE_EXTRA_CA_CERTS. Required for Claude Code 2.1.142+.
  */
-export type CliBridgeMode = "loopback" | "jsonHandoff";
+export type CliBridgeMode = "loopback" | "jsonHandoff" | "tlsLoopback";
 
 export interface CompanionSettings {
   anthropicApiKey: string;
@@ -118,7 +124,12 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     publicUrl: typeof raw?.publicUrl === "string" ? raw.publicUrl.trim().replace(/\/+$/, "") : "",
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
-    cliBridgeMode: raw?.cliBridgeMode === "jsonHandoff" ? "jsonHandoff" : "loopback",
+    cliBridgeMode:
+      raw?.cliBridgeMode === "jsonHandoff"
+        ? "jsonHandoff"
+        : raw?.cliBridgeMode === "tlsLoopback"
+          ? "tlsLoopback"
+          : "loopback",
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }

@@ -195,6 +195,8 @@ export class CliLauncher {
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
+  /** Path to the self-signed CA cert (NODE_EXTRA_CA_CERTS) when tlsLoopback is in use. */
+  private tlsCaPath: string | null = null;
   constructor(port: number) {
     this.port = port;
   }
@@ -207,6 +209,15 @@ export class CliLauncher {
   /** Attach a recorder for raw message capture. */
   setRecorder(recorder: RecorderManager): void {
     this.recorder = recorder;
+  }
+
+  /**
+   * Register the embedded TLS proxy CA path. Spawned Claude CLI processes
+   * receive this path via NODE_EXTRA_CA_CERTS so they trust our self-signed
+   * wss://beacon.claude-ai.staging.ant.dev cert.
+   */
+  setTlsCaPath(caPath: string | null): void {
+    this.tlsCaPath = caPath;
   }
 
   /** Persist launcher state to disk. */
@@ -500,9 +511,29 @@ export class CliLauncher {
     // For host sessions, use the numeric loopback (127.0.0.1) instead of
     // "localhost": Claude Code v1.2.1+ rejects the literal hostname
     // "localhost" in --sdk-url as a CSWSH hardening measure (issue #655).
-    const sdkUrl = isContainerized
-      ? `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`
-      : `ws://127.0.0.1:${this.port}/ws/cli/${sessionId}`;
+    //
+    // Claude Code v2.1.142+ introduced a further restriction: --sdk-url is
+    // rejected unless its host is one of a hardcoded set of Anthropic
+    // hostnames (api.anthropic.com, beacon.claude-ai.staging.ant.dev, ...).
+    // When `cliBridgeMode === "tlsLoopback"` we present that hostname via
+    // an embedded TLS proxy listening on `COMPANION_TLS_PORT` (default
+    // 8443). The user must add a single line to /etc/hosts to route the
+    // hostname back to 127.0.0.1, and `NODE_EXTRA_CA_CERTS` is propagated
+    // so the spawned CLI trusts our self-signed cert.
+    const settings = getSettings();
+    const bridgeMode = settings.cliBridgeMode ?? "loopback";
+    const tlsBridgeHost = (process.env.COMPANION_SDK_BRIDGE_HOST
+      || "beacon.claude-ai.staging.ant.dev").trim() || "beacon.claude-ai.staging.ant.dev";
+    const tlsBridgePort = Number(process.env.COMPANION_SDK_BRIDGE_PORT) || 8443;
+
+    let sdkUrl: string;
+    if (isContainerized) {
+      sdkUrl = `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`;
+    } else if (bridgeMode === "tlsLoopback") {
+      sdkUrl = `wss://${tlsBridgeHost}:${tlsBridgePort}/ws/cli/${sessionId}`;
+    } else {
+      sdkUrl = `ws://127.0.0.1:${this.port}/ws/cli/${sessionId}`;
+    }
 
     // Claude Code rejects bypassPermissions when running with root/sudo.
     // Container sessions are downgraded by default; host sessions are only
@@ -535,7 +566,6 @@ export class CliLauncher {
     // path via CLAUDE_BRIDGE_CONFIG env var instead of --sdk-url on argv.
     // This is forward-compatible if Anthropic further restricts --sdk-url
     // (e.g. drops it entirely or adds origin/handshake checks).
-    const bridgeMode = getSettings().cliBridgeMode ?? "loopback";
     const useJsonHandoff = bridgeMode === "jsonHandoff" && !isContainerized;
     let bridgeConfigPath: string | undefined;
     if (useJsonHandoff) {
@@ -634,6 +664,9 @@ export class CliLauncher {
         ...options.env,
         PATH: getEnrichedPath(),
         ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),
+        ...(bridgeMode === "tlsLoopback" && this.tlsCaPath
+          ? { NODE_EXTRA_CA_CERTS: this.tlsCaPath }
+          : {}),
       };
       spawnCwd = info.cwd;
     }
