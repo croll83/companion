@@ -11,7 +11,11 @@ const currentVersion: string = JSON.parse(
   readFileSync(packageJsonPath, "utf-8"),
 ).version;
 
-const NPM_REGISTRY_BASE = "https://registry.npmjs.org/the-companion";
+// Fork repo for GitHub Releases. Override with COMPANION_FORK_REPO env to make
+// the auto-updater follow a different fork (e.g. for staging or testing).
+export const FORK_REPO = process.env.COMPANION_FORK_REPO || "croll83/companion";
+const GH_RELEASES_API = `https://api.github.com/repos/${FORK_REPO}/releases`;
+
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const INITIAL_DELAY_MS = 10_000; // 10 seconds after boot
 
@@ -43,37 +47,101 @@ export function getCurrentVersion(): string {
   return currentVersion;
 }
 
-/** Returns the npm registry URL for the given dist-tag. */
-function getRegistryUrl(channel: UpdateChannel): string {
-  const distTag = channel === "prerelease" ? "next" : "latest";
-  return `${NPM_REGISTRY_BASE}/${distTag}`;
+/**
+ * Minimal GitHub Release shape — only the fields the updater actually uses.
+ * Documented at https://docs.github.com/en/rest/releases/releases
+ */
+interface GitHubRelease {
+  tag_name: string;
+  name?: string | null;
+  prerelease: boolean;
+  draft: boolean;
+  published_at?: string | null;
+}
+
+/**
+ * Parse a release tag into a semver-ish version string.
+ *
+ * Expected tag format: `the-companion-v<semver>` (this is the convention used
+ * by release-please for the npm package name "the-companion"). Anything else
+ * returns null so callers can skip it.
+ *
+ * Examples:
+ *   parseVersionFromTag("the-companion-v1.2.3")                → "1.2.3"
+ *   parseVersionFromTag("the-companion-v1.2.3-preview.123")    → "1.2.3-preview.123"
+ *   parseVersionFromTag("v1.2.3")                              → null
+ *   parseVersionFromTag("")                                    → null
+ */
+export function parseVersionFromTag(tag: string | null | undefined): string | null {
+  if (!tag) return null;
+  const match = /^the-companion-v(\d+\.\d+\.\d+(?:-[\w.]+)?)$/.exec(tag);
+  return match ? match[1] : null;
+}
+
+/** Build the GitHub Releases API URL (exported for tests). */
+export function getReleasesUrl(): string {
+  return `${GH_RELEASES_API}?per_page=20`;
 }
 
 export async function checkForUpdate(): Promise<void> {
   if (state.checking) return;
   state.checking = true;
   try {
-    // Read channel from settings on each check so switching is immediate
+    // Read channel from settings on each check so switching is immediate.
     const channel = getSettings().updateChannel;
     if (channel !== state.channel) {
       state.latestVersion = null; // avoid cross-channel stale comparison
     }
     state.channel = channel;
-    const url = getRegistryUrl(channel);
 
+    const url = getReleasesUrl();
     const res = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "the-companion-update-checker",
+      },
       signal: AbortSignal.timeout(10_000),
     });
-    if (res.ok) {
-      const data = (await res.json()) as { version: string };
-      state.latestVersion = data.version;
+
+    if (!res.ok) {
+      console.warn(
+        `[update-checker] GitHub releases API returned ${res.status} for ${FORK_REPO}`,
+      );
+      return;
+    }
+
+    const releases = (await res.json()) as GitHubRelease[];
+    if (!Array.isArray(releases)) {
+      console.warn(
+        "[update-checker] GitHub releases API returned a non-array payload",
+      );
+      return;
+    }
+
+    // Find the most recent (releases are returned by GitHub in created order,
+    // newest first) release matching the current channel that has a parsable
+    // tag. Drafts are always skipped.
+    const wantPrerelease = channel === "prerelease";
+    let pick: { version: string; release: GitHubRelease } | null = null;
+    for (const r of releases) {
+      if (r.draft) continue;
+      if (Boolean(r.prerelease) !== wantPrerelease) continue;
+      const version = parseVersionFromTag(r.tag_name);
+      if (!version) continue;
+      pick = { version, release: r };
+      break;
+    }
+
+    if (pick) {
+      state.latestVersion = pick.version;
       state.lastChecked = Date.now();
       if (isUpdateAvailable()) {
         console.log(
           `[update-checker] Update available (${channel}): ${currentVersion} -> ${state.latestVersion}`,
         );
       }
+    } else {
+      state.lastChecked = Date.now();
     }
   } catch (err) {
     console.warn(
