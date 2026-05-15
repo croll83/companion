@@ -92,6 +92,9 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    # Fork repos don't have DOCKERHUB_* secrets and the image namespace
+    # (stangirard/the-companion) belongs to upstream — best-effort only.
+    continue-on-error: true
     env:
       REGISTRY: docker.io
       IMAGE_NAME: stangirard/the-companion

@@ -29,10 +29,6 @@ import { log } from "./logger.js";
 const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
-const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
-
-// Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
-const KEEPALIVE_BASE_DELAY_MS = 3_000;
 
 const VSCODE_EDITOR_CONTAINER_PORT = 13337;
 const CODEX_APP_SERVER_CONTAINER_PORT = Number(
@@ -859,62 +855,6 @@ export class SessionOrchestrator {
     }
   }
 
-  // ── Private: Proactive keepalive ────────────────────────────────────────────
-
-  /**
-   * Schedules a proactive relaunch of a crashed CLI process, regardless of
-   * whether any browsers are connected. Uses exponential backoff (3s, 6s, 12s)
-   * based on the auto-relaunch attempt count.
-   *
-   * Skips relaunch for:
-   * - Intentional kills (idle-kill, manual delete/archive)
-   * - Archived sessions
-   * - Sessions that have exhausted their relaunch budget
-   */
-  private scheduleProactiveRelaunch(sessionId: string): void {
-    // Skip if this was an intentional kill. Use has() instead of delete() so
-    // the guard is preserved for handleAutoRelaunch (debounce path fires later).
-    if (this.intentionalKills.has(sessionId)) return;
-
-    const info = this.launcher.getSession(sessionId);
-    if (!info || info.archived) return;
-
-    // Skip if already at relaunch limit
-    if (this.relaunchExhaustedNotified.has(sessionId)) return;
-
-    // Skip if a relaunch is already in progress (e.g. triggered by browser reconnect)
-    if (this.relaunchingSet.has(sessionId)) return;
-
-    // Exponential backoff: 3s → 6s → 12s based on attempt count
-    const attempt = this.autoRelaunchCounts.get(sessionId) ?? 0;
-    const delay = KEEPALIVE_BASE_DELAY_MS * Math.pow(2, attempt);
-
-    log.info("orchestrator", "Scheduling proactive keepalive relaunch", {
-      sessionId,
-      attempt: attempt + 1,
-      maxAttempts: MAX_AUTO_RELAUNCHES,
-      delayMs: delay,
-    });
-
-    // Cancel any existing keepalive timer for this session
-    this.cancelKeepaliveTimer(sessionId);
-
-    const timer = setTimeout(async () => {
-      this.keepaliveTimers.delete(sessionId);
-
-      // Re-check conditions — state may have changed during the delay
-      const freshInfo = this.launcher.getSession(sessionId);
-      if (!freshInfo || freshInfo.archived) return;
-      if (freshInfo.state === "connected" || freshInfo.state === "running") return;
-
-      // Delegate to the existing auto-relaunch mechanism which handles
-      // budget, PID checks, state transitions, and cooldowns.
-      await this.handleAutoRelaunch(sessionId);
-    }, delay);
-
-    this.keepaliveTimers.set(sessionId, timer);
-  }
-
   private cancelKeepaliveTimer(sessionId: string): void {
     const timer = this.keepaliveTimers.get(sessionId);
     if (timer) {
@@ -936,23 +876,6 @@ export class SessionOrchestrator {
       console.log(`[orchestrator] Auto-named session ${sessionId}: "${title}"`);
       sessionNames.setName(sessionId, title);
       this.wsBridge.broadcastNameUpdate(sessionId, title);
-    }
-  }
-
-  // ── Private: Reconnection watchdog ─────────────────────────────────────────
-
-  private startReconnectionWatchdog(): void {
-    const starting = this.launcher.getStartingSessions();
-    if (starting.length > 0) {
-      console.log(`[orchestrator] Waiting ${RECONNECT_GRACE_MS / 1000}s for ${starting.length} CLI process(es) to reconnect...`);
-      setTimeout(async () => {
-        const stale = this.launcher.getStartingSessions();
-        for (const info of stale) {
-          if (info.archived) continue;
-          console.log(`[orchestrator] CLI for session ${info.sessionId} did not reconnect, relaunching...`);
-          await this.launcher.relaunch(info.sessionId);
-        }
-      }, RECONNECT_GRACE_MS);
     }
   }
 
