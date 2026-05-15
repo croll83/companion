@@ -42,6 +42,9 @@ jobs:
     name: deploy/preview
     needs: test-gate
     runs-on: ubuntu-latest
+    # Fork repos don't have DOCKERHUB_* secrets — let the job fail silently
+    # instead of spamming email notifications on every push to main.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +76,10 @@ jobs:
     name: deploy/preview-npm
     needs: test-gate
     runs-on: ubuntu-latest
+    # Fork repos can't publish to the upstream `the-companion` npm package —
+    # let the job fail silently. The stable release tarball asset uploaded by
+    # publish.yml is the canonical fork artifact.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
