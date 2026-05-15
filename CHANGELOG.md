@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.99.0](https://github.com/croll83/companion/compare/the-companion-v0.98.0...the-companion-v0.99.0) (2026-05-15)
+
+
+### Features
+
+* **update-checker:** point auto-update to fork GitHub Releases instead of npm ([#4](https://github.com/croll83/companion/issues/4)) ([1614c6b](https://github.com/croll83/companion/commit/1614c6b69acad47e1e14af6de5258c67670f9906))
+
 ## [0.98.0](https://github.com/croll83/companion/compare/the-companion-v0.97.0...the-companion-v0.98.0) (2026-05-15)
 
 
