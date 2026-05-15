@@ -1,4 +1,15 @@
 import type { Hono } from "hono";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  cpSync,
+  copyFileSync,
+  existsSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CliLauncher } from "../cli-launcher.js";
 import type { WsBridge } from "../ws-bridge.js";
 import type { TerminalManager } from "../terminal-manager.js";
@@ -8,12 +19,37 @@ import {
   checkForUpdate,
   isUpdateAvailable,
   setUpdateInProgress,
+  FORK_REPO,
 } from "../update-checker.js";
 import { refreshServiceDefinition } from "../service.js";
 import { getSettings } from "../settings-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
 import { checkHostsEntry } from "../hosts-check.js";
 import { TLS_BRIDGE_HOSTNAME } from "../tls-manager.js";
+
+/**
+ * Resolve the directory where Bun stores the global install of `the-companion`.
+ *
+ * Bun's global install layout is `~/.bun/install/global/node_modules/<pkg>`
+ * on all platforms it supports. We resolve relative to `os.homedir()` so the
+ * Windows case (USERPROFILE) is handled automatically.
+ *
+ * Returns null when the directory does not exist — callers should surface a
+ * clear error rather than silently writing files into a non-existent path.
+ *
+ * Exported for testing.
+ */
+export function resolveBunGlobalInstallDir(): string | null {
+  const candidate = join(
+    homedir(),
+    ".bun",
+    "install",
+    "global",
+    "node_modules",
+    "the-companion",
+  );
+  return existsSync(candidate) ? candidate : null;
+}
 
 export function registerSystemRoutes(
   api: Hono,
@@ -112,24 +148,80 @@ export function registerSystemRoutes(
     setUpdateInProgress(true);
 
     setTimeout(async () => {
+      let tmpDir: string | null = null;
       try {
+        const version = state.latestVersion;
+        if (!version) {
+          throw new Error("latestVersion is null at update time");
+        }
         console.log(
-          `[update] Updating the-companion to ${state.latestVersion}...`,
+          `[update] Updating the-companion to ${version} from ${FORK_REPO} GitHub release...`,
         );
-        const proc = Bun.spawn(
-          ["bun", "install", "-g", `the-companion@${state.latestVersion}`],
+
+        // The fork can't publish to npm (the `the-companion` package belongs
+        // to the upstream project), so we download the tarball attached to the
+        // GitHub release and replace the global install in-place. The asset
+        // name follows the `npm pack` convention: <name>-<version>.tgz.
+        const tag = `the-companion-v${version}`;
+        const tarballUrl = `https://github.com/${FORK_REPO}/releases/download/${tag}/the-companion-${version}.tgz`;
+
+        const globalDir = resolveBunGlobalInstallDir();
+        if (!globalDir) {
+          throw new Error(
+            "Could not find Bun global install dir for the-companion at ~/.bun/install/global/node_modules/the-companion",
+          );
+        }
+
+        tmpDir = mkdtempSync(join(tmpdir(), "companion-update-"));
+        const tarballPath = join(tmpDir, "package.tgz");
+
+        console.log(`[update] Downloading tarball from ${tarballUrl}`);
+        const dlRes = await fetch(tarballUrl, {
+          headers: { "User-Agent": "the-companion-update-checker" },
+        });
+        if (!dlRes.ok) {
+          throw new Error(
+            `download failed: HTTP ${dlRes.status} ${dlRes.statusText}`,
+          );
+        }
+        const buf = Buffer.from(await dlRes.arrayBuffer());
+        writeFileSync(tarballPath, buf);
+
+        // `npm pack` produces a tarball with a single top-level "package/"
+        // directory. We extract into a scratch dir and then swap files in.
+        const extractDir = join(tmpDir, "extracted");
+        mkdirSync(extractDir);
+        const tarProc = Bun.spawn(
+          ["tar", "xzf", tarballPath, "-C", extractDir],
           { stdout: "pipe", stderr: "pipe" },
         );
-        const exitCode = await proc.exited;
-        if (exitCode !== 0) {
-          const stderr = await new Response(proc.stderr).text();
-          console.error(
-            `[update] bun install failed (code ${exitCode}):`,
-            stderr,
-          );
-          setUpdateInProgress(false);
-          return;
+        const tarExit = await tarProc.exited;
+        if (tarExit !== 0) {
+          const stderr = await new Response(tarProc.stderr).text();
+          throw new Error(`tar extraction failed (code ${tarExit}): ${stderr}`);
         }
+
+        const pkgDir = join(extractDir, "package");
+        if (!existsSync(pkgDir)) {
+          throw new Error(`extracted tarball missing "package/" directory at ${pkgDir}`);
+        }
+
+        // Replace shipping directories. We blow away the destination first to
+        // avoid stale files from previous versions (e.g. removed components).
+        for (const sub of ["bin", "server", "dist"] as const) {
+          const dest = join(globalDir, sub);
+          const src = join(pkgDir, sub);
+          rmSync(dest, { recursive: true, force: true });
+          if (existsSync(src)) {
+            cpSync(src, dest, { recursive: true });
+          }
+        }
+        copyFileSync(
+          join(pkgDir, "package.json"),
+          join(globalDir, "package.json"),
+        );
+
+        console.log(`[update] Installed the-companion ${version} into ${globalDir}`);
 
         // Re-pull Docker image if auto-update is enabled
         if (getSettings().dockerAutoUpdate) {
@@ -182,6 +274,16 @@ export function registerSystemRoutes(
       } catch (err) {
         console.error("[update] Update failed:", err);
         setUpdateInProgress(false);
+      } finally {
+        // Best-effort cleanup of the temporary download dir. We don't care
+        // about failures here — the OS will eventually clean up tmpdir anyway.
+        if (tmpDir) {
+          try {
+            rmSync(tmpDir, { recursive: true, force: true });
+          } catch {
+            /* ignore */
+          }
+        }
       }
     }, 100);
 

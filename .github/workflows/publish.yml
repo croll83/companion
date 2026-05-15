@@ -57,11 +57,36 @@ jobs:
         working-directory: web
         run: npm pack --dry-run
 
+      # The fork cannot publish to npm — the `the-companion` package is owned
+      # by the upstream project. We try anyway (in case a maintainer of the
+      # upstream package runs this workflow with a real token) but ignore
+      # failures so the rest of the release pipeline (tarball upload) still
+      # runs for fork users.
       - name: Publish to npm
         working-directory: web
+        continue-on-error: true
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+
+      # Pack the same tarball npm would have published and attach it to the
+      # GitHub release. The auto-updater in this fork downloads this asset.
+      - name: Pack release tarball
+        working-directory: web
+        run: npm pack
+
+      - name: Upload release tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: web
+        run: |
+          tarball=$(ls the-companion-*.tgz | head -n 1)
+          if [ -z "$tarball" ]; then
+            echo "ERROR: no tarball produced by npm pack" >&2
+            exit 1
+          fi
+          echo "Uploading $tarball to release ${{ needs.release-please.outputs.tag_name }}"
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" "$tarball" --clobber
 
   docker:
     needs: release-please

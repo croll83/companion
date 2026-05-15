@@ -23,6 +23,8 @@ vi.mock("../update-checker.js", () => ({
   checkForUpdate: vi.fn(async () => {}),
   isUpdateAvailable: vi.fn(() => false),
   setUpdateInProgress: vi.fn(),
+  // Constant — system-routes.ts only reads it inside the update flow.
+  FORK_REPO: "croll83/companion",
 }));
 
 // ─── Mock service ──────────────────────────────────────────────────────────
@@ -50,6 +52,30 @@ vi.mock("../tls-manager.js", () => ({
     reason: "test",
   })),
 }));
+
+// ─── Mock node:fs ──────────────────────────────────────────────────────────
+// The update flow reads/writes the global install dir. We mock every fs call
+// it uses so the test never touches the real filesystem.
+const mockMkdtempSync = vi.hoisted(() => vi.fn(() => "/tmp/companion-update-mock"));
+const mockMkdirSync = vi.hoisted(() => vi.fn());
+const mockWriteFileSync = vi.hoisted(() => vi.fn());
+const mockRmSync = vi.hoisted(() => vi.fn());
+const mockCpSync = vi.hoisted(() => vi.fn());
+const mockCopyFileSync = vi.hoisted(() => vi.fn());
+const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return {
+    ...actual,
+    mkdtempSync: mockMkdtempSync,
+    mkdirSync: mockMkdirSync,
+    writeFileSync: mockWriteFileSync,
+    rmSync: mockRmSync,
+    cpSync: mockCpSync,
+    copyFileSync: mockCopyFileSync,
+    existsSync: mockExistsSync,
+  };
+});
 
 import { Hono } from "hono";
 import { getUsageLimits } from "../usage-limits.js";
@@ -98,6 +124,10 @@ let terminalManager: ReturnType<typeof createMockTerminalManager>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Reset fs mocks back to their default permissive behaviour so individual
+  // tests can opt into a specific scenario.
+  mockExistsSync.mockReturnValue(true);
+  mockMkdtempSync.mockReturnValue("/tmp/companion-update-mock");
 
   launcher = createMockLauncher();
   wsBridge = createMockWsBridge();
@@ -386,8 +416,16 @@ describe("POST /api/update", () => {
   });
 
   // Exercises the async setTimeout callback inside the update handler.
-  // Mocks Bun.spawn to simulate a successful install + restart.
-  it("runs the install and restart flow inside the deferred callback", async () => {
+  //
+  // The new fork-aware flow:
+  //   1. downloads the tarball from the fork's GitHub release page,
+  //   2. extracts it with `tar xzf` (via Bun.spawn),
+  //   3. swaps bin/server/dist + package.json in the global install dir,
+  //   4. spawns the platform-appropriate restart command.
+  //
+  // We mock fetch, Bun.spawn, and all node:fs side effects so the test never
+  // touches the real network or disk.
+  it("downloads the tarball from the fork release and runs the install + restart flow", async () => {
     vi.useFakeTimers();
 
     vi.mocked(getUpdateState).mockReturnValue({
@@ -401,14 +439,28 @@ describe("POST /api/update", () => {
     });
     vi.mocked(isUpdateAvailable).mockReturnValue(true);
 
-    // Mock Bun.spawn for the install command
+    // Pretend the Bun global install dir exists, and that the extracted
+    // tarball contains the expected "package/" subdir.
+    mockExistsSync.mockReturnValue(true);
+
+    // fetch returns a tarball-shaped buffer (content doesn't matter — tar is
+    // mocked too).
+    const mockTarballBytes = new TextEncoder().encode("fake-tgz-bytes");
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      arrayBuffer: async () => mockTarballBytes.buffer,
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // First spawn: tar extract. Second spawn: restart command.
     const mockSpawn = vi.fn()
       .mockReturnValueOnce({
         exited: Promise.resolve(0),
         stdout: new ReadableStream(),
         stderr: new ReadableStream(),
       })
-      // Second call is the restart command
       .mockReturnValueOnce({
         exited: Promise.resolve(0),
         stdout: new ReadableStream(),
@@ -425,23 +477,86 @@ describe("POST /api/update", () => {
     // Advance past the 100ms setTimeout that starts the install
     await vi.advanceTimersByTimeAsync(150);
 
-    // The install spawn should have been called
+    // Tarball was fetched from the fork's GitHub release URL.
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://github.com/croll83/companion/releases/download/the-companion-v2.0.0/the-companion-2.0.0.tgz",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "User-Agent": expect.stringContaining("the-companion"),
+        }),
+      }),
+    );
+
+    // tar was invoked to extract the tarball.
     expect(mockSpawn).toHaveBeenCalledWith(
-      ["bun", "install", "-g", "the-companion@2.0.0"],
+      expect.arrayContaining(["tar", "xzf"]),
       expect.anything(),
     );
+
+    // Files were swapped into the global install dir (we don't assert exact
+    // paths here — homedir() differs across environments).
+    expect(mockCpSync).toHaveBeenCalled();
+    expect(mockCopyFileSync).toHaveBeenCalled();
 
     // Advance past the 500ms exit timeout
     await vi.advanceTimersByTimeAsync(600);
 
     vi.useRealTimers();
     exitSpy.mockRestore();
+    vi.unstubAllGlobals();
     // @ts-expect-error -- cleanup Bun global mock
     delete globalThis.Bun;
   });
 
-  // When the install command fails, setUpdateInProgress should be reset.
-  it("resets updateInProgress when install fails", async () => {
+  // When the tarball download fails (e.g. release asset missing or 404),
+  // setUpdateInProgress should be reset so the user can retry.
+  it("resets updateInProgress when tarball download fails", async () => {
+    vi.useFakeTimers();
+
+    vi.mocked(getUpdateState).mockReturnValue({
+      currentVersion: "1.0.0",
+      latestVersion: "2.0.0",
+      lastChecked: Date.now(),
+      isServiceMode: true,
+      checking: false,
+      updateInProgress: false,
+      channel: "stable",
+    });
+    vi.mocked(isUpdateAvailable).mockReturnValue(true);
+    mockExistsSync.mockReturnValue(true);
+
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      arrayBuffer: async () => new ArrayBuffer(0),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const mockSpawn = vi.fn();
+    // @ts-expect-error -- Bun global mock
+    globalThis.Bun = { spawn: mockSpawn };
+
+    const res = await app.request("/api/update", { method: "POST" });
+    expect(res.status).toBe(200);
+
+    await vi.advanceTimersByTimeAsync(150);
+
+    // After failed download, setUpdateInProgress should be called with false
+    expect(setUpdateInProgress).toHaveBeenCalledWith(false);
+    // tar should never be spawned because the download failed first.
+    expect(mockSpawn).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    // @ts-expect-error -- cleanup Bun global mock
+    delete globalThis.Bun;
+  });
+
+  // When the Bun global install dir doesn't exist on disk, the update should
+  // fail fast with a clear error rather than silently writing into a
+  // non-existent path.
+  it("resets updateInProgress when global install dir cannot be resolved", async () => {
     vi.useFakeTimers();
 
     vi.mocked(getUpdateState).mockReturnValue({
@@ -455,17 +570,13 @@ describe("POST /api/update", () => {
     });
     vi.mocked(isUpdateAvailable).mockReturnValue(true);
 
-    const stderrStream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("install error"));
-        controller.close();
-      },
-    });
-    const mockSpawn = vi.fn().mockReturnValueOnce({
-      exited: Promise.resolve(1),
-      stdout: new ReadableStream(),
-      stderr: stderrStream,
-    });
+    // existsSync returns false for everything — so the global install dir
+    // resolver returns null and the flow aborts.
+    mockExistsSync.mockReturnValue(false);
+
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const mockSpawn = vi.fn();
     // @ts-expect-error -- Bun global mock
     globalThis.Bun = { spawn: mockSpawn };
 
@@ -474,10 +585,11 @@ describe("POST /api/update", () => {
 
     await vi.advanceTimersByTimeAsync(150);
 
-    // After failed install, setUpdateInProgress should be called with false
     expect(setUpdateInProgress).toHaveBeenCalledWith(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     // @ts-expect-error -- cleanup Bun global mock
     delete globalThis.Bun;
   });

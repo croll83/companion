@@ -14,6 +14,28 @@ vi.mock("./settings-manager.js", () => ({
 
 let checker: typeof import("./update-checker.js");
 
+// Helper: build a minimal GitHub Release object that satisfies the updater.
+function release(opts: {
+  tag: string;
+  prerelease?: boolean;
+  draft?: boolean;
+  name?: string | null;
+}): {
+  tag_name: string;
+  name: string | null;
+  prerelease: boolean;
+  draft: boolean;
+  published_at: string;
+} {
+  return {
+    tag_name: opts.tag,
+    name: opts.name ?? opts.tag,
+    prerelease: opts.prerelease ?? false,
+    draft: opts.draft ?? false,
+    published_at: new Date().toISOString(),
+  };
+}
+
 beforeEach(async () => {
   vi.resetModules();
   mockFetch.mockReset();
@@ -23,6 +45,50 @@ beforeEach(async () => {
 
 afterEach(() => {
   checker.stopPeriodicCheck();
+});
+
+// ===========================================================================
+// parseVersionFromTag — extracts the semver portion of release-please tags
+// ===========================================================================
+describe("parseVersionFromTag", () => {
+  it("parses stable version tag", () => {
+    // release-please prefixes the npm package name to disambiguate when there
+    // are multiple release lines in a monorepo.
+    expect(checker.parseVersionFromTag("the-companion-v1.2.3")).toBe("1.2.3");
+  });
+
+  it("parses prerelease/preview version tag", () => {
+    expect(
+      checker.parseVersionFromTag("the-companion-v1.2.3-preview.123"),
+    ).toBe("1.2.3-preview.123");
+  });
+
+  it("parses preview tag with timestamp + sha", () => {
+    expect(
+      checker.parseVersionFromTag(
+        "the-companion-v0.66.0-preview.20260228140000.abc1234",
+      ),
+    ).toBe("0.66.0-preview.20260228140000.abc1234");
+  });
+
+  it("returns null for tags without the package prefix", () => {
+    // Plain "v1.2.3" tags (created manually or by other tools) should not be
+    // confused for releases of this package.
+    expect(checker.parseVersionFromTag("v1.2.3")).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(checker.parseVersionFromTag("")).toBeNull();
+  });
+
+  it("returns null for null/undefined", () => {
+    expect(checker.parseVersionFromTag(null)).toBeNull();
+    expect(checker.parseVersionFromTag(undefined)).toBeNull();
+  });
+
+  it("returns null for tags missing the v prefix", () => {
+    expect(checker.parseVersionFromTag("the-companion-1.2.3")).toBeNull();
+  });
 });
 
 // ===========================================================================
@@ -171,48 +237,100 @@ describe("getUpdateState", () => {
 
 // ===========================================================================
 // checkForUpdate
+//
+// The updater reads from the fork's GitHub Releases API rather than npm,
+// because the fork cannot publish to the `the-companion` npm package (it
+// belongs to the upstream project). We verify the request shape, channel
+// selection (stable vs prerelease), and graceful handling of failures.
 // ===========================================================================
 describe("checkForUpdate", () => {
-  it("fetches from stable dist-tag by default", async () => {
+  it("fetches from the fork's GitHub releases endpoint", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ version: "99.0.0" }),
+      json: () => Promise.resolve([release({ tag: "the-companion-v99.0.0" })]),
     });
 
     await checker.checkForUpdate();
 
-    // Should use /latest for stable channel
-    expect(mockFetch).toHaveBeenCalledWith(
-      "https://registry.npmjs.org/the-companion/latest",
-      expect.objectContaining({
-        headers: { Accept: "application/json" },
-      }),
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const call = mockFetch.mock.calls[0];
+    expect(call[0]).toMatch(
+      /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/releases\?per_page=20$/,
     );
+    // GitHub API requires a User-Agent header and the vendor-specific Accept.
+    expect(call[1].headers).toMatchObject({
+      Accept: "application/vnd.github+json",
+      "User-Agent": expect.stringContaining("the-companion"),
+    });
+
     const state = checker.getUpdateState();
     expect(state.latestVersion).toBe("99.0.0");
     expect(state.lastChecked).toBeGreaterThan(0);
     expect(state.channel).toBe("stable");
   });
 
-  it("fetches from next dist-tag when channel is prerelease", async () => {
-    mockGetSettings.mockReturnValue({ updateChannel: "prerelease" });
+  // The stable channel must skip prerelease entries even if they appear first
+  // in the releases array (GitHub orders by creation time, not stability).
+  it("picks the latest non-prerelease release for the stable channel", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ version: "99.0.0-preview.1" }),
+      json: () => Promise.resolve([
+        release({ tag: "the-companion-v99.1.0-preview.1", prerelease: true }),
+        release({ tag: "the-companion-v99.0.0" }),
+        release({ tag: "the-companion-v98.0.0" }),
+      ]),
     });
 
     await checker.checkForUpdate();
+    expect(checker.getUpdateState().latestVersion).toBe("99.0.0");
+  });
 
-    // Should use /next for prerelease channel
-    expect(mockFetch).toHaveBeenCalledWith(
-      "https://registry.npmjs.org/the-companion/next",
-      expect.objectContaining({
-        headers: { Accept: "application/json" },
-      }),
-    );
+  it("picks the latest prerelease for the prerelease channel", async () => {
+    mockGetSettings.mockReturnValue({ updateChannel: "prerelease" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([
+        release({ tag: "the-companion-v99.1.0-preview.2", prerelease: true }),
+        release({ tag: "the-companion-v99.0.0" }),
+        release({ tag: "the-companion-v99.1.0-preview.1", prerelease: true }),
+      ]),
+    });
+
+    await checker.checkForUpdate();
     const state = checker.getUpdateState();
-    expect(state.latestVersion).toBe("99.0.0-preview.1");
+    expect(state.latestVersion).toBe("99.1.0-preview.2");
     expect(state.channel).toBe("prerelease");
+  });
+
+  // Draft releases are not yet published to the public — even if they match
+  // the channel they must be skipped so users never get a half-baked update.
+  it("skips draft releases", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([
+        release({ tag: "the-companion-v99.2.0", draft: true }),
+        release({ tag: "the-companion-v99.0.0" }),
+      ]),
+    });
+
+    await checker.checkForUpdate();
+    expect(checker.getUpdateState().latestVersion).toBe("99.0.0");
+  });
+
+  // Tags created by other tools (e.g. plain "v1.2.3", or arbitrary names)
+  // should be ignored so the updater never picks an unrelated tag.
+  it("skips releases whose tag does not match the the-companion-vX.Y.Z format", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([
+        release({ tag: "v99.5.0" }),
+        release({ tag: "random-tag" }),
+        release({ tag: "the-companion-v99.0.0" }),
+      ]),
+    });
+
+    await checker.checkForUpdate();
+    expect(checker.getUpdateState().latestVersion).toBe("99.0.0");
   });
 
   // When switching channels, the previous channel's latestVersion must be
@@ -221,7 +339,7 @@ describe("checkForUpdate", () => {
     // First check on stable channel sets a latestVersion
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ version: "99.0.0" }),
+      json: () => Promise.resolve([release({ tag: "the-companion-v99.0.0" })]),
     });
     await checker.checkForUpdate();
     expect(checker.getUpdateState().latestVersion).toBe("99.0.0");
@@ -247,7 +365,23 @@ describe("checkForUpdate", () => {
   });
 
   it("handles non-ok response gracefully", async () => {
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    // Simulates a GitHub rate-limit response. We must not crash, and we must
+    // not set a latestVersion.
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 403 });
+
+    await checker.checkForUpdate();
+
+    const state = checker.getUpdateState();
+    expect(state.latestVersion).toBeNull();
+  });
+
+  it("handles non-array response payload gracefully", async () => {
+    // Defensive: if GitHub ever returns an error envelope instead of an array,
+    // the updater must not blow up.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ message: "Bad credentials" }),
+    });
 
     await checker.checkForUpdate();
 
@@ -267,7 +401,7 @@ describe("isUpdateAvailable", () => {
   it("returns true when latest is newer than current", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ version: "99.0.0" }),
+      json: () => Promise.resolve([release({ tag: "the-companion-v99.0.0" })]),
     });
 
     await checker.checkForUpdate();
@@ -277,7 +411,9 @@ describe("isUpdateAvailable", () => {
   it("returns false when latest equals current", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ version: checker.getCurrentVersion() }),
+      json: () => Promise.resolve([
+        release({ tag: `the-companion-v${checker.getCurrentVersion()}` }),
+      ]),
     });
 
     await checker.checkForUpdate();
