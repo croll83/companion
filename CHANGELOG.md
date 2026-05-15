@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.98.0](https://github.com/croll83/companion/compare/the-companion-v0.97.0...the-companion-v0.98.0) (2026-05-15)
+
+
+### Features
+
+* **cli-launcher:** add tlsLoopback bridge mode + hosts-check banner for Claude 2.1.142 allowlist ([#2](https://github.com/croll83/companion/issues/2)) ([6c1011a](https://github.com/croll83/companion/commit/6c1011a3ca0c04b28561346c7feafa74fca5e7ce))
+
 ## [0.97.0](https://github.com/croll83/companion/compare/the-companion-v0.96.0...the-companion-v0.97.0) (2026-05-15)
 
 
