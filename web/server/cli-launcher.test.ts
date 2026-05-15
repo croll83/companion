@@ -13,6 +13,17 @@ const mockResolveBinary = vi.hoisted(() => vi.fn((_name: string): string | null 
 const mockGetEnrichedPath = vi.hoisted(() => vi.fn(() => "/usr/bin:/usr/local/bin"));
 vi.mock("./path-resolver.js", () => ({ resolveBinary: mockResolveBinary, getEnrichedPath: mockGetEnrichedPath }));
 
+// Mock settings-manager so cliBridgeMode can be flipped per-test. By default
+// we return the safe "loopback" mode so existing tests are unaffected.
+type MockBridgeMode = "loopback" | "jsonHandoff" | "tlsLoopback";
+const mockGetSettings = vi.hoisted(() =>
+  vi.fn((): { cliBridgeMode: MockBridgeMode } => ({ cliBridgeMode: "loopback" })),
+);
+vi.mock("./settings-manager.js", () => ({
+  DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
+  getSettings: mockGetSettings,
+}));
+
 // Mock container-manager for container validation in relaunch
 const mockIsContainerAlive = vi.hoisted(() => vi.fn((): "running" | "stopped" | "missing" => "running"));
 const mockHasBinaryInContainer = vi.hoisted(() => vi.fn((): boolean => true));
@@ -157,6 +168,7 @@ beforeEach(() => {
   mockListen.mockImplementation(() => ({ stop: vi.fn() }));
   mockResolveBinary.mockReturnValue("/usr/bin/claude");
   mockGetContainerById.mockReturnValue(undefined);
+  mockGetSettings.mockReturnValue({ cliBridgeMode: "loopback" });
 });
 
 afterEach(() => {
@@ -1339,5 +1351,88 @@ describe("isCmdScript platform guard", () => {
     // On non-Windows, .cmd files should be spawned directly (no cmd.exe wrapping)
     expect(cmdAndArgs[0]).toBe("/usr/local/bin/claude.cmd");
     expect(cmdAndArgs[0]).not.toBe("cmd.exe");
+  });
+});
+
+// ─── tlsLoopback bridge mode ────────────────────────────────────────────────
+
+describe("cliBridgeMode=tlsLoopback", () => {
+  // When tlsLoopback is selected, the --sdk-url argv value must use the
+  // wss:// scheme and target the allowlisted Anthropic hostname instead of
+  // 127.0.0.1. Claude Code v2.1.142+ rejects any other host outright.
+  it("spawns CLI with wss:// targeting the allowlisted Anthropic hostname", () => {
+    mockGetSettings.mockReturnValue({ cliBridgeMode: "tlsLoopback" });
+
+    launcher.launch({ cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    expect(cmdAndArgs).toContain("--sdk-url");
+    const sdkUrlIdx = cmdAndArgs.indexOf("--sdk-url");
+    const sdkUrl = cmdAndArgs[sdkUrlIdx + 1];
+    expect(sdkUrl).toMatch(/^wss:\/\/beacon\.claude-ai\.staging\.ant\.dev:8443\/ws\/cli\//);
+  });
+
+  // NODE_EXTRA_CA_CERTS is the standard Node TLS knob for trusting an extra
+  // CA. Without it, the spawned CLI will reject our self-signed certificate
+  // and the WebSocket handshake will fail before any --sdk-url protocol
+  // negotiation can happen.
+  it("propagates NODE_EXTRA_CA_CERTS to the spawned process env", () => {
+    mockGetSettings.mockReturnValue({ cliBridgeMode: "tlsLoopback" });
+    launcher.setTlsCaPath("/tmp/companion/tls/ca.crt");
+
+    launcher.launch({ cwd: "/tmp" });
+
+    const [, options] = mockSpawn.mock.calls[0];
+    expect(options.env.NODE_EXTRA_CA_CERTS).toBe("/tmp/companion/tls/ca.crt");
+  });
+
+  // When the CA path has not been registered (e.g. cert generation failed
+  // at startup), we should NOT inject an empty NODE_EXTRA_CA_CERTS — that
+  // would override any pre-existing system trust the user has configured.
+  it("does NOT inject NODE_EXTRA_CA_CERTS when no CA path is registered", () => {
+    mockGetSettings.mockReturnValue({ cliBridgeMode: "tlsLoopback" });
+    launcher.setTlsCaPath(null);
+
+    launcher.launch({ cwd: "/tmp" });
+
+    const [, options] = mockSpawn.mock.calls[0];
+    expect(options.env.NODE_EXTRA_CA_CERTS).toBeUndefined();
+  });
+
+  // Containerized sessions cannot use tlsLoopback because the cert files
+  // are not visible inside the container. They must keep the host-alias
+  // ws:// URL. This is a guardrail to make sure that future refactors don't
+  // accidentally route containers through the TLS proxy.
+  it("keeps ws:// host-alias URL for containerized sessions", () => {
+    mockGetSettings.mockReturnValue({ cliBridgeMode: "tlsLoopback" });
+
+    launcher.launch({
+      cwd: "/tmp/project",
+      containerId: "abc123def456",
+      containerName: "companion-test",
+    });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const bashCmd = cmdAndArgs[cmdAndArgs.length - 1];
+    expect(bashCmd).toContain("ws://host.docker.internal:3456/ws/cli/");
+    expect(bashCmd).not.toContain("wss://");
+  });
+
+  // COMPANION_SDK_BRIDGE_HOST/PORT environment overrides allow ops teams to
+  // pin alternate allowlisted hosts/ports without redeploying.
+  it("honors COMPANION_SDK_BRIDGE_HOST/PORT env overrides", () => {
+    mockGetSettings.mockReturnValue({ cliBridgeMode: "tlsLoopback" });
+    process.env.COMPANION_SDK_BRIDGE_HOST = "claude.fedstart.com";
+    process.env.COMPANION_SDK_BRIDGE_PORT = "9443";
+
+    try {
+      launcher.launch({ cwd: "/tmp" });
+      const [cmdAndArgs] = mockSpawn.mock.calls[0];
+      const sdkUrl = cmdAndArgs[cmdAndArgs.indexOf("--sdk-url") + 1];
+      expect(sdkUrl).toMatch(/^wss:\/\/claude\.fedstart\.com:9443\/ws\/cli\//);
+    } finally {
+      delete process.env.COMPANION_SDK_BRIDGE_HOST;
+      delete process.env.COMPANION_SDK_BRIDGE_PORT;
+    }
   });
 });

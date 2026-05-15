@@ -45,7 +45,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const notificationApiAvailable = typeof Notification !== "undefined";
   const [updateChannel, setUpdateChannel] = useState<"stable" | "prerelease">("stable");
   const [dockerAutoUpdate, setDockerAutoUpdate] = useState(false);
-  const [cliBridgeMode, setCliBridgeMode] = useState<"loopback" | "jsonHandoff">("loopback");
+  const [cliBridgeMode, setCliBridgeMode] = useState<"loopback" | "jsonHandoff" | "tlsLoopback">("loopback");
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updatingApp, setUpdatingApp] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
@@ -139,7 +139,11 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
         if (s.updateChannel === "stable" || s.updateChannel === "prerelease") setUpdateChannel(s.updateChannel);
         if (typeof s.dockerAutoUpdate === "boolean") setDockerAutoUpdate(s.dockerAutoUpdate);
-        if (s.cliBridgeMode === "loopback" || s.cliBridgeMode === "jsonHandoff") setCliBridgeMode(s.cliBridgeMode);
+        if (
+          s.cliBridgeMode === "loopback"
+          || s.cliBridgeMode === "jsonHandoff"
+          || s.cliBridgeMode === "tlsLoopback"
+        ) setCliBridgeMode(s.cliBridgeMode);
         if (typeof s.publicUrl === "string") {
           setPublicUrl(s.publicUrl);
           useStore.getState().setPublicUrl(s.publicUrl);
@@ -348,14 +352,24 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     <div>
                       <span className="block text-sm font-medium">Claude Code bridge mode</span>
                       <p className="mt-0.5 text-xs text-cc-muted">
-                        How the Companion hands the bridge URL to the spawned Claude Code CLI. Loopback is the default fix for Claude Code v1.2.1+ which rejects the literal "localhost". JSON handoff is the more robust just-every/code-style approach: writes a temp descriptor with a one-shot token and passes its path via CLAUDE_BRIDGE_CONFIG.
+                        How the Companion hands the bridge URL to the spawned Claude Code CLI.{" "}
+                        <strong>TLS loopback</strong> is required for Claude Code v2.1.142+, which restricts
+                        <code className="mx-0.5">--sdk-url</code> to a hardcoded list of Anthropic hostnames.
+                        It routes the SDK URL through a local TLS proxy presenting an allowlisted hostname;
+                        requires an <code>/etc/hosts</code> entry (see the alert banner if missing).
+                        Loopback works for v1.2.1+ but is rejected on 2.1.142+. JSON handoff writes a temp
+                        descriptor with a one-shot token via <code>CLAUDE_BRIDGE_CONFIG</code>.
                       </p>
                     </div>
                     <select
                       aria-label="CLI bridge mode"
                       value={cliBridgeMode}
                       onChange={async (e) => {
-                        const next = e.target.value === "jsonHandoff" ? "jsonHandoff" : "loopback";
+                        const v = e.target.value;
+                        const next: "loopback" | "jsonHandoff" | "tlsLoopback" =
+                          v === "jsonHandoff" ? "jsonHandoff"
+                          : v === "tlsLoopback" ? "tlsLoopback"
+                          : "loopback";
                         const prev = cliBridgeMode;
                         setCliBridgeMode(next);
                         try {
@@ -366,7 +380,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                       }}
                       className="ml-3 px-2 py-1.5 text-xs bg-cc-bg rounded-lg border border-cc-border text-cc-fg focus:outline-none focus:ring-1 focus:ring-cc-primary"
                     >
-                      <option value="loopback">Loopback (default)</option>
+                      <option value="tlsLoopback">TLS loopback (recommended for Claude Code v2.1.142+)</option>
+                      <option value="loopback">Loopback (default, broken on v2.1.142+)</option>
                       <option value="jsonHandoff">JSON handoff (experimental)</option>
                     </select>
                   </div>

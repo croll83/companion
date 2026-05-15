@@ -104,8 +104,13 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.dockerAutoUpdate !== undefined && typeof body.dockerAutoUpdate !== "boolean") {
       return c.json({ error: "dockerAutoUpdate must be a boolean" }, 400);
     }
-    if (body.cliBridgeMode !== undefined && body.cliBridgeMode !== "loopback" && body.cliBridgeMode !== "jsonHandoff") {
-      return c.json({ error: "cliBridgeMode must be 'loopback' or 'jsonHandoff'" }, 400);
+    if (
+      body.cliBridgeMode !== undefined
+      && body.cliBridgeMode !== "loopback"
+      && body.cliBridgeMode !== "jsonHandoff"
+      && body.cliBridgeMode !== "tlsLoopback"
+    ) {
+      return c.json({ error: "cliBridgeMode must be 'loopback', 'jsonHandoff', or 'tlsLoopback'" }, 400);
     }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
@@ -216,7 +221,9 @@ export function registerSettingsRoutes(api: Hono): void {
           ? body.dockerAutoUpdate
           : undefined,
       cliBridgeMode:
-        body.cliBridgeMode === "loopback" || body.cliBridgeMode === "jsonHandoff"
+        body.cliBridgeMode === "loopback"
+        || body.cliBridgeMode === "jsonHandoff"
+        || body.cliBridgeMode === "tlsLoopback"
           ? (body.cliBridgeMode as CliBridgeMode)
           : undefined,
     });

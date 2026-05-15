@@ -421,7 +421,14 @@ export interface AppSettings {
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
-  cliBridgeMode: "loopback" | "jsonHandoff";
+  cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback";
+}
+
+export interface HostsCheckResult {
+  ok: boolean;
+  hostsPath: string;
+  suggestedCommand: string;
+  hostname: string;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -963,10 +970,14 @@ export const api = {
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
-    cliBridgeMode?: "loopback" | "jsonHandoff";
+    cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback";
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
+
+  // Hosts file diagnostic — used to render a banner when the embedded TLS
+  // proxy's allowlisted hostname is not mapped to 127.0.0.1.
+  getHostsCheck: () => get<HostsCheckResult>("/system/hosts-check"),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),
