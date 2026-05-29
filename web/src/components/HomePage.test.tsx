@@ -386,9 +386,9 @@ describe("HomePage", () => {
     render(<HomePage />);
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
-    // After PR #651 added Opus 4.7 to the top of the list, it becomes the
-    // default selection (CLAUDE_MODELS[0]) on a fresh HomePage.
-    const modelButton = screen.getByText("Opus 4.7");
+    // Opus 4.8 is at the top of CLAUDE_MODELS, so it becomes the
+    // default selection on a fresh HomePage.
+    const modelButton = screen.getByText("Opus 4.8");
     expect(modelButton).toBeInTheDocument();
 
     // Open model dropdown
@@ -664,7 +664,7 @@ describe("HomePage", () => {
     await waitFor(() => {
       expect(createSessionStreamMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "claude-opus-4-7",
+          model: "claude-opus-4-8",
           permissionMode: "bypassPermissions",
           cwd: "/repo",
           backend: "claude",
@@ -893,8 +893,8 @@ describe("HomePage", () => {
     render(<HomePage />);
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
-    // Open model dropdown — default is Opus 4.7 after PR #651.
-    const modelButton = screen.getByText("Opus 4.7");
+    // Open model dropdown — default is Opus 4.8 (CLAUDE_MODELS[0]).
+    const modelButton = screen.getByText("Opus 4.8");
     fireEvent.click(modelButton);
     expect(screen.getByText("Sonnet 4.6")).toBeInTheDocument();
 
