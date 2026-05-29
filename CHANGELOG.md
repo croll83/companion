@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.99.1](https://github.com/croll83/companion/compare/the-companion-v0.99.0...the-companion-v0.99.1) (2026-05-29)
+
+
+### Features
+
+* **models:** add claude-opus-4-8 as default Claude model ([8c75073](https://github.com/croll83/companion/commit/8c75073ceac7be255de8402426d9428c518c341c))
+
+
+### Miscellaneous Chores
+
+* release the-companion 0.99.1 ([b213f7a](https://github.com/croll83/companion/commit/b213f7ae86318f4573df5bddb12ac0da1d311129))
+
 ## [0.99.0](https://github.com/croll83/companion/compare/the-companion-v0.98.0...the-companion-v0.99.0) (2026-05-15)
 
 
