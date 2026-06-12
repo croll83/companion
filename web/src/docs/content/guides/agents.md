@@ -26,7 +26,7 @@ Agents are reusable configurations that spawn sessions with specific settings, p
    - **Permission mode**: Default, Accept Edits, or Bypass
    - **Working directory**: The folder the agent operates in (or "temp" for auto-created)
    - **Branch** (optional): Git branch to check out
-   - **Environment profile** (optional): Apply an [environment profile](/guides/docker-and-environments)
+   - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/docker-and-environments)
    - **Internet access** (Codex only): Toggle network access
 
 5. Click **Save**
@@ -170,7 +170,7 @@ Add key-value environment variables specific to this agent. These are merged wit
 |---|---|
 | **Branch** | Git branch to check out when the session starts |
 | **Create branch** | If checked, creates the branch if it doesn't exist |
-| **Use worktree** | Creates an isolated [git worktree](/guides/git-worktrees) for the session |
+| **Use worktree** | Creates an isolated [git worktree](#/docs/guides/git-worktrees) for the session |
 
 ### Codex-specific
 
@@ -194,9 +194,7 @@ The exported file contains the agent's full configuration. Tracking fields (ID, 
 2. Select a `.agent.json` file
 3. The agent is created in a **disabled** state for safety — review its configuration before enabling it
 
-<Warning>
-Imported agents start disabled. Review the agent's prompt, environment variables, and permissions before enabling it, especially if the file came from an external source.
-</Warning>
+> **Warning:** Imported agents start disabled. Review the agent's prompt, environment variables, and permissions before enabling it, especially if the file came from an external source.
 
 ### REST API
 

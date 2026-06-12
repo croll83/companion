@@ -81,8 +81,8 @@ Every push to `main` publishes preview artifacts:
 
 | Artifact | Tag | Example |
 |---|---|---|
-| Docker image (moving) | `preview-main` | `docker.io/stangirard/the-companion:preview-main` |
-| Docker image (immutable) | `preview-<sha>` | `docker.io/stangirard/the-companion:preview-abc1234` |
+| Docker image (moving) | `preview-main` | `docker.io/croll83/the-companion:preview-main` |
+| Docker image (immutable) | `preview-<sha>` | `docker.io/croll83/the-companion:preview-abc1234` |
 | npm package | `next` | `bunx the-companion@next` |
 
 In **Settings > Updates**, switch to **Prerelease** channel to receive preview builds.
@@ -105,7 +105,7 @@ Click **New Session** on the home page. Choose:
 - **Working directory**: The project folder the agent will operate in
 - **Model** (Claude Code): Which Claude model to use
 - **Branch** (optional): Select or create a git branch
-- **Environment** (optional): Apply an [environment profile](/guides/docker-and-environments)
+- **Environment** (optional): Apply an [environment profile](#/docs/guides/docker-and-environments)
 
 Click **Start** to launch the session.
 
@@ -121,17 +121,15 @@ Type a prompt in the composer and press Enter. You'll see:
 
 When the agent wants to write a file or run a command, a permission banner appears:
 
-<img src="/screenshots/readme-permissions.png" alt="Permission approval UI" />
-
 - **Allow**: Execute this tool call
 - **Deny**: Skip this action
 - **Allow all**: Auto-approve for the rest of the session
 
-See [Permissions](/guides/sessions-and-permissions#permissions) for more control options.
+See [Permissions](#/docs/guides/sessions-and-permissions) for more control options.
 
 ## Next steps
 
-- [Create saved prompts](/guides/saved-prompts) for reusable instructions
-- [Build agents](/guides/agents) for automated workflows
-- [Set up Docker environments](/guides/docker-and-environments) for isolated sessions
-- [Connect Linear](/guides/linear-integration) for issue-driven development
+- [Create saved prompts](#/docs/guides/saved-prompts) for reusable instructions
+- [Build agents](#/docs/guides/agents) for automated workflows
+- [Set up Docker environments](#/docs/guides/docker-and-environments) for isolated sessions
+- [Connect Linear](#/docs/guides/linear-integration) for issue-driven development

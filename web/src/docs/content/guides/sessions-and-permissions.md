@@ -17,9 +17,9 @@ Click **New Session** on the home page. Configure:
 | **Working directory** | The folder the agent operates in |
 | **Model** (Claude Code) | Which Claude model to use |
 | **Branch** (optional) | Git branch to check out or create |
-| **Use worktree** (optional) | Create an isolated [git worktree](/guides/git-worktrees) |
-| **Environment** (optional) | Apply an [environment profile](/guides/docker-and-environments) |
-| **Linear issue** (optional) | Link a [Linear issue](/guides/linear-integration) for context |
+| **Use worktree** (optional) | Create an isolated [git worktree](#/docs/guides/git-worktrees) |
+| **Environment** (optional) | Apply an [environment profile](#/docs/guides/docker-and-environments) |
+| **Linear issue** (optional) | Link a [Linear issue](#/docs/guides/linear-integration) for context |
 
 Click **Start** to launch the session.
 
@@ -94,17 +94,13 @@ Remove sessions from the sidebar by archiving them. This:
 - Stops the CLI subprocess
 - Removes the session file from disk
 - If a Docker container is running, removes the container and its volume
-- If a [Linear issue](/guides/linear-integration) is linked, prompts you to choose what happens to the issue status
+- If a [Linear issue](#/docs/guides/linear-integration) is linked, prompts you to choose what happens to the issue status
 
-<Warning>
-Archiving a Docker session removes the container and all uncommitted changes inside it. Make sure you've committed or pushed any work before archiving.
-</Warning>
+> **Warning:** Archiving a Docker session removes the container and all uncommitted changes inside it. Make sure you've committed or pushed any work before archiving.
 
 ## Permissions
 
 When an agent wants to perform a sensitive action — writing files, running commands, accessing the network — The Companion intercepts the request and presents it for your approval.
-
-<img src="/screenshots/readme-permissions.png" alt="Permission approval UI" />
 
 ### How it works
 
@@ -125,9 +121,7 @@ You can set the permission mode per session to control how much approval is requ
 | **Accept Edits** | File edits are auto-approved; commands and network access still need approval |
 | **Bypass** | All tool calls are auto-approved without prompting |
 
-<Warning>
-Bypass mode removes all safety gates. Only use this in isolated environments or when you fully trust the agent's task.
-</Warning>
+> **Warning:** Bypass mode removes all safety gates. Only use this in isolated environments or when you fully trust the agent's task.
 
 You can change the permission mode at any time during a session. The change takes effect immediately for all subsequent tool calls.
 

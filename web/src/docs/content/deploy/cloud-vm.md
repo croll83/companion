@@ -11,14 +11,12 @@ The Companion runs locally by default, but you can deploy it on a remote server 
 
 | Scenario | Recommended approach |
 |---|---|
-| Solo developer, single machine | [Local install](/get-started/installation) with `bunx the-companion` |
+| Solo developer, single machine | [Local install](#/docs/get-started/installation) with `bunx the-companion` |
 | Always-on server in the cloud | Cloud VM with Tailscale (this guide) |
-| Isolated per-project environments | [Docker sessions](/guides/docker-and-environments) on any host |
+| Isolated per-project environments | [Docker sessions](#/docs/guides/docker-and-environments) on any host |
 | Team sharing a single instance | Remote deploy with Tailscale ACLs for access control |
 
-<Tip>
-You can combine approaches — for example, deploy on a GCP VM and use Docker sessions within it for per-project isolation.
-</Tip>
+> **Tip:** You can combine approaches — for example, deploy on a GCP VM and use Docker sessions within it for per-project isolation.
 
 ## Architecture
 
@@ -29,7 +27,7 @@ Regardless of where you deploy, the architecture stays the same:
 3. Your browser connects to the server over WebSocket
 4. A reverse proxy or tunnel (like Tailscale) provides secure remote access
 
-The server is stateless enough to restart cleanly — sessions persist to disk and CLI processes reconnect automatically. See [Session Recovery](/guides/sessions-and-permissions#session-recovery) for details.
+The server is stateless enough to restart cleanly — sessions persist to disk and CLI processes reconnect automatically. See [Session Recovery](#/docs/guides/sessions-and-permissions) for details.
 
 ## GCP Virtual Machine
 
@@ -75,9 +73,7 @@ export COMPANION_HOSTNAME="companion"
 export TAILSCALE_AUTH_KEY="tskey-auth-REPLACE_ME"
 ```
 
-<Warning>
-Never commit `TAILSCALE_AUTH_KEY` to version control. Revoke and regenerate it after automated provisioning.
-</Warning>
+> **Warning:** Never commit `TAILSCALE_AUTH_KEY` to version control. Revoke and regenerate it after automated provisioning.
 
 ### 2. Create the VM
 
@@ -125,9 +121,7 @@ gcloud compute ssh "$INSTANCE" \
   --tunnel-through-iap
 ```
 
-<Tip>
-If you get a `SERVICE_DISABLED` error, wait a minute after enabling the IAP API — it can take a moment to propagate.
-</Tip>
+> **Tip:** If you get a `SERVICE_DISABLED` error, wait a minute after enabling the IAP API — it can take a moment to propagate.
 
 ### 4. Set up Cloud NAT
 
@@ -157,7 +151,7 @@ gcloud compute routers nats create "$NAT_NAME" \
 
 This script installs system packages, Docker, Node.js, and the development toolchain. Save it locally as `provision-devbox.sh`.
 
-```bash provision-devbox.sh
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -279,9 +273,7 @@ https://<hostname>.<tailnet>.ts.net/
 
 Replace `<hostname>` with the value of `COMPANION_HOSTNAME` and `<tailnet>` with your Tailscale network name.
 
-<Tip>
-Run `sudo tailscale status` on the VM to see the full hostname and confirm the node is connected.
-</Tip>
+> **Tip:** Run `sudo tailscale status` on the VM to see the full hostname and confirm the node is connected.
 
 ## Day-to-day operations
 
@@ -359,10 +351,8 @@ sudo apt-get install -y unzip
 - The VM has **no public IP** — it's only reachable via IAP (SSH) and Tailscale (HTTPS)
 - **Revoke and regenerate** the Tailscale auth key after provisioning
 - Use [Tailscale ACLs](https://tailscale.com/kb/1018/acls) to restrict which devices and users can reach the VM
-- The Companion generates an auth token automatically — see [Authentication](/get-started/installation#authentication) for details
+- The Companion generates an auth token automatically — see [Authentication](#/docs/get-started/installation) for details
 - Consider enabling GCP [OS Login](https://cloud.google.com/compute/docs/instances/managing-instance-access) for centralized SSH access control
 - Clear shell history after provisioning to remove any sensitive values: `history -c && history -w`
 
-<Note>
-The provisioning script uses `curl | sh` for Docker, NodeSource, and Tailscale for convenience. For stricter environments, consider using the official APT repositories with GPG signature verification instead. Each provider documents this approach: [Docker APT](https://docs.docker.com/engine/install/ubuntu/), [NodeSource](https://github.com/nodesource/distributions#installation-instructions), [Tailscale](https://tailscale.com/kb/1187/install-ubuntu-2204).
-</Note>
+> **Note:** The provisioning script uses `curl | sh` for Docker, NodeSource, and Tailscale for convenience. For stricter environments, consider using the official APT repositories with GPG signature verification instead. Each provider documents this approach: [Docker APT](https://docs.docker.com/engine/install/ubuntu/), [NodeSource](https://github.com/nodesource/distributions#installation-instructions), [Tailscale](https://tailscale.com/kb/1187/install-ubuntu-2204).

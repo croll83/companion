@@ -53,9 +53,7 @@ You can use environment variables to configure alternative model providers. For 
 
 3. Select this profile when creating sessions or configuring agents
 
-<Tip>
-The exact variables depend on your model provider's compatibility layer. Many providers offer OpenAI- or Anthropic-compatible APIs that accept the same environment variables.
-</Tip>
+> **Tip:** The exact variables depend on your model provider's compatibility layer. Many providers offer OpenAI- or Anthropic-compatible APIs that accept the same environment variables.
 
 ## Docker sessions
 
@@ -130,15 +128,7 @@ Add volume mounts in the environment profile to share directories between host a
 
 ### Auth and Git inside containers
 
-<Warning>
-Docker sessions require the `CLAUDE_CODE_OAUTH_TOKEN` environment variable to authenticate with Claude Code inside the container. To generate your token, run:
-
-```bash
-claude setup-token
-```
-
-This will output a token you can set in your environment profile's **Variables** tab, or export in your shell before starting the Companion.
-</Warning>
+> **Warning:** Docker sessions require the `CLAUDE_CODE_OAUTH_TOKEN` environment variable to authenticate with Claude Code inside the container. To generate your token, run `claude setup-token`. This will output a token you can set in your environment profile's **Variables** tab, or export in your shell before starting the Companion.
 
 The Companion automatically:
 - Copies your Claude Code / Codex credentials into the container
@@ -148,9 +138,7 @@ The Companion automatically:
 - Marks `/workspace` as a safe directory
 - Rewrites SSH git remotes to HTTPS (containers lack SSH keys)
 
-<Note>
-Docker sessions and [git worktrees](/guides/git-worktrees) are mutually exclusive. Containers already provide filesystem isolation, so worktrees are not needed.
-</Note>
+> **Note:** Docker sessions and [git worktrees](#/docs/guides/git-worktrees) are mutually exclusive. Containers already provide filesystem isolation, so worktrees are not needed.
 
 ## Init scripts
 

@@ -45,9 +45,7 @@ In Linear's webhook settings, create a webhook pointing to:
 https://your-companion:3456/api/chat/webhooks/linear
 ```
 
-<Warning>
-The webhook endpoint (`/api/chat/webhooks/linear`) is intentionally **unauthenticated** — Linear verifies requests using HMAC signatures with your webhook secret. Do not put this endpoint behind additional auth that would block Linear's requests.
-</Warning>
+> **Warning:** The webhook endpoint (`/api/chat/webhooks/linear`) is intentionally **unauthenticated** — Linear verifies requests using HMAC signatures with your webhook secret. Do not put this endpoint behind additional auth that would block Linear's requests.
 
 ### 4. Create a chat-enabled agent
 
@@ -75,9 +73,7 @@ The **mention pattern** field accepts a regular expression that the incoming mes
 | `(review\|audit)` | Messages containing "review" or "audit" |
 | *(empty)* | All messages (no filter) |
 
-<Note>
-Mention patterns are case-insensitive and tested against the first 1,000 characters of the message for safety.
-</Note>
+> **Note:** Mention patterns are case-insensitive and tested against the first 1,000 characters of the message for safety.
 
 ## Multi-turn conversations
 
@@ -89,58 +85,6 @@ When **auto-subscribe** is enabled for a chat platform binding:
 4. Thread state (session ID, agent ID) is persisted so conversations survive server restarts
 
 If a follow-up message arrives on a thread that has no active session (e.g., the session was closed), a new session is created automatically.
-
-## Cloud relay
-
-If your Companion runs behind a firewall or NAT (no public URL), you can use the **cloud relay** — a Cloudflare Worker that forwards webhooks to your local Companion over a WebSocket tunnel.
-
-### 1. Deploy the relay worker
-
-The relay worker source is in `relay/` at the repository root. Deploy it to Cloudflare:
-
-```bash
-cd relay
-npm install
-npx wrangler deploy
-```
-
-Set the `RELAY_SECRET` environment variable in your Cloudflare Worker settings:
-
-```bash
-npx wrangler secret put RELAY_SECRET
-```
-
-### 2. Connect the Companion
-
-Add these environment variables to your Companion server:
-
-```bash
-COMPANION_RELAY_URL=https://your-relay.your-worker.workers.dev
-COMPANION_RELAY_SECRET=your-shared-secret
-```
-
-On startup, the Companion opens a WebSocket connection to the relay. When an external platform sends a webhook to the relay (`POST https://your-relay.workers.dev/webhooks/linear`), the relay forwards it to the Companion over the WebSocket, waits for the response, and returns it to the platform.
-
-### 3. Update the Linear webhook URL
-
-Point your Linear webhook to the relay instead of the Companion:
-
-```
-https://your-relay.your-worker.workers.dev/webhooks/linear
-```
-
-### Relay health check
-
-Check if the Companion is connected to the relay:
-
-```bash
-curl https://your-relay.your-worker.workers.dev/health
-# {"connected": true}
-```
-
-<Note>
-The relay uses per-isolate in-memory state. For low-traffic, single-tenant deployments this works well. For production-grade high-availability, consider migrating to Cloudflare Durable Objects so WebSocket state is shared across Worker isolates.
-</Note>
 
 ## Monitoring: Runs page
 
@@ -185,6 +129,4 @@ Chat-triggered agent sessions always run with **bypass permissions** — no inte
 
 For Claude Code sessions, this sets `--permission-mode bypassPermissions`. For Codex sessions, the approval policy is set to `never` with full sandbox access.
 
-<Warning>
-Since chat-triggered agents run with full permissions, ensure the agent's prompt and allowed tools are appropriately scoped. Consider using the **Allowed Tools** restriction in the agent's Advanced settings to limit what the agent can do.
-</Warning>
+> **Warning:** Since chat-triggered agents run with full permissions, ensure the agent's prompt and allowed tools are appropriately scoped. Consider using the **Allowed Tools** restriction in the agent's Advanced settings to limit what the agent can do.

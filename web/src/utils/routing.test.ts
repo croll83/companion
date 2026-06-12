@@ -53,6 +53,20 @@ describe("parseHash", () => {
     expect(parseHash("#/playground")).toEqual({ page: "playground" });
   });
 
+  it("parses bare docs route with empty docPath", () => {
+    // #/docs (no sub-path) resolves to the docs page with an empty path,
+    // which the DocsPage component maps to the default/index doc.
+    expect(parseHash("#/docs")).toEqual({ page: "docs", docPath: "" });
+  });
+
+  it("parses docs route with a nested doc path", () => {
+    expect(parseHash("#/docs/guides/agents")).toEqual({ page: "docs", docPath: "guides/agents" });
+  });
+
+  it("parses docs route with a single-segment doc path", () => {
+    expect(parseHash("#/docs/index")).toEqual({ page: "docs", docPath: "index" });
+  });
+
   it("parses session route with UUID", () => {
     expect(parseHash("#/session/a1b2c3d4-e5f6-7890-abcd-ef1234567890")).toEqual({
       page: "session",

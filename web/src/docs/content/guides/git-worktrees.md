@@ -66,9 +66,7 @@ Worktrees are tracked in `~/.companion/worktrees.json`. When you archive a sessi
 
 ## Docker sessions
 
-<Note>
-Worktrees are not used with Docker sessions. Containers already provide full filesystem isolation — the host workspace is copied into `/workspace` inside the container.
-</Note>
+> **Note:** Worktrees are not used with Docker sessions. Containers already provide full filesystem isolation — the host workspace is copied into `/workspace` inside the container.
 
 ## REST API
 
