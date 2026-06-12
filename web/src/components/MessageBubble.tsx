@@ -4,8 +4,13 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { CopyButton } from "./CopyButton.js";
+import { RefusalBanner } from "./RefusalBanner.js";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
+  if (message.refusal) {
+    return <RefusalBanner refusal={message.refusal} />;
+  }
+
   if (message.role === "system") {
     return (
       <div className="flex items-center gap-3 py-1 min-w-0">

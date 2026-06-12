@@ -211,6 +211,8 @@ export interface CloudProviderPlan {
 
 export interface CreateSessionOpts {
   model?: string;
+  /** Reasoning-effort level for effort-capable Claude models. */
+  effort?: string;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;

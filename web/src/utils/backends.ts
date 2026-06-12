@@ -1,6 +1,18 @@
 import type { BackendType } from "../types.js";
 import type { BackendModelInfo } from "../api.js";
 
+// Re-export the shared reasoning-effort capability matrix so UI code has a
+// single import surface. The source of truth lives in server/ (also used by
+// the launcher to decide whether to pass --effort).
+export {
+  EFFORT_LEVELS,
+  DEFAULT_EFFORT,
+  getEffortLevels,
+  modelSupportsEffort,
+  isValidEffort,
+} from "../../server/effort.js";
+export type { EffortLevel } from "../../server/effort.js";
+
 export interface ModelOption {
   value: string;
   label: string;
@@ -41,6 +53,7 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
 
 export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+  { value: "claude-fable-5", label: "Fable 5", icon: "" },
   { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
   { value: "claude-opus-4-6", label: "Opus 4.6", icon: "" },
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },

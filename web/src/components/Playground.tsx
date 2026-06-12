@@ -398,6 +398,19 @@ const MSG_SYSTEM: ChatMessage = {
   timestamp: Date.now() - 30000,
 };
 
+// Refusal banner (stop_reason: "refusal")
+const MSG_REFUSAL: ChatMessage = {
+  id: "msg-refusal",
+  role: "system",
+  content: "This request can't be assisted with.",
+  timestamp: Date.now() - 20000,
+  refusal: {
+    category: "cyber",
+    explanation: "This request involves developing capabilities that could enable cyberattacks against systems without authorization.",
+    model: "claude-fable-5",
+  },
+};
+
 // Tool result with error
 const MSG_TOOL_ERROR: ChatMessage = {
   id: "msg-7",
@@ -1060,6 +1073,9 @@ export function Playground() {
             </Card>
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />
+            </Card>
+            <Card label="Refusal (stop_reason: refusal)">
+              <MessageBubble message={MSG_REFUSAL} />
             </Card>
           </div>
         </Section>

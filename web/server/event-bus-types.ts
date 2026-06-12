@@ -20,6 +20,9 @@ export interface CompanionEventMap {
   /** Browser requested a model change — handled by killing & respawning the CLI with --model. */
   "session:model-change": { sessionId: string; model: string };
 
+  /** Browser requested a reasoning-effort change — handled by killing & respawning the CLI with --effort. */
+  "session:effort-change": { sessionId: string; effort: string };
+
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };
 

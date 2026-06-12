@@ -17,7 +17,7 @@ import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
-import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, toModelOptions, type ModelOption } from "../utils/backends.js";
+import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, toModelOptions, getEffortLevels, modelSupportsEffort, DEFAULT_EFFORT, type ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
 import { FolderPicker } from "./FolderPicker.js";
@@ -102,6 +102,7 @@ export function HomePage() {
   const [mode, setMode] = useState(() => getDefaultMode(
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   ));
+  const [effort, setEffort] = useState<string>(DEFAULT_EFFORT);
   const [cwd, setCwd] = useState(() => getRecentDirs()[0] || "");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [sending, setSending] = useState(false);
@@ -139,6 +140,7 @@ export function HomePage() {
   // Dropdown states
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showModeDropdown, setShowModeDropdown] = useState(false);
+  const [showEffortDropdown, setShowEffortDropdown] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showBranchingControls, setShowBranchingControls] = useState(false);
   const [resumeSessionAt, setResumeSessionAt] = useState("");
@@ -168,6 +170,7 @@ export function HomePage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const modeDropdownRef = useRef<HTMLDivElement>(null);
+  const effortDropdownRef = useRef<HTMLDivElement>(null);
   const envDropdownRef = useRef<HTMLDivElement>(null);
 
   const currentSessionId = useStore((s) => s.currentSessionId);
@@ -295,6 +298,9 @@ export function HomePage() {
       if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
         setShowModeDropdown(false);
       }
+      if (effortDropdownRef.current && !effortDropdownRef.current.contains(e.target as Node)) {
+        setShowEffortDropdown(false);
+      }
       if (envDropdownRef.current && !envDropdownRef.current.contains(e.target as Node)) {
         setShowEnvDropdown(false);
       }
@@ -305,6 +311,14 @@ export function HomePage() {
     document.addEventListener("pointerdown", handleClick);
     return () => document.removeEventListener("pointerdown", handleClick);
   }, []);
+
+  // Keep effort valid for the selected model (e.g. Opus 4.6 has no "xhigh").
+  useEffect(() => {
+    const levels = getEffortLevels(model);
+    if (levels.length > 0 && !levels.includes(effort as never)) {
+      setEffort(DEFAULT_EFFORT);
+    }
+  }, [model, effort]);
 
   // Detect git repo when cwd changes
   useEffect(() => {
@@ -626,6 +640,7 @@ export function HomePage() {
       const result = await createSessionStream(
         {
           model,
+          effort: modelSupportsEffort(model) ? effort : undefined,
           permissionMode: mode,
           cwd: effectiveCwd || undefined,
           envSlug: selectedEnv || undefined,
@@ -666,6 +681,7 @@ export function HomePage() {
           createdAt: Date.now(),
           backendType: (result.backendType as BackendType | undefined) || backend,
           model,
+          effort: modelSupportsEffort(model) ? effort : undefined,
           permissionMode: mode,
           resumeSessionAt: effectiveResumeSessionAt,
           forkSession: effectiveResumeSessionAt ? effectiveForkSession === true : undefined,
@@ -943,6 +959,41 @@ export function HomePage() {
                 </div>
               )}
             </div>
+
+            {/* Effort selector — only for models that support reasoning effort */}
+            {modelSupportsEffort(model) && (
+              <div className="relative" ref={effortDropdownRef}>
+                <button
+                  onClick={() => setShowEffortDropdown(!showEffortDropdown)}
+                  aria-expanded={showEffortDropdown}
+                  aria-label="Reasoning effort"
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] sm:text-xs text-cc-muted hover:text-cc-fg rounded-lg hover:bg-cc-hover transition-colors cursor-pointer"
+                >
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 opacity-70">
+                    <path d="M8 1.5a1 1 0 011 1V3a5 5 0 013.5 8.5l-.7.7a1 1 0 01-.7.3H4.9a1 1 0 01-.7-.3l-.7-.7A5 5 0 017 3v-.5a1 1 0 011-1zM6 14a1 1 0 011-1h2a1 1 0 110 2H7a1 1 0 01-1-1z" />
+                  </svg>
+                  <span className="capitalize">{effort}</span>
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 opacity-40">
+                    <path d="M4 6l4 4 4-4" />
+                  </svg>
+                </button>
+                {showEffortDropdown && (
+                  <div className="absolute left-0 bottom-full mb-1 w-36 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
+                    {getEffortLevels(model).map((level) => (
+                      <button
+                        key={level}
+                        onClick={() => { setEffort(level); setShowEffortDropdown(false); }}
+                        className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer capitalize ${
+                          level === effort ? "text-cc-primary font-medium" : "text-cc-fg"
+                        }`}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Mode dropdown */}
             <div className="relative" ref={modeDropdownRef}>

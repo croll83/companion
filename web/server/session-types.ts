@@ -120,6 +120,12 @@ export interface CLIAssistantMessage {
     model: string;
     content: ContentBlock[];
     stop_reason: string | null;
+    /**
+     * Present when `stop_reason === "refusal"`: the model declined to answer.
+     * `content` is empty in that case. `category` is the policy area
+     * (e.g. cyber, bio, frontier_llm, reasoning_extraction).
+     */
+    stop_details?: { type?: string; category?: string; explanation?: string } | null;
     usage: {
       input_tokens: number;
       output_tokens: number;
@@ -144,6 +150,8 @@ export interface CLIResultMessage {
   num_turns: number;
   total_cost_usd: number;
   stop_reason: string | null;
+  /** Refusal details when `stop_reason === "refusal"` (see CLIAssistantMessage). */
+  stop_details?: { type?: string; category?: string; explanation?: string } | null;
   usage: {
     input_tokens: number;
     output_tokens: number;
@@ -313,6 +321,7 @@ export type BrowserOutgoingMessage =
   | { type: "session_ack"; last_seq: number }
   | { type: "interrupt"; client_msg_id?: string }
   | { type: "set_model"; model: string; client_msg_id?: string }
+  | { type: "set_effort"; effort: string; client_msg_id?: string }
   | { type: "set_permission_mode"; mode: string; client_msg_id?: string }
   | { type: "mcp_get_status"; client_msg_id?: string }
   | { type: "mcp_toggle"; serverName: string; enabled: boolean; client_msg_id?: string }
@@ -349,6 +358,7 @@ export type BrowserIncomingMessageBase =
   | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
   | { type: "error"; message: string }
+  | { type: "refusal"; category?: string; explanation?: string; model?: string }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
   | { type: "user_message"; content: string; timestamp: number; id?: string }
@@ -379,6 +389,8 @@ export interface SessionState {
   session_id: string;
   backend_type?: BackendType;
   model: string;
+  /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
+  effort?: string;
   cwd: string;
   tools: string[];
   permissionMode: string;

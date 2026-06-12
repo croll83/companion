@@ -496,6 +496,20 @@ export class WsBridge {
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
         companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+
+        // Refusal: the model declined (HTTP 200, empty content). Surface the
+        // reason to the browser so it isn't rendered as a blank assistant turn.
+        // Effort-capable models (fable-5) refuse via stop_reason rather than an
+        // error, so this must be detected explicitly, not treated as success.
+        const m = msg.message;
+        if (m?.stop_reason === "refusal") {
+          this.broadcastToBrowsers(session, {
+            type: "refusal",
+            category: m.stop_details?.category,
+            explanation: m.stop_details?.explanation,
+            model: m.model,
+          });
+        }
       }
 
       if (msg.type === "stream_event") {
@@ -1106,6 +1120,23 @@ export class WsBridge {
       companionBus.emit("session:model-change", {
         sessionId: session.id,
         model: msg.model,
+      });
+      return;
+    }
+
+    // -- set_effort (Claude): reasoning effort can only be set via the
+    // `--effort` launch flag (no runtime control_request), so mirror the
+    // set_model flow — persist + relaunch with --resume.
+    if (msg.type === "set_effort" && session.backendType === "claude") {
+      session.state.effort = msg.effort;
+      this.persistSession(session);
+      this.broadcastToBrowsers(session, {
+        type: "session_update",
+        session: { effort: msg.effort },
+      });
+      companionBus.emit("session:effort-change", {
+        sessionId: session.id,
+        effort: msg.effort,
       });
       return;
     }

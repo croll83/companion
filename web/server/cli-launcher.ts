@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
+import { isValidEffort } from "./effort.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
@@ -85,6 +86,8 @@ export interface SdkSessionInfo {
   state: "starting" | "connected" | "running" | "exited";
   exitCode?: number | null;
   model?: string;
+  /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
+  effort?: string;
   permissionMode?: string;
   cwd: string;
   createdAt: number;
@@ -148,6 +151,8 @@ export interface SdkSessionInfo {
 
 export interface LaunchOptions {
   model?: string;
+  /** Reasoning-effort level (Claude only); passed as `--effort` when the model supports it. */
+  effort?: string;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;
@@ -315,6 +320,7 @@ export class CliLauncher {
       sessionId,
       state: "starting",
       model: options.model,
+      effort: options.effort,
       permissionMode: options.permissionMode,
       cwd,
       createdAt: Date.now(),
@@ -463,6 +469,7 @@ export class CliLauncher {
     } else {
       this.spawnCLI(sessionId, info, {
         model: info.model,
+        effort: info.effort,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
         resumeSessionId: info.cliSessionId,
@@ -600,6 +607,12 @@ export class CliLauncher {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+    // Reasoning effort: only pass `--effort` when the chosen model actually
+    // supports it. The CLI has no runtime control for effort, so it's a launch
+    // flag; passing it to a non-supporting model is rejected.
+    if (options.effort && isValidEffort(options.model, options.effort)) {
+      args.push("--effort", options.effort);
     }
     if (effectivePermissionMode) {
       args.push("--permission-mode", effectivePermissionMode);
@@ -1313,6 +1326,19 @@ export class CliLauncher {
     const info = this.sessions.get(sessionId);
     if (!info) return false;
     info.model = model;
+    this.persistState();
+    return true;
+  }
+
+  /**
+   * Update the reasoning-effort level on a session's stored info so the next
+   * relaunch uses it. Like `setModel`, effort can only be applied at launch
+   * (`--effort`), so the caller pairs this with `relaunch()`.
+   */
+  setEffort(sessionId: string, effort: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.effort = effort;
     this.persistState();
     return true;
   }

@@ -228,6 +228,31 @@ describe("launch", () => {
     expect(cmdAndArgs[modelIdx + 1]).toBe("claude-opus-4-20250514");
   });
 
+  it("passes --effort when the model supports it", () => {
+    launcher.launch({ model: "claude-fable-5", effort: "xhigh", cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const idx = cmdAndArgs.indexOf("--effort");
+    expect(idx).toBeGreaterThan(-1);
+    expect(cmdAndArgs[idx + 1]).toBe("xhigh");
+  });
+
+  it("omits --effort for a model that does not support it", () => {
+    // Sonnet has no effort control — passing --effort would be rejected.
+    launcher.launch({ model: "claude-sonnet-4-6", effort: "high", cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    expect(cmdAndArgs).not.toContain("--effort");
+  });
+
+  it("omits --effort for an unsupported level on a supporting model", () => {
+    // Opus 4.6 supports effort but NOT xhigh — guard against an API 400.
+    launcher.launch({ model: "claude-opus-4-6", effort: "xhigh", cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    expect(cmdAndArgs).not.toContain("--effort");
+  });
+
   it("passes --permission-mode when provided", () => {
     // Allow bypassPermissions through even when tests run as root
     process.env.COMPANION_FORCE_BYPASS_AS_ROOT = "1";

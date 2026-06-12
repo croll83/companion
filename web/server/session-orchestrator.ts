@@ -53,6 +53,8 @@ export interface SessionOrchestratorDeps {
 export interface CreateSessionRequest {
   backend?: string;
   model?: string;
+  /** Reasoning-effort level for effort-capable Claude models. */
+  effort?: string;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;
@@ -215,6 +217,27 @@ export class SessionOrchestrator {
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "model_change_relaunch");
+      }
+      await this.launcher.relaunch(sessionId);
+    });
+
+    // Effort change: like model change, the CLI only accepts `--effort` at
+    // launch (no runtime control_request), so persist the new level and
+    // relaunch with --resume to preserve conversation context.
+    companionBus.on("session:effort-change", async ({ sessionId, effort }) => {
+      const info = this.launcher.getSession(sessionId);
+      if (!info || info.archived) return;
+      if (info.backendType !== "claude") return;
+      log.info("orchestrator", "Effort change → relaunching CLI", {
+        sessionId,
+        from: info.effort,
+        to: effort,
+      });
+      this.launcher.setEffort(sessionId, effort);
+      this.clearAutoRelaunchCount(sessionId);
+      const session = this.wsBridge.getSession(sessionId);
+      if (session?.stateMachine) {
+        session.stateMachine.transition("starting", "effort_change_relaunch");
       }
       await this.launcher.relaunch(sessionId);
     });
@@ -575,6 +598,7 @@ export class SessionOrchestrator {
       try {
         session = this.launcher.launch({
           model: body.model,
+          effort: body.effort,
           permissionMode: body.permissionMode,
           cwd,
           claudeBinary: body.claudeBinary,

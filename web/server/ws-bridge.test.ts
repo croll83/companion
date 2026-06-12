@@ -1215,6 +1215,69 @@ describe("Browser handlers", () => {
     expect(historyMsg.messages[0].type).toBe("assistant");
   });
 
+  it("emits a refusal message to browsers when stop_reason is 'refusal'", async () => {
+    // A refusal is an HTTP 200 with empty content; it must be surfaced as its
+    // own message, not rendered as a blank assistant turn.
+    mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    browser.send.mockClear();
+
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "assistant",
+      message: {
+        id: "msg-r",
+        type: "message",
+        role: "assistant",
+        model: "claude-fable-5",
+        content: [],
+        stop_reason: "refusal",
+        stop_details: { type: "refusal", category: "cyber", explanation: "Declined." },
+        usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null,
+      uuid: "uuid-r",
+      session_id: "s1",
+    }));
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const refusal = calls.find((c: any) => c.type === "refusal");
+    expect(refusal).toBeDefined();
+    expect(refusal.category).toBe("cyber");
+    expect(refusal.explanation).toBe("Declined.");
+    expect(refusal.model).toBe("claude-fable-5");
+  });
+
+  it("does not emit a refusal for a normal assistant turn", async () => {
+    mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    browser.send.mockClear();
+
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "assistant",
+      message: {
+        id: "msg-ok",
+        type: "message",
+        role: "assistant",
+        model: "claude-fable-5",
+        content: [{ type: "text", text: "Sure!" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null,
+      uuid: "uuid-ok",
+      session_id: "s1",
+    }));
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "refusal")).toBeUndefined();
+  });
+
   it("handleBrowserOpen: sends pending permissions", async () => {
     const cli = makeCliSocket("s1");
     bridge.handleCLIOpen(cli, "s1");
@@ -2378,6 +2441,25 @@ describe("Browser message routing", () => {
     // Bridge optimistically updates session state and broadcasts to browsers
     // so other tabs see the new model immediately, before relaunch finishes.
     expect(bridge.getSession("s1")?.state.model).toBe("claude-opus-4-5-20250929");
+    off();
+  });
+
+  it("set_effort (claude): emits session:effort-change and does NOT forward to CLI", () => {
+    // Effort has no runtime control_request — it's a launch flag — so the
+    // bridge mirrors set_model: persist + emit a bus event for the orchestrator
+    // to relaunch the CLI with --effort. Forwarding to the CLI would no-op.
+    const handler = vi.fn();
+    const off = companionBus.on("session:effort-change", handler);
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({
+      type: "set_effort",
+      effort: "max",
+    }));
+
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({ sessionId: "s1", effort: "max" });
+    expect(bridge.getSession("s1")?.state.effort).toBe("max");
     off();
   });
 
