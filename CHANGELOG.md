@@ -5,6 +5,22 @@
 
 ### Features
 
+* **cli-check:** warn when the installed Claude CLI is too old for stdio mode ([35d7ff2](https://github.com/croll83/companion/commit/35d7ff22853b402c0d7687e65d63e9f9158375cb))
+* **cli-launcher:** add stdio bridge mode for Claude (no --sdk-url) ([24f581b](https://github.com/croll83/companion/commit/24f581b3a7fddd0cab3bb0a120b84ceb0f2a0969))
+* Fable 5 + reasoning effort, with stdio CLI bridge (no --sdk-url) ([520c0f3](https://github.com/croll83/companion/commit/520c0f3d2d979d2c06af22b66d47f13c0b60348c))
+* Fable 5 + stdio CLI bridge + CLI-version banner ([#8](https://github.com/croll83/companion/issues/8)) ([520c0f3](https://github.com/croll83/companion/commit/520c0f3d2d979d2c06af22b66d47f13c0b60348c))
+* **models:** add fable-5 + reasoning-effort control and refusal handling ([ffc561c](https://github.com/croll83/companion/commit/ffc561c9fd56956bfabe167f6b4a7310a1248abf))
+
+
+### Bug Fixes
+
+* **ask-user-question:** key answers by question text so the model sees them ([ea20f5b](https://github.com/croll83/companion/commit/ea20f5b95b15e6d3b980cb642c86da7e72a10575))
+
+## [0.100.0](https://github.com/croll83/companion/compare/the-companion-v0.99.1...the-companion-v0.100.0) (2026-06-12)
+
+
+### Features
+
 * **cli-launcher:** add stdio bridge mode for Claude — spawn the CLI without `--sdk-url` and exchange NDJSON over stdin/stdout. Restores host Claude sessions on Claude Code 2.1.142+/2.1.175 (where `--sdk-url` is allowlist-restricted / repurposed for the Remote Control SSE transport) and unlocks Fable 5. ([24f581b](https://github.com/croll83/companion/commit/24f581b))
 * **cli-check:** add a Claude CLI compatibility banner — feature-probes `claude --help` for the flags stdio mode needs (and a runtime backstop on spawn failure) and prompts `claude update` when the installed CLI is too old.
 * **models:** add fable-5 + reasoning-effort control and refusal handling ([ffc561c](https://github.com/croll83/companion/commit/ffc561c))
