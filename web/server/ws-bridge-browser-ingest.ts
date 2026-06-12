@@ -16,6 +16,7 @@ export const IDEMPOTENT_BROWSER_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   "permission_response",
   "interrupt",
   "set_model",
+  "set_effort",
   "set_permission_mode",
   "mcp_get_status",
   "mcp_toggle",

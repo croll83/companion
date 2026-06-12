@@ -43,6 +43,7 @@ import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
 import { ensureTlsCerts, TLS_BRIDGE_HOSTNAME } from "./tls-manager.js";
 import { checkHostsEntry } from "./hosts-check.js";
+import { checkClaudeCli } from "./claude-cli-check.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -388,6 +389,15 @@ if (!hostsCheck.ok) {
     `[server] WARNING: ${hostsCheck.hostsPath} is missing the ${TLS_BRIDGE_HOSTNAME} → 127.0.0.1 mapping. ` +
     `Claude Code 2.1.142+ sessions using cliBridgeMode=tlsLoopback will fail to spawn. Run:\n  ${hostsCheck.suggestedCommand}`,
   );
+}
+
+// ── Claude CLI compatibility diagnostic (for stdio bridge mode) ─────────────
+const cliCheck = checkClaudeCli();
+if (cliCheck.found) {
+  console.log(`[server] Claude CLI: ${cliCheck.version ?? "unknown version"}${cliCheck.ok ? "" : " — INCOMPATIBLE"}`);
+}
+if (!cliCheck.ok) {
+  console.warn(`[server] WARNING: ${cliCheck.reason} Run:\n  ${cliCheck.suggestedCommand}`);
 }
 
 const authToken = getToken();

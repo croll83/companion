@@ -1,6 +1,7 @@
 // Typed event map for the Companion internal event bus.
 // Each key is a namespaced event name; values are the payload passed to handlers.
 
+import type { Subprocess } from "bun";
 import type { BrowserIncomingMessage } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
@@ -19,6 +20,9 @@ export interface CompanionEventMap {
 
   /** Browser requested a model change — handled by killing & respawning the CLI with --model. */
   "session:model-change": { sessionId: string; model: string };
+
+  /** Browser requested a reasoning-effort change — handled by killing & respawning the CLI with --effort. */
+  "session:effort-change": { sessionId: string; effort: string };
 
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };
@@ -46,6 +50,15 @@ export interface CompanionEventMap {
   "backend:codex-adapter-created": {
     sessionId: string;
     adapter: CodexAdapter;
+  };
+
+  /**
+   * A host Claude CLI was spawned in stdio bridge mode. Its stdin/stdout carry
+   * the NDJSON protocol; the WsBridge attaches a ClaudeAdapter to these pipes.
+   */
+  "session:cli-stdio-ready": {
+    sessionId: string;
+    proc: Subprocess<"pipe", "pipe", "pipe">;
   };
 
   // ── Per-session messages (high volume) ─────────────────────────────

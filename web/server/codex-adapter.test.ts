@@ -2157,6 +2157,57 @@ describe("CodexAdapter", () => {
     expect(response.result.answers.q_beta).toEqual({ answers: ["No"] });
   });
 
+  it("maps browser answers keyed by question TEXT to Codex question IDs", async () => {
+    // The browser now keys answers by question text (to match the Claude Code
+    // CLI contract). The Codex adapter must resolve those text keys back to the
+    // original Codex question IDs, not rely on numeric indices.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdout.push(JSON.stringify({
+      method: "item/tool/requestUserInput",
+      id: 702,
+      params: {
+        threadId: "thr_123",
+        turnId: "turn_1",
+        itemId: "item_1",
+        questions: [
+          { id: "q_alpha", header: "Q1", question: "Pick one", isOther: false, isSecret: false, options: [{ label: "Yes", description: "" }] },
+          { id: "q_beta", header: "Q2", question: "Pick another", isOther: false, isSecret: false, options: [{ label: "No", description: "" }] },
+        ],
+      },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const permReq = messages.find((m) => m.type === "permission_request") as unknown as {
+      request: { request_id: string };
+    };
+    expect(permReq).toBeDefined();
+
+    adapter.sendBrowserMessage({
+      type: "permission_response",
+      request_id: permReq.request.request_id,
+      behavior: "allow",
+      updated_input: { answers: { "Pick one": "Yes", "Pick another": "No" } },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const allWritten = stdin.chunks.join("");
+    const responseLine = allWritten.split("\n").find((l) => l.includes('"id":702'));
+    expect(responseLine).toBeDefined();
+
+    const response = JSON.parse(responseLine!);
+    expect(response.result.answers.q_alpha).toEqual({ answers: ["Yes"] });
+    expect(response.result.answers.q_beta).toEqual({ answers: ["No"] });
+  });
+
   // ── applyPatchApproval tests ──────────────────────────────────────────
 
   it("forwards applyPatchApproval as Edit permission_request", async () => {

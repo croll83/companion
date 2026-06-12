@@ -1,4 +1,4 @@
-import type { ServerWebSocket } from "bun";
+import type { ServerWebSocket, Subprocess } from "bun";
 import type {
   BrowserOutgoingMessage,
   BrowserIncomingMessage,
@@ -496,6 +496,20 @@ export class WsBridge {
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
         companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+
+        // Refusal: the model declined (HTTP 200, empty content). Surface the
+        // reason to the browser so it isn't rendered as a blank assistant turn.
+        // Effort-capable models (fable-5) refuse via stop_reason rather than an
+        // error, so this must be detected explicitly, not treated as success.
+        const m = msg.message;
+        if (m?.stop_reason === "refusal") {
+          this.broadcastToBrowsers(session, {
+            type: "refusal",
+            category: m.stop_details?.category,
+            explanation: m.stop_details?.explanation,
+            model: m.model,
+          });
+        }
       }
 
       if (msg.type === "stream_event") {
@@ -815,6 +829,65 @@ export class WsBridge {
     }
   }
 
+  /**
+   * stdio equivalent of handleCLIOpen: the launcher spawned a host Claude CLI
+   * without --sdk-url and handed us its live process. We attach a ClaudeAdapter
+   * to the child's stdin/stdout instead of waiting for an inbound WebSocket.
+   */
+  handleCLIStdioReady(sessionId: string, proc: Subprocess<"pipe", "pipe", "pipe">) {
+    this.recorder?.recordEvent(sessionId, "ws_open", "cli");
+    const session = this.getOrCreateSession(sessionId);
+
+    // Create or retrieve ClaudeAdapter for this session
+    let adapter: ClaudeAdapter;
+    let isNewAdapter = false;
+    if (session.backendAdapter instanceof ClaudeAdapter) {
+      adapter = session.backendAdapter;
+    } else {
+      isNewAdapter = true;
+      adapter = new ClaudeAdapter(sessionId, {
+        recorder: this.recorder,
+        onActivityUpdate: () => { session.lastCliActivityTs = Date.now(); },
+      });
+      this.attachBackendAdapter(sessionId, adapter);
+    }
+
+    // Advance the state machine (attachBackendAdapter skips this for Claude
+    // adapters, expecting the transport-open handler to do it — same as the WS
+    // path in handleCLIOpen).
+    if (session.stateMachine.phase === "terminated") {
+      session.stateMachine.transition("starting", "cli_reattached");
+    }
+    session.stateMachine.transition("initializing", "cli_ws_open");
+
+    if (this.cancelDisconnectTimer(sessionId)) {
+      log.info("ws-bridge", "CLI reconnected via stdio (debounce cancelled)", { sessionId });
+    } else {
+      log.info("ws-bridge", "CLI connected via stdio", { sessionId });
+    }
+
+    // Attach the child process to the adapter (flushes pending NDJSON).
+    adapter.attachStdio(proc);
+
+    if (!isNewAdapter) {
+      this.broadcastToBrowsers(session, { type: "cli_connected" });
+    }
+
+    // Flush any browser messages queued while waiting for the CLI to be ready.
+    if (session.pendingMessages.length > 0) {
+      console.log(`[ws-bridge] Flushing ${session.pendingMessages.length} queued message(s) on CLI stdio ready for session ${sessionId}`);
+      const queued = session.pendingMessages.splice(0);
+      for (const raw of queued) {
+        try {
+          const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
+          adapter.send(queued_msg);
+        } catch {
+          console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
+        }
+      }
+    }
+  }
+
   handleCLIMessage(ws: ServerWebSocket<SocketData>, raw: string | Buffer) {
     const data = typeof raw === "string" ? raw : raw.toString("utf-8");
     const sessionId = (ws.data as CLISocketData).sessionId;
@@ -1106,6 +1179,23 @@ export class WsBridge {
       companionBus.emit("session:model-change", {
         sessionId: session.id,
         model: msg.model,
+      });
+      return;
+    }
+
+    // -- set_effort (Claude): reasoning effort can only be set via the
+    // `--effort` launch flag (no runtime control_request), so mirror the
+    // set_model flow — persist + relaunch with --resume.
+    if (msg.type === "set_effort" && session.backendType === "claude") {
+      session.state.effort = msg.effort;
+      this.persistSession(session);
+      this.broadcastToBrowsers(session, {
+        type: "session_update",
+        session: { effort: msg.effort },
+      });
+      companionBus.emit("session:effort-change", {
+        sessionId: session.id,
+        effort: msg.effort,
       });
       return;
     }

@@ -14,11 +14,13 @@ import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
+import { isValidEffort } from "./effort.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
+import { markClaudeCliRuntimeIncompatible, parseClaudeVersion } from "./claude-cli-check.js";
 import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
@@ -85,6 +87,8 @@ export interface SdkSessionInfo {
   state: "starting" | "connected" | "running" | "exited";
   exitCode?: number | null;
   model?: string;
+  /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
+  effort?: string;
   permissionMode?: string;
   cwd: string;
   createdAt: number;
@@ -148,6 +152,8 @@ export interface SdkSessionInfo {
 
 export interface LaunchOptions {
   model?: string;
+  /** Reasoning-effort level (Claude only); passed as `--effort` when the model supports it. */
+  effort?: string;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;
@@ -186,6 +192,8 @@ export interface LaunchOptions {
 export class CliLauncher {
   private sessions = new Map<string, SdkSessionInfo>();
   private processes = new Map<string, Subprocess>();
+  /** Recent stderr (bounded) per stdio session, used to detect a too-old CLI. */
+  private recentStderr = new Map<string, string>();
   /** Sidecar Node proxy processes used by Codex WebSocket transport. */
   private codexWsProxies = new Map<string, Subprocess>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
@@ -315,6 +323,7 @@ export class CliLauncher {
       sessionId,
       state: "starting",
       model: options.model,
+      effort: options.effort,
       permissionMode: options.permissionMode,
       cwd,
       createdAt: Date.now(),
@@ -463,6 +472,7 @@ export class CliLauncher {
     } else {
       this.spawnCLI(sessionId, info, {
         model: info.model,
+        effort: info.effort,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
         resumeSessionId: info.cliSessionId,
@@ -525,6 +535,11 @@ export class CliLauncher {
     const tlsBridgeHost = (process.env.COMPANION_SDK_BRIDGE_HOST
       || "beacon.claude-ai.staging.ant.dev").trim() || "beacon.claude-ai.staging.ant.dev";
     const tlsBridgePort = Number(process.env.COMPANION_SDK_BRIDGE_PORT) || 8443;
+
+    // stdio bridge mode (host sessions only): no --sdk-url at all; the NDJSON
+    // protocol flows over the child's stdin/stdout. Immune to the Anthropic
+    // endpoint allowlist that broke ws --sdk-url on Claude Code 2.1.142+/2.1.175.
+    const useStdio = !isContainerized && bridgeMode === "stdio";
 
     let sdkUrl: string;
     if (isContainerized) {
@@ -589,7 +604,7 @@ export class CliLauncher {
     }
 
     const args: string[] = [
-      ...(bridgeConfigPath ? [] : ["--sdk-url", sdkUrl]),
+      ...(bridgeConfigPath || useStdio ? [] : ["--sdk-url", sdkUrl]),
       "--print",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
@@ -600,6 +615,12 @@ export class CliLauncher {
 
     if (options.model) {
       args.push("--model", options.model);
+    }
+    // Reasoning effort: only pass `--effort` when the chosen model actually
+    // supports it. The CLI has no runtime control for effort, so it's a launch
+    // flag; passing it to a non-supporting model is rejected.
+    if (options.effort && isValidEffort(options.model, options.effort)) {
+      args.push("--effort", options.effort);
     }
     if (effectivePermissionMode) {
       args.push("--permission-mode", effectivePermissionMode);
@@ -616,13 +637,17 @@ export class CliLauncher {
       args.push("--fork-session");
     }
 
-    // Always pass -p "" for headless mode. When relaunching, also pass --resume
-    // to restore the CLI's conversation context.
+    // When relaunching, pass --resume to restore the CLI's conversation context.
     if (options.resumeSessionId) {
       args.push("--resume", options.resumeSessionId);
     }
 
-    args.push("-p", "");
+    // Headless WS modes need the -p "" placeholder (the actual prompt arrives
+    // over the transport). In stdio mode the CLI reads its input stream from
+    // stdin, so passing -p would make it treat "" as a one-shot prompt.
+    if (!useStdio) {
+      args.push("-p", "");
+    }
 
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
@@ -679,6 +704,8 @@ export class CliLauncher {
     const proc = Bun.spawn(spawnCmd, {
       cwd: spawnCwd,
       env: spawnEnv,
+      // In stdio mode the child's stdin carries the NDJSON input stream.
+      stdin: useStdio ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -686,8 +713,28 @@ export class CliLauncher {
     info.pid = proc.pid;
     this.processes.set(sessionId, proc);
 
-    // Stream stdout/stderr for debugging
-    this.pipeOutput(sessionId, proc);
+    if (useStdio) {
+      // stdout is the protocol channel and is consumed by the ClaudeAdapter's
+      // stdio reader. Pipe only stderr here — and tap it into a bounded buffer
+      // so a too-old CLI ("unknown option") can be detected on early exit.
+      this.recentStderr.set(sessionId, "");
+      if (proc.stderr && typeof proc.stderr !== "number") {
+        this.pipeStream(sessionId, proc.stderr, "stderr", (text) => {
+          const prev = this.recentStderr.get(sessionId) ?? "";
+          this.recentStderr.set(sessionId, (prev + text).slice(-4096));
+        });
+      }
+      // Hand the live process to the bridge, which attaches a ClaudeAdapter to
+      // its stdin/stdout (mirrors the /ws/cli open path for WS sessions).
+      info.state = "connected";
+      companionBus.emit("session:cli-stdio-ready", {
+        sessionId,
+        proc: proc as Subprocess<"pipe", "pipe", "pipe">,
+      });
+    } else {
+      // Stream stdout/stderr for debugging
+      this.pipeOutput(sessionId, proc);
+    }
 
     // Monitor process exit
     const spawnedAt = Date.now();
@@ -705,7 +752,21 @@ export class CliLauncher {
           console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
           session.cliSessionId = undefined;
         }
+
+        // Runtime backstop for stdio mode: a quick non-zero exit whose stderr
+        // complains about an unknown/unsupported flag means the installed CLI
+        // is too old for this Companion build. Flag it so the UI banner asks
+        // the user to run `claude update`.
+        if (useStdio && (exitCode ?? 1) !== 0 && uptime < 10000) {
+          const stderr = this.recentStderr.get(sessionId) ?? "";
+          if (/(unknown|unrecognized|invalid)\s+(option|argument|flag)|--(include-partial-messages|input-format|output-format)\b[^\n]*\b(unknown|unrecognized|invalid|not)\b/i.test(stderr)) {
+            const detail = (stderr.match(/[^\n]*(?:unknown|unrecognized|invalid)[^\n]*/i)?.[0] ?? "unsupported CLI flag").trim().slice(0, 200);
+            console.error(`[cli-launcher] Session ${sessionId}: Claude CLI appears too old for stdio mode — ${detail}`);
+            markClaudeCliRuntimeIncompatible(parseClaudeVersion(stderr), detail);
+          }
+        }
       }
+      this.recentStderr.delete(sessionId);
       this.processes.delete(sessionId);
       if (bridgeConfigPath) {
         try { unlinkSync(bridgeConfigPath); } catch { /* already gone */ }
@@ -1318,6 +1379,19 @@ export class CliLauncher {
   }
 
   /**
+   * Update the reasoning-effort level on a session's stored info so the next
+   * relaunch uses it. Like `setModel`, effort can only be applied at launch
+   * (`--effort`), so the caller pairs this with `relaunch()`.
+   */
+  setEffort(sessionId: string, effort: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.effort = effort;
+    this.persistState();
+    return true;
+  }
+
+  /**
    * Remove a session from the internal map (after kill or cleanup).
    */
   removeSession(sessionId: string) {
@@ -1358,6 +1432,7 @@ export class CliLauncher {
     sessionId: string,
     stream: ReadableStream<Uint8Array> | null,
     label: "stdout" | "stderr",
+    onText?: (text: string) => void,
   ): Promise<void> {
     if (!stream) return;
     const reader = stream.getReader();
@@ -1371,16 +1446,19 @@ export class CliLauncher {
         if (text.trim()) {
           log(`[session:${sessionId}:${label}] ${text.trimEnd()}`);
         }
+        onText?.(text);
       }
     } catch {
       // stream closed
     }
   }
 
-  private pipeOutput(sessionId: string, proc: Subprocess): void {
+  private pipeOutput(sessionId: string, proc: Subprocess, opts?: { skipStdout?: boolean }): void {
     const stdout = proc.stdout;
     const stderr = proc.stderr;
-    if (stdout && typeof stdout !== "number") {
+    // In stdio bridge mode the adapter owns stdout (the NDJSON protocol stream),
+    // so a second reader here would steal bytes from it.
+    if (!opts?.skipStdout && stdout && typeof stdout !== "number") {
       this.pipeStream(sessionId, stdout, "stdout");
     }
     if (stderr && typeof stderr !== "number") {

@@ -458,6 +458,7 @@ const IDEMPOTENT_OUTGOING_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "permission_response",
   "interrupt",
   "set_model",
+  "set_effort",
   "set_permission_mode",
   "mcp_get_status",
   "mcp_toggle",
@@ -984,6 +985,24 @@ function handleParsedMessage(
       break;
     }
 
+    case "refusal": {
+      // The model declined to answer (stop_reason "refusal"): surface it as a
+      // dedicated banner with the reason and a one-click retry on Opus 4.8,
+      // rather than letting the empty turn render as nothing.
+      store.appendMessage(sessionId, {
+        id: nextId(),
+        role: "system",
+        content: data.explanation || "The model declined to respond.",
+        timestamp: Date.now(),
+        refusal: {
+          category: data.category,
+          explanation: data.explanation,
+          model: data.model,
+        },
+      });
+      break;
+    }
+
     case "session_phase": {
       const phase = data.phase;
       if (phase === "terminated") {
@@ -1374,6 +1393,7 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
       case "permission_response":
       case "interrupt":
       case "set_model":
+      case "set_effort":
       case "set_permission_mode":
       case "mcp_get_status":
       case "mcp_toggle":

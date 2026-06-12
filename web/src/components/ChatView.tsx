@@ -8,6 +8,7 @@ import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { ActivityTray } from "./ActivityTray.js";
 import { HostsBridgeAlert } from "./HostsBridgeAlert.js";
+import { ClaudeCliAlert } from "./ClaudeCliAlert.js";
 
 export function ChatView({ sessionId }: { sessionId: string }) {
   const sessionPerms = useStore((s) => s.pendingPermissions.get(sessionId));
@@ -68,6 +69,9 @@ export function ChatView({ sessionId }: { sessionId: string }) {
       {/* Hosts file / TLS bridge alert — only shown for Claude Code sessions
           when the embedded TLS proxy hostname is missing from /etc/hosts. */}
       <HostsBridgeAlert backendType={backendType} />
+
+      {/* Claude CLI too old for stdio bridge — prompts `claude update`. */}
+      <ClaudeCliAlert backendType={backendType} />
 
       {/* CLI disconnected / reconnecting / error banner */}
       {showCliBanner && (

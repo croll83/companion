@@ -26,6 +26,8 @@ export interface ChatMessage {
   streamingPhase?: "thinking" | "text";
   model?: string;
   stopReason?: string | null;
+  /** Present when the model declined (stop_reason "refusal"); rendered as a banner. */
+  refusal?: { category?: string; explanation?: string; model?: string };
 }
 
 export interface TaskItem {
@@ -104,6 +106,8 @@ export interface SdkSessionInfo {
   state: "starting" | "connected" | "running" | "exited";
   exitCode?: number | null;
   model?: string;
+  /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
+  effort?: string;
   permissionMode?: string;
   cwd: string;
   createdAt: number;

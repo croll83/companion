@@ -23,9 +23,14 @@ export type UpdateChannel = "stable" | "prerelease";
  * - "tlsLoopback": spawn the CLI with `--sdk-url wss://<allowlisted-host>:PORT/...`
  *   where the hostname is mapped to 127.0.0.1 via /etc/hosts and served by
  *   an embedded Bun.serve TLS proxy with a self-signed cert trusted via
- *   NODE_EXTRA_CA_CERTS. Required for Claude Code 2.1.142+.
+ *   NODE_EXTRA_CA_CERTS. Works on 2.1.142+ but breaks on builds where
+ *   --sdk-url drives the Remote Control SSE/worker transport (e.g. 2.1.175).
+ * - "stdio": spawn the CLI WITHOUT --sdk-url and exchange the same NDJSON
+ *   protocol over the child's stdin/stdout. This is the supported Agent SDK
+ *   "streaming input" transport — immune to the --sdk-url allowlist changes —
+ *   and is the recommended mode for host Claude sessions.
  */
-export type CliBridgeMode = "loopback" | "jsonHandoff" | "tlsLoopback";
+export type CliBridgeMode = "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
 
 export interface CompanionSettings {
   anthropicApiKey: string;
@@ -129,7 +134,9 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
         ? "jsonHandoff"
         : raw?.cliBridgeMode === "tlsLoopback"
           ? "tlsLoopback"
-          : "loopback",
+          : raw?.cliBridgeMode === "stdio"
+            ? "stdio"
+            : "loopback",
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }

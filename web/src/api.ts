@@ -211,6 +211,8 @@ export interface CloudProviderPlan {
 
 export interface CreateSessionOpts {
   model?: string;
+  /** Reasoning-effort level for effort-capable Claude models. */
+  effort?: string;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;
@@ -421,7 +423,7 @@ export interface AppSettings {
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
-  cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback";
+  cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
 }
 
 export interface HostsCheckResult {
@@ -429,6 +431,15 @@ export interface HostsCheckResult {
   hostsPath: string;
   suggestedCommand: string;
   hostname: string;
+}
+
+export interface ClaudeCliCheckResult {
+  ok: boolean;
+  found: boolean;
+  version: string | null;
+  missingFlags: string[];
+  reason: string | null;
+  suggestedCommand: string;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -970,7 +981,7 @@ export const api = {
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
-    cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback";
+    cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
@@ -978,6 +989,9 @@ export const api = {
   // Hosts file diagnostic — used to render a banner when the embedded TLS
   // proxy's allowlisted hostname is not mapped to 127.0.0.1.
   getHostsCheck: () => get<HostsCheckResult>("/system/hosts-check"),
+
+  getClaudeCliCheck: (force?: boolean) =>
+    get<ClaudeCliCheckResult>(`/system/claude-cli-check${force ? "?force=1" : ""}`),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),

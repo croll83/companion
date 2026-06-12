@@ -5,6 +5,7 @@ import { CLAUDE_MODES, CODEX_MODES } from "../utils/backends.js";
 import { api, type SavedPrompt } from "../api.js";
 import type { ModeOption } from "../utils/backends.js";
 import { ModelSwitcher } from "./ModelSwitcher.js";
+import { EffortSwitcher } from "./EffortSwitcher.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 
@@ -583,6 +584,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             </button>
 
             <ModelSwitcher sessionId={sessionId} />
+            <EffortSwitcher sessionId={sessionId} />
 
             <div className="flex-1" />
 
@@ -747,6 +749,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
             {/* Model switcher */}
             <ModelSwitcher sessionId={sessionId} />
+            <EffortSwitcher sessionId={sessionId} />
 
             {/* Send/stop */}
             {isRunning ? (
