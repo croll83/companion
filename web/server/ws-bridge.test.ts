@@ -59,6 +59,27 @@ function makeBrowserSocket(sessionId: string) {
   return createMockSocket({ kind: "browser", sessionId });
 }
 
+// Mock of a host Claude CLI subprocess for stdio bridge mode. The adapter reads
+// NDJSON from `stdout`; closing that stream simulates the process exiting, which
+// is the only disconnect signal in stdio mode (no CLI WebSocket exists).
+function makeStdioProc() {
+  let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+  const stdout = new ReadableStream<Uint8Array>({
+    start(c) { ctrl = c; },
+  });
+  return {
+    proc: {
+      stdout,
+      stdin: { write: vi.fn(), end: vi.fn(), flush: vi.fn(), ref: vi.fn(), unref: vi.fn() },
+      stderr: undefined,
+      exited: new Promise<number>(() => {}),
+      kill: vi.fn(),
+      pid: 4242,
+    } as any,
+    closeStdout: () => ctrl.close(),
+  };
+}
+
 let bridge: WsBridge;
 let tempDir: string;
 let store: SessionStore;
@@ -895,6 +916,72 @@ describe("CLI handlers", () => {
 
     const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
     expect(calls).toContainEqual(expect.objectContaining({ type: "cli_disconnected" }));
+    vi.useRealTimers();
+  });
+
+  it("stdio disconnect: broadcasts cli_disconnected when the CLI process stdout closes", async () => {
+    // Regression: in stdio bridge mode there is no CLI WebSocket, so
+    // handleCLIClose never fires. The session's only disconnect signal is the
+    // adapter onDisconnect (triggered when the child's stdout closes on process
+    // exit). Without handling it, the browser never receives cli_disconnected
+    // and the Reconnect button never appears until a server restart + refresh.
+    vi.useFakeTimers();
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    const { proc, closeStdout } = makeStdioProc();
+    bridge.handleCLIStdioReady("s1", proc);
+
+    const session = bridge.getSession("s1")!;
+    expect((session.backendAdapter as unknown as { isStdio(): boolean }).isStdio()).toBe(true);
+    expect(session.backendAdapter?.isConnected()).toBe(true);
+
+    // Simulate the CLI process exiting: stdout closes → stdio reader hits EOF →
+    // adapter fires onDisconnect.
+    closeStdout();
+    await vi.advanceTimersByTimeAsync(0); // let the stdio reader observe EOF
+
+    // Before the debounce elapses: no cli_disconnected broadcast yet.
+    let calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: { type: string }) => c.type === "cli_disconnected")).toBeUndefined();
+
+    // After the 15s debounce with no reconnect: cli_disconnected is broadcast.
+    await vi.advanceTimersByTimeAsync(16_000);
+    calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls).toContainEqual(expect.objectContaining({ type: "cli_disconnected" }));
+
+    vi.useRealTimers();
+  });
+
+  it("stdio disconnect: debounce cancelled when CLI reattaches via stdio (relaunch)", async () => {
+    // A model/effort change relaunches the CLI: the old process exits (stdout
+    // closes) but a new process attaches via handleCLIStdioReady within the
+    // grace period. The pending disconnect must be cancelled so no spurious
+    // cli_disconnected reaches the browser.
+    vi.useFakeTimers();
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    const first = makeStdioProc();
+    bridge.handleCLIStdioReady("s1", first.proc);
+
+    // Old process exits.
+    first.closeStdout();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // New process attaches before the debounce elapses (the relaunch).
+    const second = makeStdioProc();
+    bridge.handleCLIStdioReady("s1", second.proc);
+
+    // Let the full debounce window pass.
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: { type: string }) => c.type === "cli_disconnected")).toBeUndefined();
+    expect(bridge.getSession("s1")!.backendAdapter?.isConnected()).toBe(true);
+
     vi.useRealTimers();
   });
 
