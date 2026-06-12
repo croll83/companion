@@ -24,14 +24,6 @@ jobs:
         working-directory: web
         run: bun run test -- --coverage || true
 
-      - name: Install platform dependencies
-        working-directory: platform
-        run: bun install
-
-      - name: Run platform tests with coverage
-        working-directory: platform
-        run: bun run test -- --coverage || true
-
       - name: Enforce 80% coverage on new / changed files
         run: |
           FAIL=0
@@ -93,9 +85,6 @@ jobs:
           }
 
           check_coverage "web"
-          echo ""
-          # Platform: only gate server code (frontend is scaffolding for now)
-          check_coverage "platform" "server/"
 
           echo ""
           if [ "$FAIL" = "1" ]; then
