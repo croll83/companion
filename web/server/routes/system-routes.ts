@@ -25,6 +25,7 @@ import { refreshServiceDefinition } from "../service.js";
 import { getSettings } from "../settings-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
 import { checkHostsEntry } from "../hosts-check.js";
+import { checkClaudeCli } from "../claude-cli-check.js";
 import { TLS_BRIDGE_HOSTNAME } from "../tls-manager.js";
 
 /**
@@ -331,6 +332,13 @@ export function registerSystemRoutes(
       suggestedCommand: result.suggestedCommand,
       hostname,
     });
+  });
+
+  // Claude CLI compatibility (used by the ClaudeCliAlert banner). `?force=1`
+  // bypasses the short cache so the banner can refresh after a `claude update`.
+  api.get("/system/claude-cli-check", (c) => {
+    const force = c.req.query("force") === "1";
+    return c.json(checkClaudeCli({ force }));
   });
 
   api.post("/sessions/:id/message", async (c) => {

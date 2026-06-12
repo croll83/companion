@@ -433,6 +433,15 @@ export interface HostsCheckResult {
   hostname: string;
 }
 
+export interface ClaudeCliCheckResult {
+  ok: boolean;
+  found: boolean;
+  version: string | null;
+  missingFlags: string[];
+  reason: string | null;
+  suggestedCommand: string;
+}
+
 export interface LinearOAuthConnectionSummary {
   id: string;
   name: string;
@@ -980,6 +989,9 @@ export const api = {
   // Hosts file diagnostic — used to render a banner when the embedded TLS
   // proxy's allowlisted hostname is not mapped to 127.0.0.1.
   getHostsCheck: () => get<HostsCheckResult>("/system/hosts-check"),
+
+  getClaudeCliCheck: (force?: boolean) =>
+    get<ClaudeCliCheckResult>(`/system/claude-cli-check${force ? "?force=1" : ""}`),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),

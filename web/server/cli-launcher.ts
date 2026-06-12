@@ -20,6 +20,7 @@ import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
+import { markClaudeCliRuntimeIncompatible, parseClaudeVersion } from "./claude-cli-check.js";
 import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
@@ -191,6 +192,8 @@ export interface LaunchOptions {
 export class CliLauncher {
   private sessions = new Map<string, SdkSessionInfo>();
   private processes = new Map<string, Subprocess>();
+  /** Recent stderr (bounded) per stdio session, used to detect a too-old CLI. */
+  private recentStderr = new Map<string, string>();
   /** Sidecar Node proxy processes used by Codex WebSocket transport. */
   private codexWsProxies = new Map<string, Subprocess>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
@@ -712,8 +715,15 @@ export class CliLauncher {
 
     if (useStdio) {
       // stdout is the protocol channel and is consumed by the ClaudeAdapter's
-      // stdio reader — only stderr is piped here for diagnostics.
-      this.pipeOutput(sessionId, proc, { skipStdout: true });
+      // stdio reader. Pipe only stderr here — and tap it into a bounded buffer
+      // so a too-old CLI ("unknown option") can be detected on early exit.
+      this.recentStderr.set(sessionId, "");
+      if (proc.stderr && typeof proc.stderr !== "number") {
+        this.pipeStream(sessionId, proc.stderr, "stderr", (text) => {
+          const prev = this.recentStderr.get(sessionId) ?? "";
+          this.recentStderr.set(sessionId, (prev + text).slice(-4096));
+        });
+      }
       // Hand the live process to the bridge, which attaches a ClaudeAdapter to
       // its stdin/stdout (mirrors the /ws/cli open path for WS sessions).
       info.state = "connected";
@@ -742,7 +752,21 @@ export class CliLauncher {
           console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
           session.cliSessionId = undefined;
         }
+
+        // Runtime backstop for stdio mode: a quick non-zero exit whose stderr
+        // complains about an unknown/unsupported flag means the installed CLI
+        // is too old for this Companion build. Flag it so the UI banner asks
+        // the user to run `claude update`.
+        if (useStdio && (exitCode ?? 1) !== 0 && uptime < 10000) {
+          const stderr = this.recentStderr.get(sessionId) ?? "";
+          if (/(unknown|unrecognized|invalid)\s+(option|argument|flag)|--(include-partial-messages|input-format|output-format)\b[^\n]*\b(unknown|unrecognized|invalid|not)\b/i.test(stderr)) {
+            const detail = (stderr.match(/[^\n]*(?:unknown|unrecognized|invalid)[^\n]*/i)?.[0] ?? "unsupported CLI flag").trim().slice(0, 200);
+            console.error(`[cli-launcher] Session ${sessionId}: Claude CLI appears too old for stdio mode — ${detail}`);
+            markClaudeCliRuntimeIncompatible(parseClaudeVersion(stderr), detail);
+          }
+        }
       }
+      this.recentStderr.delete(sessionId);
       this.processes.delete(sessionId);
       if (bridgeConfigPath) {
         try { unlinkSync(bridgeConfigPath); } catch { /* already gone */ }
@@ -1408,6 +1432,7 @@ export class CliLauncher {
     sessionId: string,
     stream: ReadableStream<Uint8Array> | null,
     label: "stdout" | "stderr",
+    onText?: (text: string) => void,
   ): Promise<void> {
     if (!stream) return;
     const reader = stream.getReader();
@@ -1421,6 +1446,7 @@ export class CliLauncher {
         if (text.trim()) {
           log(`[session:${sessionId}:${label}] ${text.trimEnd()}`);
         }
+        onText?.(text);
       }
     } catch {
       // stream closed
