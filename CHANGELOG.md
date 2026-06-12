@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.101.0](https://github.com/croll83/companion/compare/the-companion-v0.100.0...the-companion-v0.101.0) (2026-06-12)
+
+
+### Features
+
+* **docs:** serve documentation in-app at /docs ([9c6b98f](https://github.com/croll83/companion/commit/9c6b98f6ef7de33ec46b641989822797ab7953c7))
+
+
+### Bug Fixes
+
+* **ws-bridge:** show Reconnect when a stdio CLI session disconnects ([68618b0](https://github.com/croll83/companion/commit/68618b0a11370543b3918fbba467090b185746de))
+
 ## [0.100.0](https://github.com/croll83/companion/compare/the-companion-v0.99.1...the-companion-v0.100.0) (2026-06-12)
 
 
