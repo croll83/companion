@@ -880,7 +880,7 @@ describe("ContainerManager buildImage", () => {
 describe("ContainerManager.getRegistryImage", () => {
   it("returns registry path for the-companion:latest", () => {
     const result = ContainerManager.getRegistryImage("the-companion:latest");
-    expect(result).toContain("stangirard/the-companion:latest");
+    expect(result).toContain("croll83/the-companion:latest");
   });
 
   it("returns null for non-default images", () => {
@@ -1094,7 +1094,7 @@ describe("ContainerManager pullImage", () => {
     mockExecSync.mockReturnValue("");
 
     const manager = new ContainerManager();
-    const result = await manager.pullImage("docker.io/stangirard/test:v1", "test:v1");
+    const result = await manager.pullImage("docker.io/croll83/test:v1", "test:v1");
     expect(result).toBe(true);
     // Should tag the image
     const cmds = mockExecSync.mock.calls.map((c) => String(c[0] ?? ""));

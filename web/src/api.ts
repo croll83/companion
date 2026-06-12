@@ -200,15 +200,6 @@ export interface ContainerStatus {
   version: string | null;
 }
 
-export interface CloudProviderPlan {
-  provider: "modal";
-  sessionId: string;
-  image: string;
-  cwd: string;
-  mappedPorts: Array<{ containerPort: number; hostPort: number }>;
-  commandPreview: string;
-}
-
 export interface CreateSessionOpts {
   model?: string;
   /** Reasoning-effort level for effort-capable Claude models. */
@@ -1122,10 +1113,6 @@ export const api = {
     get<ImagePullState>(`/images/${encodeURIComponent(tag)}/status`),
   pullImage: (tag: string) =>
     post<{ ok: boolean; state: ImagePullState }>(`/images/${encodeURIComponent(tag)}/pull`),
-  getCloudProviderPlan: (provider: "modal", cwd: string, sessionId: string) =>
-    get<CloudProviderPlan>(
-      `/cloud/providers/${encodeURIComponent(provider)}/plan?cwd=${encodeURIComponent(cwd)}&sessionId=${encodeURIComponent(sessionId)}`,
-    ),
 
   // Editor
   startEditor: (sessionId: string) =>

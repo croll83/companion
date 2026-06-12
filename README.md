@@ -7,10 +7,17 @@
 <p align="center">Run multiple agents, inspect every tool call, and gate risky actions with explicit approvals.</p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/the-companion"><img src="https://img.shields.io/npm/v/the-companion.svg" alt="npm version" /></a>
-  <a href="https://www.npmjs.com/package/the-companion"><img src="https://img.shields.io/npm/dm/the-companion.svg" alt="npm downloads" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
 </p>
+
+> **About this fork.** This repository is an independent continuation of the
+> original [`the-vibe-company/companion`](https://github.com/The-Vibe-Company/companion).
+> Upstream has since pivoted to a Go control plane for **agent-fleet
+> management** (deploying fleets of agents on Fly + Tailscale) and archived the
+> original web UI. This fork continues that original path instead: **unattended
+> web access to Claude-CLI / Codex instances** — run multiple agents in the
+> browser, inspect every tool call, and gate risky actions with explicit
+> approvals. It is maintained independently and no longer tracks upstream.
 
 ## Quick start
 
@@ -120,8 +127,8 @@ Every push to `main` publishes a preview artifact:
 
 | Artifact | Tag / dist-tag | Example |
 |---|---|---|
-| Docker image (moving) | `preview-main` | `docker.io/stangirard/the-companion:preview-main` |
-| Docker image (immutable) | `preview-<sha>` | `docker.io/stangirard/the-companion:preview-abc1234...` |
+| Docker image (moving) | `preview-main` | `docker.io/croll83/the-companion:preview-main` |
+| Docker image (immutable) | `preview-<sha>` | `docker.io/croll83/the-companion:preview-abc1234...` |
 | npm package | `next` | `bunx the-companion@next` |
 
 Preview builds use a patch-core bump (e.g. `0.68.1-preview.*` when stable is `0.68.0`) so the in-app update checker can detect them as semver-ahead of the current stable release. They are **not** production-stable — use `latest` / semver tags for stable releases.

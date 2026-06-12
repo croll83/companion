@@ -5,7 +5,7 @@ const mockImageExists = vi.hoisted(() => vi.fn((_image: string) => false));
 const mockPullImage = vi.hoisted(() => vi.fn(async (_remote: string, _local: string, _onProgress?: (line: string) => void) => true));
 const mockBuildImage = vi.hoisted(() => vi.fn((_path: string, _tag?: string) => "ok"));
 const mockGetRegistryImage = vi.hoisted(() => vi.fn((tag: string) => {
-  if (tag === "the-companion:latest") return "docker.io/stangirard/the-companion:latest";
+  if (tag === "the-companion:latest") return "docker.io/croll83/the-companion:latest";
   return null as string | null;
 }));
 
@@ -51,7 +51,7 @@ describe("ImagePullManager", () => {
     mockExistsSync.mockReturnValue(true);
     // Restore default registry mapping (clearAllMocks removes it)
     mockGetRegistryImage.mockImplementation((tag: string) => {
-      if (tag === "the-companion:latest") return "docker.io/stangirard/the-companion:latest";
+      if (tag === "the-companion:latest") return "docker.io/croll83/the-companion:latest";
       return null as string | null;
     });
   });

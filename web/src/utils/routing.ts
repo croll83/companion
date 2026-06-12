@@ -15,10 +15,12 @@ export type Route =
   | { page: "agents" }
   | { page: "agent-detail"; agentId: string }
   | { page: "runs" }
+  | { page: "docs"; docPath: string }
   | { page: "playground" };
 
 const SESSION_PREFIX = "#/session/";
 const AGENT_PREFIX = "#/agents/";
+const DOCS_PREFIX = "#/docs/";
 let clipboardFallbackInitialized = false;
 
 function ensureClipboardFallbackInstalled(): void {
@@ -44,6 +46,11 @@ export function parseHash(hash: string): Route {
   // #/scheduled redirects to #/agents (cron absorbed into agents)
   if (hash === "#/scheduled") return { page: "agents" };
   if (hash === "#/runs") return { page: "runs" };
+  if (hash === "#/docs") return { page: "docs", docPath: "" };
+  if (hash.startsWith(DOCS_PREFIX)) {
+    // Everything after "#/docs/" is the doc path (e.g. "guides/agents").
+    return { page: "docs", docPath: hash.slice(DOCS_PREFIX.length) };
+  }
   if (hash === "#/playground") return { page: "playground" };
   // Strip query params from hash for matching (OAuth callback appends ?oauth_success=true, ?setup=linear)
   const hashPath = hash.split("?")[0];

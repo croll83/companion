@@ -29,7 +29,6 @@ import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
-import { authenticateManagedWebSocket } from "./ws-auth.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
 
@@ -71,19 +70,6 @@ const orchestrator = new SessionOrchestrator({
   prPoller, agentExecutor,
 });
 
-// ── Cloud relay connection (for receiving webhooks behind a firewall) ────────
-// The relay forwards platform webhooks (e.g. GitHub, Slack) to the Companion
-// instance via an outbound WebSocket. Currently no webhook handlers are
-// registered (Chat SDK was removed). The relay is left disabled until handlers
-// are wired up (e.g. LinearAgentBridge or future platform integrations).
-if (process.env.COMPANION_RELAY_URL && process.env.COMPANION_RELAY_SECRET) {
-  console.warn(
-    "[server] COMPANION_RELAY_URL is set but no relay webhook handlers are registered. " +
-    "The relay client will not be started. Remove COMPANION_RELAY_URL/COMPANION_RELAY_SECRET " +
-    "or wire up webhook handlers to use relay mode.",
-  );
-}
-
 // ── Restore persisted sessions from disk ────────────────────────────────────
 wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
@@ -109,7 +95,7 @@ if (logFileWriter) {
 
 const app = new Hono();
 
-// ── Health endpoint — always unauthenticated (used by Fly.io + control plane) ─
+// ── Health endpoint — always unauthenticated ─────────────────────────────────
 const startTime = Date.now();
 app.get("/health", (c) => {
   return c.json({
@@ -118,20 +104,6 @@ app.get("/health", (c) => {
     sessions: launcher.listSessions().length,
   });
 });
-
-// ── Managed auth middleware — only active when COMPANION_AUTH_ENABLED=1 ────
-const hasManagedAuthSecret = Boolean(process.env.COMPANION_AUTH_SECRET?.trim());
-const managedAuthEnabled =
-  process.env.COMPANION_AUTH_ENABLED === "1" ||
-  (hasManagedAuthSecret && process.env.COMPANION_AUTH_ENABLED !== "0");
-
-if (managedAuthEnabled) {
-  const { managedAuth } = await import("./middleware/managed-auth.js");
-  app.use("/*", managedAuth);
-  console.log("[server] Managed auth enabled");
-} else {
-  console.log("[server] Managed auth disabled");
-}
 
 app.use("/api/*", cors());
 app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
@@ -219,16 +191,9 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
     // ── Browser WebSocket — connects to a specific session ─────────────
     const browserMatch = url.pathname.match(/^\/ws\/browser\/([a-f0-9-]+)$/);
     if (browserMatch) {
-      if (managedAuthEnabled) {
-        const auth = await authenticateManagedWebSocket(req);
-        if (!auth.ok) {
-          return new Response(auth.body || "Unauthorized", { status: auth.status });
-        }
-      } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
-          return new Response("Unauthorized", { status: 401 });
-        }
+      const wsToken = url.searchParams.get("token");
+      if (!isLocalhost && !verifyToken(wsToken)) {
+        return new Response("Unauthorized", { status: 401 });
       }
       const sessionId = browserMatch[1];
       const upgraded = server.upgrade(req, {
@@ -241,16 +206,9 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
     // ── Terminal WebSocket — embedded terminal PTY connection ─────────
     const termMatch = url.pathname.match(/^\/ws\/terminal\/([a-f0-9-]+)$/);
     if (termMatch) {
-      if (managedAuthEnabled) {
-        const auth = await authenticateManagedWebSocket(req);
-        if (!auth.ok) {
-          return new Response(auth.body || "Unauthorized", { status: auth.status });
-        }
-      } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
-          return new Response("Unauthorized", { status: 401 });
-        }
+      const wsToken = url.searchParams.get("token");
+      if (!isLocalhost && !verifyToken(wsToken)) {
+        return new Response("Unauthorized", { status: 401 });
       }
       const terminalId = termMatch[1];
       const upgraded = server.upgrade(req, {
@@ -263,16 +221,9 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
     // ── noVNC WebSocket — proxies VNC data to container's websockify ────
     const novncMatch = url.pathname.match(/^\/ws\/novnc\/([a-f0-9-]+)$/);
     if (novncMatch) {
-      if (managedAuthEnabled) {
-        const auth = await authenticateManagedWebSocket(req);
-        if (!auth.ok) {
-          return new Response(auth.body || "Unauthorized", { status: auth.status });
-        }
-      } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
-          return new Response("Unauthorized", { status: 401 });
-        }
+      const wsToken = url.searchParams.get("token");
+      if (!isLocalhost && !verifyToken(wsToken)) {
+        return new Response("Unauthorized", { status: 401 });
       }
       const sessionId = novncMatch[1];
       const upgraded = server.upgrade(req, {

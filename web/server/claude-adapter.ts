@@ -223,6 +223,15 @@ export class ClaudeAdapter implements IBackendAdapter {
     return this.cliSocket !== null;
   }
 
+  /**
+   * True when this adapter bridges a host CLI over stdin/stdout (no CLI
+   * WebSocket). In stdio mode no `handleCLIClose` ever fires, so the bridge
+   * must drive disconnect handling from the adapter's onDisconnect callback.
+   */
+  isStdio(): boolean {
+    return this.transportMode === "stdio";
+  }
+
   async disconnect(): Promise<void> {
     // Clear pending control requests to prevent memory leaks from
     // unresolved promises (CLI won't respond after disconnect)

@@ -637,9 +637,16 @@ export class WsBridge {
         return;
       }
 
-      // For ClaudeAdapter, disconnect is handled by handleCLIClose debounce logic
       if (adapter instanceof ClaudeAdapter) {
-        // Do nothing here — handleCLIClose manages the debounce timer
+        // ws transport: the CLI WebSocket close (handleCLIClose) owns the
+        // debounce. stdio transport: no WebSocket ever opens, so handleCLIClose
+        // never fires — this onDisconnect (triggered when the child's stdout
+        // closes on process exit) is the only disconnect signal. Run the same
+        // debounce → terminated → cli_disconnected path so the browser shows
+        // the Reconnect button instead of a silently-dead session.
+        if (adapter.isStdio()) {
+          this.scheduleCliDisconnectConfirm(session, sessionId, "cli_stdio_closed");
+        }
         return;
       }
 
@@ -914,18 +921,33 @@ export class WsBridge {
     if (session.backendAdapter instanceof ClaudeAdapter) {
       session.backendAdapter.detachWebSocket(ws);
     }
-    session.stateMachine.transition("reconnecting", "cli_ws_closed");
 
-    // Debounce: delay disconnect notification by 15s.
-    // CLI cycles its WebSocket every ~30s (close code 1000) and uses exponential
-    // backoff (1s → 2s → 4s → 8s → …) on reconnect. After rapid successive
-    // disconnects, the backoff can exceed 5s, so we use 15s to cover the worst
-    // case (8s backoff + connection overhead).
+    this.scheduleCliDisconnectConfirm(session, sessionId, "cli_ws_closed");
+  }
+
+  /**
+   * Debounced "disconnect confirmed" path shared by both Claude transports:
+   * the CLI WebSocket close (ws mode, via handleCLIClose) and the stdio reader
+   * EOF (stdio mode, where no WS close ever fires, via the adapter onDisconnect).
+   *
+   * Transitions to "reconnecting", then after a grace period — if the backend
+   * has not reconnected — marks the session terminated and broadcasts
+   * cli_disconnected so the browser shows the Reconnect button.
+   *
+   * Debounce is 15s: in ws mode the CLI cycles its WebSocket every ~30s (close
+   * code 1000) with exponential reconnect backoff (1s → 2s → 4s → 8s …), so the
+   * window must cover the worst case. In stdio mode it also absorbs the brief
+   * gap during an intentional model/effort-change relaunch — handleCLIStdioReady
+   * cancels this timer when the new process attaches.
+   */
+  private scheduleCliDisconnectConfirm(session: Session, sessionId: string, trigger: string): void {
+    session.stateMachine.transition("reconnecting", trigger);
+
     const existing = this.disconnectTimers.get(sessionId);
     if (existing) clearTimeout(existing);
     this.disconnectTimers.set(sessionId, setTimeout(() => {
       this.disconnectTimers.delete(sessionId);
-      // Check if CLI reconnected during grace period
+      // Check if the CLI reconnected during the grace period
       if (session.backendAdapter?.isConnected()) return;
       log.warn("ws-bridge", "CLI disconnect confirmed", { sessionId });
       session.stateMachine.transition("terminated", "disconnect_confirmed");

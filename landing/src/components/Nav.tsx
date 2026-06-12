@@ -10,7 +10,7 @@ export function Nav() {
         </a>
         <div className="flex items-center gap-5 sm:gap-6">
           <a
-            href="https://github.com/The-Vibe-Company/companion"
+            href="https://github.com/croll83/companion"
             target="_blank"
             rel="noopener"
             className="text-sm text-cc-muted hover:text-cc-fg transition-colors hidden sm:block font-mono-code"
@@ -26,7 +26,7 @@ export function Nav() {
             npm
           </a>
           <a
-            href="https://github.com/The-Vibe-Company/companion"
+            href="https://github.com/croll83/companion"
             target="_blank"
             rel="noopener"
             className="inline-flex items-center gap-2 px-4 py-2.5 bg-cc-primary text-[#fff4eb] rounded-lg text-[13px] font-medium font-mono-code hover:bg-cc-primary-hover transition-all hover:-translate-y-px border border-[#8e3518] shadow-[0_3px_0_0_#8e3518]"

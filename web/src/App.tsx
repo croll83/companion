@@ -19,6 +19,7 @@ import { OnboardingModal } from "./components/OnboardingModal.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
+const DocsPage = lazy(() => import("./components/DocsPage.js").then((m) => ({ default: m.DocsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
 const IntegrationsPage = lazy(() => import("./components/IntegrationsPage.js").then((m) => ({ default: m.IntegrationsPage })));
 const LinearSettingsPage = lazy(() => import("./components/LinearSettingsPage.js").then((m) => ({ default: m.LinearSettingsPage })));
@@ -176,6 +177,10 @@ export default function App() {
 
   if (route.page === "playground") {
     return <Suspense fallback={<LazyFallback />}><Playground /></Suspense>;
+  }
+
+  if (route.page === "docs") {
+    return <Suspense fallback={<LazyFallback />}><DocsPage docPath={route.docPath} /></Suspense>;
   }
 
   return (

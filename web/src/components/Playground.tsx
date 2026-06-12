@@ -656,12 +656,12 @@ const MOCK_LINEAR_ISSUE_ACTIVE: LinearIssue = {
   title:
     "Associer un ticket Linear a une session dans le panneau lateral droit",
   description: "Pouvoir associer un ticket Linear a une session.",
-  url: "https://linear.app/thevibecompany/issue/THE-147",
+  url: "https://linear.app/myteam/issue/THE-147",
   branchName: "the-147-associer-un-ticket-linear",
   priorityLabel: "High",
   stateName: "In Progress",
   stateType: "started",
-  teamName: "Thevibecompany",
+  teamName: "My Team",
   teamKey: "THE",
   teamId: "team-the",
 };
@@ -2541,7 +2541,7 @@ export function Playground() {
                     },
                   ] satisfies CreationProgressEvent[]
                 }
-                error="Failed to pull docker.io/stangirard/the-companion:latest — connection timed out after 30s"
+                error="Failed to pull docker.io/croll83/the-companion:latest — connection timed out after 30s"
               />
             </Card>
             <Card label="With streaming init script logs">
@@ -2711,7 +2711,7 @@ export function Playground() {
                       },
                     ] satisfies CreationProgressEvent[]
                   }
-                  error="Failed to pull docker.io/stangirard/the-companion:latest — connection timed out after 30s"
+                  error="Failed to pull docker.io/croll83/the-companion:latest — connection timed out after 30s"
                   backend="claude"
                   onCancel={() => {}}
                 />
