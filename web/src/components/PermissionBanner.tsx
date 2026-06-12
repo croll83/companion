@@ -260,8 +260,19 @@ function AskUserQuestionDisplay({
   const [customText, setCustomText] = useState<Record<string, string>>({});
   const [showCustom, setShowCustom] = useState<Record<string, boolean>>({});
 
+  // The Claude Code CLI keys the `answers` object by the question's TEXT, not by
+  // its index: it builds the tool result via `answers[question.question]`. Keying
+  // by a numeric index makes that lookup miss, so the model receives an empty
+  // "Your questions have been answered: ." result and never sees the selection.
+  function keyFor(questionIdx: number): string {
+    const q = questions[questionIdx] as Record<string, unknown> | undefined;
+    return q && typeof q.question === "string" && q.question
+      ? q.question
+      : String(questionIdx);
+  }
+
   function handleOptionClick(questionIdx: number, label: string) {
-    const key = String(questionIdx);
+    const key = keyFor(questionIdx);
     setSelections((prev) => ({ ...prev, [key]: label }));
     setShowCustom((prev) => ({ ...prev, [key]: false }));
 
@@ -272,7 +283,7 @@ function AskUserQuestionDisplay({
   }
 
   function handleCustomSubmit(questionIdx: number) {
-    const key = String(questionIdx);
+    const key = keyFor(questionIdx);
     const text = customText[key]?.trim();
     if (!text) return;
     setSelections((prev) => ({ ...prev, [key]: text }));
@@ -283,7 +294,7 @@ function AskUserQuestionDisplay({
   }
 
   function handleCustomChange(questionIdx: number, value: string) {
-    const key = String(questionIdx);
+    const key = keyFor(questionIdx);
     setCustomText((prev) => ({ ...prev, [key]: value }));
     const trimmed = value.trim();
     setSelections((prev) => {
@@ -297,7 +308,7 @@ function AskUserQuestionDisplay({
   }
 
   function handleCustomToggle(questionIdx: number) {
-    const key = String(questionIdx);
+    const key = keyFor(questionIdx);
     setShowCustom((prev) => {
       const wasOpen = Boolean(prev[key]);
       const next = { ...prev, [key]: !wasOpen };
@@ -340,7 +351,7 @@ function AskUserQuestionDisplay({
         const header = typeof q.header === "string" ? q.header : "";
         const text = typeof q.question === "string" ? q.question : "";
         const options = Array.isArray(q.options) ? q.options : [];
-        const key = String(i);
+        const key = keyFor(i);
         const selected = selections[key];
         const isCustom = showCustom[key];
 

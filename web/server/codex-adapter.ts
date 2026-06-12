@@ -483,7 +483,7 @@ export class CodexAdapter implements IBackendAdapter {
   private pendingApprovals = new Map<string, number>(); // request_id -> JSON-RPC id
 
   // Track request types that need different response formats
-  private pendingUserInputQuestionIds = new Map<string, string[]>(); // request_id -> ordered Codex question IDs
+  private pendingUserInputQuestionIds = new Map<string, Array<{ id: string; question: string }>>(); // request_id -> ordered Codex questions (id + text)
   private pendingReviewDecisions = new Set<string>(); // request_ids that need ReviewDecision format
   private pendingExitPlanModeRequests = new Set<string>(); // request_ids for ExitPlanMode approvals
   private pendingDynamicToolCalls = new Map<string, {
@@ -1322,8 +1322,8 @@ export class CodexAdapter implements IBackendAdapter {
       this.pendingApprovals.delete(msg.request_id);
 
       // User input requests (item/tool/requestUserInput) need ToolRequestUserInputResponse
-      const questionIds = this.pendingUserInputQuestionIds.get(msg.request_id);
-      if (questionIds) {
+      const questions = this.pendingUserInputQuestionIds.get(msg.request_id);
+      if (questions) {
         this.pendingUserInputQuestionIds.delete(msg.request_id);
 
         if (msg.behavior === "deny") {
@@ -1332,13 +1332,16 @@ export class CodexAdapter implements IBackendAdapter {
           return;
         }
 
-        // Convert browser answers (keyed by index "0","1",...) to Codex format (keyed by question ID)
+        // Convert browser answers to Codex format (keyed by question ID).
+        // The browser keys answers by the question TEXT (to match the Claude
+        // Code CLI contract); fall back to the legacy numeric index for safety.
         const browserAnswers = msg.updated_input?.answers as Record<string, string> || {};
         const codexAnswers: Record<string, { answers: string[] }> = {};
-        for (let i = 0; i < questionIds.length; i++) {
-          const answer = browserAnswers[String(i)];
+        for (let i = 0; i < questions.length; i++) {
+          const { id, question } = questions[i];
+          const answer = browserAnswers[question] ?? browserAnswers[String(i)];
           if (answer !== undefined) {
-            codexAnswers[questionIds[i]] = { answers: [answer] };
+            codexAnswers[id] = { answers: [answer] };
           }
         }
 
@@ -1957,7 +1960,7 @@ export class CodexAdapter implements IBackendAdapter {
     }> || [];
 
     // Store question IDs so we can map browser indices back to Codex IDs in the response
-    this.pendingUserInputQuestionIds.set(requestId, questions.map((q) => q.id));
+    this.pendingUserInputQuestionIds.set(requestId, questions.map((q) => ({ id: q.id, question: q.question })));
 
     // Convert to our AskUserQuestion format (matches AskUserQuestionDisplay component)
     const perm: PermissionRequest = {
