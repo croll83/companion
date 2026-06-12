@@ -533,6 +533,11 @@ export class CliLauncher {
       || "beacon.claude-ai.staging.ant.dev").trim() || "beacon.claude-ai.staging.ant.dev";
     const tlsBridgePort = Number(process.env.COMPANION_SDK_BRIDGE_PORT) || 8443;
 
+    // stdio bridge mode (host sessions only): no --sdk-url at all; the NDJSON
+    // protocol flows over the child's stdin/stdout. Immune to the Anthropic
+    // endpoint allowlist that broke ws --sdk-url on Claude Code 2.1.142+/2.1.175.
+    const useStdio = !isContainerized && bridgeMode === "stdio";
+
     let sdkUrl: string;
     if (isContainerized) {
       sdkUrl = `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`;
@@ -596,7 +601,7 @@ export class CliLauncher {
     }
 
     const args: string[] = [
-      ...(bridgeConfigPath ? [] : ["--sdk-url", sdkUrl]),
+      ...(bridgeConfigPath || useStdio ? [] : ["--sdk-url", sdkUrl]),
       "--print",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
@@ -629,13 +634,17 @@ export class CliLauncher {
       args.push("--fork-session");
     }
 
-    // Always pass -p "" for headless mode. When relaunching, also pass --resume
-    // to restore the CLI's conversation context.
+    // When relaunching, pass --resume to restore the CLI's conversation context.
     if (options.resumeSessionId) {
       args.push("--resume", options.resumeSessionId);
     }
 
-    args.push("-p", "");
+    // Headless WS modes need the -p "" placeholder (the actual prompt arrives
+    // over the transport). In stdio mode the CLI reads its input stream from
+    // stdin, so passing -p would make it treat "" as a one-shot prompt.
+    if (!useStdio) {
+      args.push("-p", "");
+    }
 
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
@@ -692,6 +701,8 @@ export class CliLauncher {
     const proc = Bun.spawn(spawnCmd, {
       cwd: spawnCwd,
       env: spawnEnv,
+      // In stdio mode the child's stdin carries the NDJSON input stream.
+      stdin: useStdio ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -699,8 +710,21 @@ export class CliLauncher {
     info.pid = proc.pid;
     this.processes.set(sessionId, proc);
 
-    // Stream stdout/stderr for debugging
-    this.pipeOutput(sessionId, proc);
+    if (useStdio) {
+      // stdout is the protocol channel and is consumed by the ClaudeAdapter's
+      // stdio reader — only stderr is piped here for diagnostics.
+      this.pipeOutput(sessionId, proc, { skipStdout: true });
+      // Hand the live process to the bridge, which attaches a ClaudeAdapter to
+      // its stdin/stdout (mirrors the /ws/cli open path for WS sessions).
+      info.state = "connected";
+      companionBus.emit("session:cli-stdio-ready", {
+        sessionId,
+        proc: proc as Subprocess<"pipe", "pipe", "pipe">,
+      });
+    } else {
+      // Stream stdout/stderr for debugging
+      this.pipeOutput(sessionId, proc);
+    }
 
     // Monitor process exit
     const spawnedAt = Date.now();
@@ -1403,10 +1427,12 @@ export class CliLauncher {
     }
   }
 
-  private pipeOutput(sessionId: string, proc: Subprocess): void {
+  private pipeOutput(sessionId: string, proc: Subprocess, opts?: { skipStdout?: boolean }): void {
     const stdout = proc.stdout;
     const stderr = proc.stderr;
-    if (stdout && typeof stdout !== "number") {
+    // In stdio bridge mode the adapter owns stdout (the NDJSON protocol stream),
+    // so a second reader here would steal bytes from it.
+    if (!opts?.skipStdout && stdout && typeof stdout !== "number") {
       this.pipeStream(sessionId, stdout, "stdout");
     }
     if (stderr && typeof stderr !== "number") {

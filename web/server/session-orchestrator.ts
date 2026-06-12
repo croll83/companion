@@ -165,6 +165,12 @@ export class SessionOrchestrator {
       this.wsBridge.attachBackendAdapter(sessionId, adapter, "codex");
     });
 
+    // When a host Claude CLI is spawned in stdio bridge mode, attach a
+    // ClaudeAdapter to its stdin/stdout (no inbound WebSocket fires).
+    companionBus.on("session:cli-stdio-ready", ({ sessionId, proc }) => {
+      this.wsBridge.handleCLIStdioReady(sessionId, proc);
+    });
+
     // When a CLI/Codex process exits, notify agent executor and external listeners
     // separately so a throw in one doesn't skip the other (bus isolates each handler).
     companionBus.on("session:exited", ({ sessionId, exitCode }) => {

@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ServerWebSocket } from "bun";
+import type { ServerWebSocket, Subprocess } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import type {
   BrowserIncomingMessage,
@@ -57,8 +57,17 @@ const CLI_DEDUP_WINDOW = 2000;
 export class ClaudeAdapter implements IBackendAdapter {
   private sessionId: string;
 
-  // WebSocket to the Claude Code CLI process
+  // Transport mode. "ws": the CLI connects back to us via --sdk-url (legacy,
+  // requires the Anthropic endpoint allowlist workaround). "stdio": we own the
+  // child process and exchange the same NDJSON protocol over its stdin/stdout.
+  private transportMode: "ws" | "stdio" = "ws";
+
+  // WebSocket to the Claude Code CLI process (transportMode === "ws")
   private cliSocket: ServerWebSocket<SocketData> | null = null;
+
+  // Child process whose stdin/stdout carry the NDJSON protocol (transportMode === "stdio")
+  private stdioProc: Subprocess<"pipe", "pipe", "pipe"> | null = null;
+  private stdioReaderActive = false;
 
   // Callbacks registered by the bridge via on*() methods
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
@@ -130,6 +139,69 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.disconnectCb?.();
   }
 
+  // -- stdio transport lifecycle ----------------------------------------------
+
+  /**
+   * Attach a child process whose stdin/stdout carry the NDJSON protocol.
+   * Switches the adapter into stdio transport mode, starts reading stdout, and
+   * flushes any messages queued before the process was ready. This is the
+   * stdio equivalent of attachWebSocket() and is used for host Claude sessions
+   * spawned without --sdk-url.
+   */
+  attachStdio(proc: Subprocess<"pipe", "pipe", "pipe">): void {
+    this.transportMode = "stdio";
+    this.stdioProc = proc;
+    this.startStdioReader(proc);
+
+    if (this.pendingMessages.length > 0) {
+      console.log(
+        `[claude-adapter] Flushing ${this.pendingMessages.length} queued message(s) for session ${this.sessionId} (stdio)`,
+      );
+      const queued = this.pendingMessages.splice(0);
+      for (const ndjson of queued) {
+        this.sendRaw(ndjson);
+      }
+    }
+  }
+
+  /**
+   * Continuously read NDJSON lines from the child's stdout and route them
+   * through the same ingestion path as the WebSocket transport. Buffers across
+   * chunk boundaries so a message split between two reads is not corrupted.
+   * When stdout closes (process exiting), fires the disconnect callback so the
+   * bridge can mark the session disconnected and the launcher can relaunch.
+   */
+  private async startStdioReader(proc: Subprocess<"pipe", "pipe", "pipe">): Promise<void> {
+    if (this.stdioReaderActive) return;
+    this.stdioReaderActive = true;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lastNl = buffer.lastIndexOf("\n");
+        if (lastNl === -1) continue;
+        const complete = buffer.slice(0, lastNl + 1);
+        buffer = buffer.slice(lastNl + 1);
+        this.handleRawMessage(complete);
+      }
+      const tail = (buffer + decoder.decode()).trim();
+      if (tail) this.handleRawMessage(tail);
+    } catch (err) {
+      console.error(`[claude-adapter] stdio reader error for session ${this.sessionId}:`, err);
+    } finally {
+      this.stdioReaderActive = false;
+      // stdout closed -> the CLI process is exiting -> transport is gone.
+      if (this.transportMode === "stdio" && this.stdioProc === proc) {
+        this.stdioProc = null;
+        this.disconnectCb?.();
+      }
+    }
+  }
+
   // -- IBackendAdapter: Event registration ------------------------------------
 
   onBrowserMessage(cb: (msg: BrowserIncomingMessage) => void): void {
@@ -147,6 +219,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- IBackendAdapter: Transport state ---------------------------------------
 
   isConnected(): boolean {
+    if (this.transportMode === "stdio") return this.stdioProc !== null;
     return this.cliSocket !== null;
   }
 
@@ -154,6 +227,15 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Clear pending control requests to prevent memory leaks from
     // unresolved promises (CLI won't respond after disconnect)
     this.pendingControlRequests.clear();
+    if (this.transportMode === "stdio") {
+      const proc = this.stdioProc;
+      this.stdioProc = null;
+      if (proc) {
+        try { proc.stdin?.end(); } catch { /* sink may already be closed */ }
+        try { proc.kill(); } catch { /* process may already be gone */ }
+      }
+      return;
+    }
     if (this.cliSocket) {
       try {
         this.cliSocket.close();
@@ -166,10 +248,14 @@ export class ClaudeAdapter implements IBackendAdapter {
 
   /**
    * Handle transport-level close (used when WS proxy drops).
-   * Clears the socket reference without triggering the disconnect callback,
+   * Clears the transport reference without triggering the disconnect callback,
    * allowing the CLI to reconnect.
    */
   handleTransportClose(): void {
+    if (this.transportMode === "stdio") {
+      this.stdioProc = null;
+      return;
+    }
     this.cliSocket = null;
   }
 
@@ -857,7 +943,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    * queues the message for later delivery (flushed in attachWebSocket).
    */
   private sendToBackend(ndjson: string): void {
-    if (!this.cliSocket) {
+    if (!this.isConnected()) {
       console.log(
         `[claude-adapter] CLI not yet connected for session ${this.sessionId}, queuing message`,
       );
@@ -868,8 +954,9 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   /**
-   * Low-level send: writes NDJSON to the CLI socket with newline delimiter.
-   * Records the outgoing message. Assumes cliSocket is non-null.
+   * Low-level send: writes NDJSON to the active transport with a newline
+   * delimiter. Records the outgoing message. Assumes the transport is connected
+   * (checked by sendToBackend / flushed after attach).
    */
   private sendRaw(ndjson: string): void {
     // Record raw outgoing CLI message
@@ -878,7 +965,14 @@ export class ClaudeAdapter implements IBackendAdapter {
     );
     try {
       // NDJSON requires a newline delimiter
-      this.cliSocket!.send(ndjson + "\n");
+      if (this.transportMode === "stdio") {
+        const sink = this.stdioProc?.stdin;
+        if (!sink) throw new Error("stdio transport not connected");
+        sink.write(ndjson + "\n");
+        sink.flush();
+      } else {
+        this.cliSocket!.send(ndjson + "\n");
+      }
     } catch (err) {
       console.error(
         `[claude-adapter] Failed to send to CLI for session ${this.sessionId}:`,

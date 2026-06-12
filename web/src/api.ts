@@ -423,7 +423,7 @@ export interface AppSettings {
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
-  cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback";
+  cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
 }
 
 export interface HostsCheckResult {
@@ -972,7 +972,7 @@ export const api = {
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
-    cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback";
+    cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

@@ -1,6 +1,7 @@
 // Typed event map for the Companion internal event bus.
 // Each key is a namespaced event name; values are the payload passed to handlers.
 
+import type { Subprocess } from "bun";
 import type { BrowserIncomingMessage } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
@@ -49,6 +50,15 @@ export interface CompanionEventMap {
   "backend:codex-adapter-created": {
     sessionId: string;
     adapter: CodexAdapter;
+  };
+
+  /**
+   * A host Claude CLI was spawned in stdio bridge mode. Its stdin/stdout carry
+   * the NDJSON protocol; the WsBridge attaches a ClaudeAdapter to these pipes.
+   */
+  "session:cli-stdio-ready": {
+    sessionId: string;
+    proc: Subprocess<"pipe", "pipe", "pipe">;
   };
 
   // ── Per-session messages (high volume) ─────────────────────────────
