@@ -457,31 +457,6 @@ describe("getSessionUsageLimits", () => {
 });
 
 // ===========================================================================
-// getCloudProviderPlan
-// ===========================================================================
-describe("getCloudProviderPlan", () => {
-  it("sends GET with provider/cwd/sessionId query params", async () => {
-    const plan = {
-      provider: "modal",
-      sessionId: "s1",
-      image: "companion-core:latest",
-      cwd: "/repo",
-      mappedPorts: [{ containerPort: 3000, hostPort: 49152 }],
-      commandPreview: "modal run companion_cloud.py --manifest /repo/.companion/cloud/environments/s1.json",
-    };
-    mockFetch.mockResolvedValueOnce(mockResponse(plan));
-
-    const result = await api.getCloudProviderPlan("modal", "/repo", "s1");
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe(
-      `/api/cloud/providers/modal/plan?cwd=${encodeURIComponent("/repo")}&sessionId=${encodeURIComponent("s1")}`,
-    );
-    expect(result).toEqual(plan);
-  });
-});
-
-// ===========================================================================
 // terminal API
 // ===========================================================================
 describe("terminal API", () => {

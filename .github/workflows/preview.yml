@@ -13,7 +13,7 @@ permissions:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: stangirard/the-companion
+  IMAGE_NAME: croll83/the-companion
 
 jobs:
   test-gate:

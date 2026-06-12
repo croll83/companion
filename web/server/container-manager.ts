@@ -63,7 +63,7 @@ const CONTAINER_BOOT_TIMEOUT_MS = 20_000;
 const WORKSPACE_COPY_TIMEOUT_MS = 15 * 60_000; // 15 min for large repos
 const IMAGE_PULL_TIMEOUT_MS = 300_000; // 5 min for pulling images
 
-const DOCKER_REGISTRY = "docker.io/stangirard";
+const DOCKER_REGISTRY = "docker.io/croll83";
 
 function exec(cmd: string, opts?: ExecSyncOptionsWithStringEncoding): string {
   return execSync(cmd, { ...EXEC_OPTS, ...opts }).trim();

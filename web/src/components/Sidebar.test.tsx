@@ -1776,63 +1776,57 @@ describe("Sidebar", () => {
 
   // ─── External links in footer ──────────────────────────────────────────────
 
-  it("renders external links for Documentation, GitHub, and Website", () => {
-    // Verifies that all three external icon-only links are rendered in the
-    // sidebar footer with correct href values.
+  it("renders resource links for in-app Documentation and the fork's GitHub", () => {
+    // Verifies the icon-only resource links: Documentation points to the
+    // in-app docs route, GitHub points to the croll83 fork. The external
+    // Website link was removed when the fork detached from upstream.
     render(<Sidebar />);
 
     const docsLink = screen.getByLabelText("Open documentation");
     const githubLink = screen.getByLabelText("Open github");
-    const websiteLink = screen.getByLabelText("Open website");
 
     expect(docsLink).toBeInTheDocument();
     expect(githubLink).toBeInTheDocument();
-    expect(websiteLink).toBeInTheDocument();
+    expect(screen.queryByLabelText("Open website")).not.toBeInTheDocument();
 
-    expect(docsLink).toHaveAttribute("href", "https://docs.thecompanion.sh");
-    expect(githubLink).toHaveAttribute("href", "https://github.com/The-Vibe-Company/companion");
-    expect(websiteLink).toHaveAttribute("href", "https://thecompanion.sh");
+    expect(docsLink).toHaveAttribute("href", "#/docs");
+    expect(githubLink).toHaveAttribute("href", "https://github.com/croll83/companion");
   });
 
-  it("external links open in new tab with secure attributes", () => {
-    // Verifies that all external links use target="_blank" and
-    // rel="noopener noreferrer" to prevent reverse-tabnabbing.
+  it("the external GitHub link opens in a new tab with secure attributes", () => {
+    // External links use target="_blank" + rel="noopener noreferrer" to
+    // prevent reverse-tabnabbing. The in-app Documentation link is exempt
+    // (same-tab navigation, no external rel).
     render(<Sidebar />);
 
-    const links = [
-      screen.getByLabelText("Open documentation"),
-      screen.getByLabelText("Open github"),
-      screen.getByLabelText("Open website"),
-    ];
+    const githubLink = screen.getByLabelText("Open github");
+    expect(githubLink).toHaveAttribute("target", "_blank");
+    expect(githubLink).toHaveAttribute("rel", "noopener noreferrer");
 
-    for (const link of links) {
-      expect(link).toHaveAttribute("target", "_blank");
-      expect(link).toHaveAttribute("rel", "noopener noreferrer");
-    }
+    const docsLink = screen.getByLabelText("Open documentation");
+    expect(docsLink).not.toHaveAttribute("target");
   });
 
-  it("external links have title attributes for tooltip accessibility", () => {
-    // Verifies that each external link has a title attribute for tooltips
+  it("resource links have title attributes for tooltip accessibility", () => {
+    // Verifies that each resource link has a title attribute for tooltips
     // and screen reader support.
     render(<Sidebar />);
 
     expect(screen.getByTitle("Documentation")).toBeInTheDocument();
     expect(screen.getByTitle("GitHub")).toBeInTheDocument();
-    expect(screen.getByTitle("Website")).toBeInTheDocument();
+    expect(screen.queryByTitle("Website")).not.toBeInTheDocument();
   });
 
-  it("external links are rendered as anchor elements (not buttons)", () => {
-    // Verifies that external links use <a> tags for proper semantic HTML,
+  it("resource links are rendered as anchor elements (not buttons)", () => {
+    // Verifies that resource links use <a> tags for proper semantic HTML,
     // distinguishing them from internal nav buttons.
     render(<Sidebar />);
 
     const docsLink = screen.getByLabelText("Open documentation");
     const githubLink = screen.getByLabelText("Open github");
-    const websiteLink = screen.getByLabelText("Open website");
 
     expect(docsLink.tagName).toBe("A");
     expect(githubLink.tagName).toBe("A");
-    expect(websiteLink.tagName).toBe("A");
   });
 
   // ─── Delete modal inner click propagation ──────────────────────────────────
