@@ -60,6 +60,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     processedClientMessageIds: [],
     processedClientMessageIdSet: new Set(),
     lastCliActivityTs: Date.now(),
+    lastUserActivityTs: Date.now(),
     stateMachine: new SessionStateMachine("test-session"),
     ...overrides,
   };

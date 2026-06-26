@@ -161,6 +161,8 @@ function createMockLauncher() {
     removeSession: vi.fn(),
     setCLISessionId: vi.fn(),
     getStartingSessions: vi.fn(() => []),
+    setModel: vi.fn(),
+    setEffort: vi.fn(),
   } as any;
 }
 
@@ -177,6 +179,7 @@ function createMockBridge() {
     injectSystemPrompt: vi.fn(),
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
+    notifyCliDisconnected: vi.fn(),
   } as any;
 }
 
@@ -278,6 +281,92 @@ describe("SessionOrchestrator", () => {
       companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
 
       expect(deps.agentExecutor.handleSessionExited).toHaveBeenCalledWith("s1", 0);
+    });
+
+    it("session:exited notifies browsers via notifyCliDisconnected when not relaunching", () => {
+      // A real crash (no relaunch in progress, session live & not archived) must
+      // tell browsers the CLI is gone so they show the Reconnect button.
+      deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited" } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:exited", { sessionId: "s1", exitCode: 1 });
+
+      expect(deps.wsBridge.notifyCliDisconnected).toHaveBeenCalledWith("s1");
+    });
+
+    it("session:exited does NOT notify when the session is archived", () => {
+      // Archived sessions are torn down intentionally — no Reconnect affordance.
+      deps.launcher.getSession.mockReturnValue({ archived: true } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
+
+      expect(deps.wsBridge.notifyCliDisconnected).not.toHaveBeenCalled();
+    });
+
+    it("session:exited does NOT notify when the session no longer exists", () => {
+      deps.launcher.getSession.mockReturnValue(undefined);
+      orchestrator.initialize();
+
+      companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
+
+      expect(deps.wsBridge.notifyCliDisconnected).not.toHaveBeenCalled();
+    });
+
+    it("model-change suppresses the cli_disconnected from the old process exit", async () => {
+      // A model change relaunches the CLI: the old process exits (session:exited
+      // fires) but this is an intentional respawn. The handler adds the session
+      // to relaunchingSet around launcher.relaunch, so the exit notification is
+      // suppressed. We assert that by emitting session:exited WHILE the relaunch
+      // is in flight (relaunch held open) and checking no notify happened.
+      deps.launcher.getSession.mockReturnValue({
+        archived: false,
+        backendType: "claude",
+        model: "old",
+        state: "running",
+      } as any);
+      let resolveRelaunch!: () => void;
+      deps.launcher.relaunch.mockReturnValue(new Promise<{ ok: boolean }>((r) => {
+        resolveRelaunch = () => r({ ok: true });
+      }));
+      orchestrator.initialize();
+
+      // Kick off the model change (relaunch stays pending).
+      companionBus.emit("session:model-change", { sessionId: "s1", model: "new" });
+      await Promise.resolve();
+
+      // The old process exits mid-relaunch.
+      companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
+      expect(deps.wsBridge.notifyCliDisconnected).not.toHaveBeenCalled();
+
+      // Finish the relaunch — relaunchingSet is cleared in finally.
+      resolveRelaunch();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    it("effort-change suppresses the cli_disconnected from the old process exit", async () => {
+      deps.launcher.getSession.mockReturnValue({
+        archived: false,
+        backendType: "claude",
+        effort: "low",
+        state: "running",
+      } as any);
+      let resolveRelaunch!: () => void;
+      deps.launcher.relaunch.mockReturnValue(new Promise<{ ok: boolean }>((r) => {
+        resolveRelaunch = () => r({ ok: true });
+      }));
+      orchestrator.initialize();
+
+      companionBus.emit("session:effort-change", { sessionId: "s1", effort: "high" });
+      await Promise.resolve();
+
+      companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
+      expect(deps.wsBridge.notifyCliDisconnected).not.toHaveBeenCalled();
+
+      resolveRelaunch();
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
     it("git info ready callback starts PR polling", () => {

@@ -73,6 +73,17 @@ export class WsBridge {
   private static readonly CODEX_DISCONNECT_DEBOUNCE_MS = Number(
     process.env.COMPANION_CODEX_DISCONNECT_DEBOUNCE_MS || "5000",
   );
+  /**
+   * Short debounce for the Claude *stdio* disconnect path. The 15s ws debounce
+   * was a band-aid for the CLI WebSocket cycling every ~30s, which does NOT
+   * happen in stdio mode (the only disconnect signal is the child's stdout EOF
+   * on process exit). A relaunch reattaches via handleCLIStdioReady within this
+   * window and cancels the timer, so 2.5s is enough to absorb that gap while
+   * surfacing genuine deaths quickly.
+   */
+  private static readonly STDIO_DISCONNECT_DEBOUNCE_MS = Number(
+    process.env.COMPANION_STDIO_DISCONNECT_DEBOUNCE_MS || "2500",
+  );
   private disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private idleKillTimers = new Map<string, ReturnType<typeof setInterval>>();
   private sessions = new Map<string, Session>();
@@ -182,6 +193,7 @@ export class WsBridge {
           Array.isArray(p.processedClientMessageIds) ? p.processedClientMessageIds : [],
         ),
         lastCliActivityTs: Date.now(),
+        lastUserActivityTs: Date.now(),
         stateMachine: new SessionStateMachine(p.id, "terminated"),
       };
       session.state.backend_type = session.backendType;
@@ -271,6 +283,7 @@ export class WsBridge {
         processedClientMessageIds: [],
         processedClientMessageIdSet: new Set(),
         lastCliActivityTs: Date.now(),
+        lastUserActivityTs: Date.now(),
         stateMachine: new SessionStateMachine(sessionId),
       };
       this.sessions.set(sessionId, session);
@@ -645,7 +658,12 @@ export class WsBridge {
         // debounce → terminated → cli_disconnected path so the browser shows
         // the Reconnect button instead of a silently-dead session.
         if (adapter.isStdio()) {
-          this.scheduleCliDisconnectConfirm(session, sessionId, "cli_stdio_closed");
+          this.scheduleCliDisconnectConfirm(
+            session,
+            sessionId,
+            "cli_stdio_closed",
+            WsBridge.STDIO_DISCONNECT_DEBOUNCE_MS,
+          );
         }
         return;
       }
@@ -665,13 +683,9 @@ export class WsBridge {
         if (session.backendAdapter?.isConnected()) return;
 
         log.warn("ws-bridge", "Codex disconnect confirmed", { sessionId });
-        for (const [reqId] of session.pendingPermissions) {
-          this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
-        }
-        session.pendingPermissions.clear();
         session.stateMachine.transition("terminated", "disconnect_confirmed");
         this.persistSession(session);
-        this.broadcastToBrowsers(session, { type: "cli_disconnected" });
+        this.notifyCliConnection(session, false, "codex_disconnect_confirmed");
 
         // No auto-relaunch — user clicks "Reconnect" in the UI.
       }, WsBridge.CODEX_DISCONNECT_DEBOUNCE_MS));
@@ -691,8 +705,10 @@ export class WsBridge {
       this.persistSession(session);
     }
 
-    // Broadcast cli_connected
-    this.broadcastToBrowsers(session, { type: "cli_connected" });
+    // Broadcast cli_connected (deduped) and start the activity-based idle-kill
+    // watchdog now that the CLI is live (idempotent).
+    this.notifyCliConnection(session, true, "adapter_attached");
+    this.startIdleKillWatchdog(sessionId);
     log.info("ws-bridge", "Backend adapter attached", {
       sessionId,
       backendType: session.backendType,
@@ -763,6 +779,52 @@ export class WsBridge {
     });
   }
 
+  /**
+   * Single, deduped entry point for CLI connection notifications.
+   *
+   * Routes every cli_connected / cli_disconnected broadcast through here so
+   * the browser never sees a redundant transition (e.g. two cli_disconnected
+   * in a row from both the disconnect debounce and the orchestrator's exit
+   * handler). Dedupe is tracked on session.lastConnectionBroadcast and reset
+   * on the opposite edge, so connected → disconnected → connected re-broadcasts
+   * correctly.
+   *
+   * On a disconnected edge we also cancel any pending permissions: a dead CLI
+   * will never answer them, and leaving them pending would strand the UI on a
+   * permission banner. Each is cancelled with permission_cancelled so the
+   * browser clears its banner.
+   */
+  private notifyCliConnection(session: Session, connected: boolean, reason: string): void {
+    const next = connected ? "connected" : "disconnected";
+    if (session.lastConnectionBroadcast === next) return; // deduped no-op
+    session.lastConnectionBroadcast = next;
+
+    if (connected) {
+      log.info("ws-bridge", "CLI connection notification", { sessionId: session.id, connected, reason });
+      this.broadcastToBrowsers(session, { type: "cli_connected" });
+      return;
+    }
+
+    log.info("ws-bridge", "CLI connection notification", { sessionId: session.id, connected, reason });
+    this.broadcastToBrowsers(session, { type: "cli_disconnected" });
+    // Cancel pending permissions — the CLI is gone and can't resolve them.
+    for (const [reqId] of session.pendingPermissions) {
+      this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
+    }
+    session.pendingPermissions.clear();
+  }
+
+  /**
+   * Public wrapper for the orchestrator to announce a confirmed CLI death
+   * (e.g. from the session:exited handler when no relaunch is in progress).
+   * No-op for unknown sessions.
+   */
+  notifyCliDisconnected(sessionId: string, reason = "process_exited"): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.notifyCliConnection(session, false, reason);
+  }
+
   /** Cancel a pending disconnect debounce timer for a session, if any. */
   cancelDisconnectTimer(sessionId: string): boolean {
     const timer = this.disconnectTimers.get(sessionId);
@@ -812,16 +874,20 @@ export class WsBridge {
     adapter.attachWebSocket(ws);
 
     // Broadcast cli_connected on reconnection (new adapters already got this
-    // via attachBackendAdapter to avoid double-broadcasting)
+    // via attachBackendAdapter; notifyCliConnection dedupes either way). Also
+    // (re)start the activity-based idle-kill watchdog.
     if (!isNewAdapter) {
-      this.broadcastToBrowsers(session, { type: "cli_connected" });
+      this.notifyCliConnection(session, true, "cli_ws_reconnected");
     }
+    this.startIdleKillWatchdog(sessionId);
 
     // Flush any messages queued while waiting for the CLI WebSocket.
-    // Per the SDK protocol, the first user message triggers system.init,
-    // so we must send it as soon as the WebSocket is open — NOT wait for
-    // system.init (which would create a deadlock for slow-starting sessions
-    // like Docker containers where the user message arrives before CLI connects).
+    // Per the SDK protocol, the CLI emits system.init ONLY AFTER it receives
+    // the first user message (verified empirically against the raw recordings:
+    // the order is always `out cli user` then `in cli system/init`, 39/39). So
+    // the queued message must be sent as soon as the transport is open —
+    // gating the flush on system.init would DEADLOCK (init never arrives
+    // because the message that triggers it was never sent).
     if (session.pendingMessages.length > 0) {
       console.log(`[ws-bridge] Flushing ${session.pendingMessages.length} queued message(s) on CLI connect for session ${sessionId}`);
       const queued = session.pendingMessages.splice(0);
@@ -877,10 +943,21 @@ export class WsBridge {
     adapter.attachStdio(proc);
 
     if (!isNewAdapter) {
-      this.broadcastToBrowsers(session, { type: "cli_connected" });
+      this.notifyCliConnection(session, true, "cli_stdio_reconnected");
     }
+    this.startIdleKillWatchdog(sessionId);
 
     // Flush any browser messages queued while waiting for the CLI to be ready.
+    // As in handleCLIOpen, the CLI emits system.init only AFTER receiving the
+    // first user message, so we flush on attach rather than gating on init.
+    //
+    // KNOWN ISSUE (not fixed on this branch): in stdio mode there is a
+    // stdin-readiness race — the queued message can be written before the
+    // child's stdin reader is fully wired, so the very first user message after
+    // a fresh spawn / --resume relaunch is occasionally dropped (the "had to
+    // send 'yo' to deliver the previous message" symptom). This needs live
+    // debugging of adapter.attachStdio's write timing, NOT init gating (gating
+    // on init deadlocks — see handleCLIOpen). Revisit separately.
     if (session.pendingMessages.length > 0) {
       console.log(`[ws-bridge] Flushing ${session.pendingMessages.length} queued message(s) on CLI stdio ready for session ${sessionId}`);
       const queued = session.pendingMessages.splice(0);
@@ -940,7 +1017,12 @@ export class WsBridge {
    * gap during an intentional model/effort-change relaunch — handleCLIStdioReady
    * cancels this timer when the new process attaches.
    */
-  private scheduleCliDisconnectConfirm(session: Session, sessionId: string, trigger: string): void {
+  private scheduleCliDisconnectConfirm(
+    session: Session,
+    sessionId: string,
+    trigger: string,
+    delayMs: number = WsBridge.DISCONNECT_DEBOUNCE_MS,
+  ): void {
     session.stateMachine.transition("reconnecting", trigger);
 
     const existing = this.disconnectTimers.get(sessionId);
@@ -951,15 +1033,15 @@ export class WsBridge {
       if (session.backendAdapter?.isConnected()) return;
       log.warn("ws-bridge", "CLI disconnect confirmed", { sessionId });
       session.stateMachine.transition("terminated", "disconnect_confirmed");
-      this.broadcastToBrowsers(session, { type: "cli_disconnected" });
-      for (const [reqId] of session.pendingPermissions) {
-        this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
-      }
-      session.pendingPermissions.clear();
+      // notifyCliConnection broadcasts cli_disconnected (deduped) and cancels
+      // any pending permissions.
+      this.notifyCliConnection(session, false, trigger);
+      // Stop the idle-kill watchdog — the CLI is dead, nothing to reclaim.
+      this.stopIdleKillWatchdog(sessionId);
 
       // No auto-relaunch — user clicks "Reconnect" in the UI which calls
       // POST /api/sessions/:id/relaunch explicitly.
-    }, WsBridge.DISCONNECT_DEBOUNCE_MS));
+    }, delayMs));
   }
 
   // ── Browser WebSocket handlers ──────────────────────────────────────────
@@ -973,9 +1055,6 @@ export class WsBridge {
     browserData.lastAckSeq = 0;
     session.browserSockets.add(ws);
     log.info("ws-bridge", "Browser connected", { sessionId, browsers: session.browserSockets.size });
-
-    // Cancel idle kill watchdog — a browser is back
-    this.stopIdleKillWatchdog(sessionId);
 
     // Refresh git state on browser connect so branch changes made mid-session are reflected.
     this.refreshGitInfo(session, { notifyPoller: true });
@@ -1000,18 +1079,20 @@ export class WsBridge {
       this.sendToBrowser(ws, { type: "permission_request", request: perm });
     }
 
-    // Notify if backend is not connected and request relaunch.
-    // Treat an attached adapter as "alive" during init — `isConnected()`
-    // may flip true only after initialize/thread start, and relaunching
-    // during that window can kill a healthy startup.
-    const backendConnected = !!session.backendAdapter;
-
-    if (!backendConnected && !this.disconnectTimers.has(sessionId)) {
-      // Only signal disconnection if we're not within the debounce window
-      // (CLI may be mid-reconnect — avoid UI flap and spurious relaunch).
-      // Do NOT auto-relaunch here — the frontend connects a browser WS to
-      // every session on page load, which would relaunch ALL sessions.
-      // Relaunch is triggered explicitly via POST /api/sessions/:id/relaunch.
+    // Send a per-socket disconnect snapshot when the session is dead. The state
+    // machine is the source of truth here, NOT `!!session.backendAdapter` — a
+    // dead-but-still-attached adapter (terminated session that hasn't been torn
+    // down) would otherwise look alive and the browser would never show the
+    // Reconnect button.
+    //
+    // Use sendToBrowser (not broadcast) so we only correct the newly-connected
+    // socket; other browsers already have the correct state and broadcasting
+    // would corrupt notifyCliConnection's dedupe bookkeeping.
+    //
+    // Do NOT auto-relaunch here — the frontend opens a browser WS to every
+    // session on page load, which would relaunch ALL sessions. Relaunch happens
+    // explicitly (Reconnect button) or on send (routeBrowserMessage).
+    if (session.stateMachine.phase === "terminated") {
       this.sendToBrowser(ws, { type: "cli_disconnected" });
     }
   }
@@ -1084,10 +1165,10 @@ export class WsBridge {
     session.browserSockets.delete(ws);
     log.info("ws-bridge", "Browser disconnected", { sessionId, browsers: session.browserSockets.size });
 
-    // Start idle kill watchdog when last browser disconnects
-    if (session.browserSockets.size === 0 && !this.idleKillTimers.has(sessionId)) {
-      this.startIdleKillWatchdog(sessionId);
-    }
+    // NOTE: the idle-kill watchdog is now activity-based and browser-INDEPENDENT
+    // (started when the CLI connects, see startIdleKillWatchdog). Browser
+    // connect/disconnect no longer starts or stops it — a focused-but-idle
+    // session is still killed to free RAM, per the owner's policy.
   }
 
   // ── Idle kill watchdog ─────────────────────────────────────────────────
@@ -1099,13 +1180,19 @@ export class WsBridge {
   );
   private static readonly IDLE_CHECK_INTERVAL_MS = 60_000; // check every 60s
 
+  /**
+   * Start the activity-based idle-kill watchdog. Called when the CLI connects
+   * (handleCLIOpen / handleCLIStdioReady / attachBackendAdapter). Idempotent —
+   * a second call while a timer already runs is a no-op, so the running timer's
+   * activity measurement is preserved.
+   *
+   * Browser-INDEPENDENT by design: the goal is to free RAM when a session sees
+   * no activity (user-side OR Claude-side) for the threshold, even with a
+   * browser focused. There is no auto-reconnect — the session resumes only on a
+   * Reconnect click or on send (relaunch-on-send).
+   */
   private startIdleKillWatchdog(sessionId: string) {
-    // Reset activity timestamp so we measure from when browsers left, not from
-    // last CLI message (which may have been seconds ago during active work)
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.lastCliActivityTs = Date.now();
-    }
+    if (this.idleKillTimers.has(sessionId)) return; // already running — keep it
     console.log(`[ws-bridge] Starting idle kill watchdog for ${sessionId} (threshold: ${WsBridge.IDLE_KILL_THRESHOLD_MS / 60_000}min)`);
     const timer = setInterval(() => {
       this.checkIdleKill(sessionId);
@@ -1118,7 +1205,7 @@ export class WsBridge {
     if (timer) {
       clearInterval(timer);
       this.idleKillTimers.delete(sessionId);
-      console.log(`[ws-bridge] Cancelled idle kill watchdog for ${sessionId} (browser reconnected)`);
+      console.log(`[ws-bridge] Cancelled idle kill watchdog for ${sessionId}`);
     }
   }
 
@@ -1129,21 +1216,33 @@ export class WsBridge {
       return;
     }
 
-    // Browser reconnected — cancel
-    if (session.browserSockets.size > 0) {
-      this.stopIdleKillWatchdog(sessionId);
-      return;
-    }
-
-    const idleMs = Date.now() - session.lastCliActivityTs;
+    // Idle is measured from the most recent activity on EITHER side: a user
+    // interaction (lastUserActivityTs) or a CLI message (lastCliActivityTs).
+    const idleMs = Date.now() - Math.max(session.lastCliActivityTs, session.lastUserActivityTs);
     if (idleMs < WsBridge.IDLE_KILL_THRESHOLD_MS) {
       return; // still active or not idle long enough
     }
 
-    // Truly idle with no browsers — kill
-    console.log(`[ws-bridge] Idle kill triggered for ${sessionId} (idle ${Math.round(idleMs / 60_000)}min, 0 browsers)`);
+    // Phase gating: only kill an idle session that is genuinely at rest.
+    //  - "ready" is the only killable phase (idle, awaiting user input).
+    //  - streaming/compacting/initializing/starting → work in flight, never kill.
+    //  - awaiting_permission → PROTECTED: a permission is pending; killing would
+    //    lose the user's place, so we wait for them to resolve it.
+    //  - terminated → already dead; stop the watchdog.
+    const phase = session.stateMachine.phase;
+    if (phase === "terminated") {
+      this.stopIdleKillWatchdog(sessionId);
+      return;
+    }
+    if (phase !== "ready") {
+      return; // not at rest (or protected) — defer the kill
+    }
+
+    // Truly idle and at rest — kill to reclaim RAM. No auto-reconnect.
+    console.log(`[ws-bridge] Idle kill triggered for ${sessionId} (idle ${Math.round(idleMs / 60_000)}min, phase=ready)`);
     this.stopIdleKillWatchdog(sessionId);
     companionBus.emit("session:idle-kill", { sessionId });
+    this.notifyCliConnection(session, false, "idle_kill");
   }
 
   /** Append to messageHistory with cap. Delegates to ws-bridge-persist. */
@@ -1239,6 +1338,7 @@ export class WsBridge {
 
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
+      session.lastUserActivityTs = Date.now();
       metricsCollector.recordTurnStarted(session.id);
       const ts = Date.now();
       const userMessage: BrowserIncomingMessage = {
@@ -1264,6 +1364,7 @@ export class WsBridge {
 
     // -- permission_response: populate updatedInput fallback from pending, then remove -------
     if (msg.type === "permission_response") {
+      session.lastUserActivityTs = Date.now();
       metricsCollector.recordPermissionResolved(msg.request_id, msg.behavior as "allow" | "deny", false);
       const pending = session.pendingPermissions.get(msg.request_id);
       // When the browser sends allow without updated_input, use the original tool input
@@ -1311,6 +1412,24 @@ export class WsBridge {
       });
       this.enqueuePendingMessage(session, JSON.stringify(msg));
       this.persistSession(session);
+
+      // Relaunch-on-send: if the CLI is actually dead (terminated, or attached
+      // but disconnected), proactively relaunch with --resume so the queued
+      // message is delivered after init. handleAutoRelaunch is guarded against
+      // storms (grace + liveness + anti-storm budget) and against archived
+      // sessions, so this is safe to emit on every send to a dead session.
+      const phase = session.stateMachine.phase;
+      const cliDead = phase === "terminated" || !session.backendAdapter?.isConnected();
+      if (cliDead && phase !== "starting") {
+        // Reflect the in-flight relaunch in the UI: transition to "reconnecting"
+        // (the phase broadcast drives the "Reconnecting…" hint). The queued
+        // message still flushes post-init via the session_init/meta hooks.
+        if (phase === "terminated") {
+          session.stateMachine.transition("starting", "relaunch_on_send");
+          session.stateMachine.transition("reconnecting", "relaunch_on_send");
+        }
+        companionBus.emit("session:relaunch-needed", { sessionId: session.id });
+      }
     }
   }
 
