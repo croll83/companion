@@ -69,6 +69,29 @@ export class ClaudeAdapter implements IBackendAdapter {
   private stdioProc: Subprocess<"pipe", "pipe", "pipe"> | null = null;
   private stdioReaderActive = false;
 
+  // ── stdio attach-input self-heal ──────────────────────────────────────────
+  // A user message flushed onto a freshly RE-attached CLI process (relaunch /
+  // --resume) can be lost if the child's stdin reader isn't wired yet — the
+  // "had to send a second message to deliver the first" symptom. We rely on a
+  // proven protocol fact: the CLI emits system.init (and all other output) only
+  // AFTER it receives the first user message, so TOTAL silence for a few seconds
+  // after we write the input means the write was lost. In that case we re-send
+  // once. Armed only on RE-attaches (not the first/cold start, which can take
+  // >1s legitimately) and only for input sent right after attach, and cleared on
+  // the first byte received — so it never fires when the CLI is actually alive,
+  // making the re-send duplicate-safe in practice.
+  private attachCount = 0;
+  private lastAttachTs = 0;
+  private lastUserNdjson: string | null = null;
+  private inputAckTimer: ReturnType<typeof setTimeout> | null = null;
+  private inputAckResent = false;
+  private static readonly ATTACH_INPUT_WINDOW_MS = Number(
+    process.env.COMPANION_STDIO_ATTACH_WINDOW_MS || "2000",
+  );
+  private static readonly INPUT_ACK_TIMEOUT_MS = Number(
+    process.env.COMPANION_STDIO_INPUT_ACK_MS || "6000",
+  );
+
   // Callbacks registered by the bridge via on*() methods
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
   private sessionMetaCb: ((meta: { cliSessionId?: string; model?: string; cwd?: string }) => void) | null = null;
@@ -151,6 +174,11 @@ export class ClaudeAdapter implements IBackendAdapter {
   attachStdio(proc: Subprocess<"pipe", "pipe", "pipe">): void {
     this.transportMode = "stdio";
     this.stdioProc = proc;
+    // Reset the attach-input self-heal state for this (re)attach.
+    this.attachCount += 1;
+    this.lastAttachTs = Date.now();
+    this.inputAckResent = false;
+    this.clearInputAckTimer();
     this.startStdioReader(proc);
 
     if (this.pendingMessages.length > 0) {
@@ -181,6 +209,9 @@ export class ClaudeAdapter implements IBackendAdapter {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        // Any inbound byte means the CLI is alive and reading stdin — our last
+        // attach input was received, so cancel the re-send self-heal.
+        this.clearInputAckTimer();
         buffer += decoder.decode(value, { stream: true });
         const lastNl = buffer.lastIndexOf("\n");
         if (lastNl === -1) continue;
@@ -194,6 +225,7 @@ export class ClaudeAdapter implements IBackendAdapter {
       console.error(`[claude-adapter] stdio reader error for session ${this.sessionId}:`, err);
     } finally {
       this.stdioReaderActive = false;
+      this.clearInputAckTimer();
       // stdout closed -> the CLI process is exiting -> transport is gone.
       if (this.transportMode === "stdio" && this.stdioProc === proc) {
         this.stdioProc = null;
@@ -979,6 +1011,7 @@ export class ClaudeAdapter implements IBackendAdapter {
         if (!sink) throw new Error("stdio transport not connected");
         sink.write(ndjson + "\n");
         sink.flush();
+        this.maybeArmInputAck(ndjson);
       } else {
         this.cliSocket!.send(ndjson + "\n");
       }
@@ -987,6 +1020,41 @@ export class ClaudeAdapter implements IBackendAdapter {
         `[claude-adapter] Failed to send to CLI for session ${this.sessionId}:`,
         err,
       );
+    }
+  }
+
+  /**
+   * Arm the attach-input self-heal after writing a user message to stdin, IF the
+   * write happened right after a re-attach (relaunch / --resume). See the field
+   * comment for the rationale. The CLI emits output only after receiving the
+   * first user message, so if nothing comes back within the timeout, the write
+   * was lost and we re-send once.
+   */
+  private maybeArmInputAck(ndjson: string): void {
+    let isUser = false;
+    try { isUser = (JSON.parse(ndjson) as { type?: string }).type === "user"; } catch { /* not JSON */ }
+    if (!isUser) return;
+    this.lastUserNdjson = ndjson;
+    if (this.inputAckResent) return; // already re-sent once for this attach
+    if (this.attachCount <= 1) return; // first/cold start can be legitimately slow
+    if (Date.now() - this.lastAttachTs > ClaudeAdapter.ATTACH_INPUT_WINDOW_MS) return; // not an on-attach send
+    this.clearInputAckTimer();
+    this.inputAckTimer = setTimeout(() => {
+      this.inputAckTimer = null;
+      if (this.inputAckResent || !this.lastUserNdjson || !this.isConnected()) return;
+      this.inputAckResent = true;
+      console.warn(
+        `[claude-adapter] No CLI output ${ClaudeAdapter.INPUT_ACK_TIMEOUT_MS}ms after attach input for session ${this.sessionId} — re-sending (stdin attach race)`,
+      );
+      this.sendRaw(this.lastUserNdjson);
+    }, ClaudeAdapter.INPUT_ACK_TIMEOUT_MS);
+  }
+
+  /** Cancel the attach-input self-heal timer, if armed. */
+  private clearInputAckTimer(): void {
+    if (this.inputAckTimer) {
+      clearTimeout(this.inputAckTimer);
+      this.inputAckTimer = null;
     }
   }
 }
