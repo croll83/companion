@@ -1361,3 +1361,80 @@ describe("prompt_suggestion", () => {
     expect(emitted.suggestions).toEqual(["Fix the bug", "Add tests"]);
   });
 });
+
+// ─── stdio attach-input self-heal ───────────────────────────────────────────
+// On a RE-attach (relaunch / --resume) the queued user message can be written
+// to the child's stdin before its reader is wired, and get lost — the "had to
+// send a second message to deliver the first" bug. The CLI emits output only
+// AFTER receiving the first user message, so total silence after the write
+// means it was lost; we then re-send once. Armed only on re-attaches (not the
+// first/cold start) and cleared on the first inbound byte, so it never fires
+// when the CLI is actually alive.
+describe("ClaudeAdapter stdio attach-input self-heal", () => {
+  function makeStdioProc() {
+    let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({ start(c) { ctrl = c; } });
+    const stdin = { write: vi.fn(), flush: vi.fn(), end: vi.fn(), ref: vi.fn(), unref: vi.fn() };
+    return {
+      proc: { stdout, stdin, stderr: undefined, exited: new Promise<number>(() => {}), kill: vi.fn(), pid: 1 } as unknown as import("bun").Subprocess<"pipe", "pipe", "pipe">,
+      stdin,
+      pushStdout: (s: string) => ctrl.enqueue(new TextEncoder().encode(s)),
+    };
+  }
+  const userMsg = { type: "user_message" as const, content: "hello" };
+
+  it("re-sends the attach input once after total CLI silence", async () => {
+    vi.useFakeTimers();
+    const adapter = new ClaudeAdapter("sess-resend");
+    const p1 = makeStdioProc();
+    adapter.attachStdio(p1.proc); // attachCount 1 (cold) — does not arm
+    const p2 = makeStdioProc();
+    adapter.attachStdio(p2.proc); // attachCount 2 (re-attach) — arms on next user send
+
+    adapter.send(userMsg);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(1);
+    const firstWrite = p2.stdin.write.mock.calls[0][0];
+
+    // No inbound bytes within the ack window → the write was lost → re-send once.
+    await vi.advanceTimersByTimeAsync(6500);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(2);
+    expect(p2.stdin.write.mock.calls[1][0]).toBe(firstWrite);
+
+    // Only re-sends ONCE, never loops.
+    await vi.advanceTimersByTimeAsync(6500);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("does NOT re-send when the CLI produces output (alive)", async () => {
+    vi.useFakeTimers();
+    const adapter = new ClaudeAdapter("sess-alive");
+    const p1 = makeStdioProc();
+    adapter.attachStdio(p1.proc); // reader runs on p1 (stdioReaderActive)
+    const p2 = makeStdioProc();
+    adapter.attachStdio(p2.proc); // attachCount 2
+
+    adapter.send(userMsg);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(1);
+
+    // Any inbound byte on the active reader cancels the self-heal.
+    p1.pushStdout("k");
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(6500);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(1); // no re-send
+    vi.useRealTimers();
+  });
+
+  it("does NOT arm on the first (cold) attach", async () => {
+    vi.useFakeTimers();
+    const adapter = new ClaudeAdapter("sess-cold");
+    const p1 = makeStdioProc();
+    adapter.attachStdio(p1.proc); // attachCount 1
+
+    adapter.send(userMsg);
+    expect(p1.stdin.write).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(6500);
+    expect(p1.stdin.write).toHaveBeenCalledTimes(1); // cold start never re-sends
+    vi.useRealTimers();
+  });
+});

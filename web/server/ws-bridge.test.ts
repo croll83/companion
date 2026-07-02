@@ -399,10 +399,12 @@ describe("CLI handlers", () => {
   });
 
   it("handleCLIOpen: flushes pending messages immediately", () => {
-    // Per the SDK protocol, the first user message triggers system.init,
-    // so queued messages must be flushed as soon as the CLI WebSocket connects
-    // (not deferred until system.init, which would create a deadlock for
-    // slow-starting sessions like Docker containers).
+    // Per the SDK protocol, the CLI emits system.init ONLY AFTER it receives the
+    // first user message (verified empirically against the raw recordings: the
+    // order is always `out cli user` then `in cli system/init`). So queued
+    // messages must be flushed as soon as the CLI transport connects — NOT
+    // deferred until system.init, which would deadlock (init never arrives
+    // because the message that triggers it was never sent).
     const browser = makeBrowserSocket("s1");
     bridge.handleBrowserOpen(browser, "s1");
 
@@ -433,7 +435,7 @@ describe("CLI handlers", () => {
 
   it("handleCLIMessage: system.init does not re-flush already-sent messages", async () => {
     // Messages are flushed on CLI connect, so by the time system.init
-    // arrives the queue should already be empty.
+    // arrives the queue should already be empty (no double-send).
     mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
 
     const browser = makeBrowserSocket("s1");
@@ -1393,15 +1395,22 @@ describe("Browser handlers", () => {
     expect(permMsg.request.request_id).toBe("req-1");
   });
 
-  it("handleBrowserOpen: notifies browser via cli_disconnected without auto-relaunch", () => {
-    // Auto-relaunch on browser open was removed to fix a mass-relaunch bug
-    // (the frontend opens WS for every session on page load, which would
-    // respawn every CLI and exhaust RAM). The browser now shows a Reconnect
-    // banner and the user explicitly POSTs /api/sessions/:id/relaunch.
+  it("handleBrowserOpen: sends cli_disconnected snapshot when phase is terminated", () => {
+    // CHANGED: the liveness check is now the state machine, not
+    // `!!session.backendAdapter` (a dead-but-attached adapter would look alive).
+    // When a newly-connected browser joins a TERMINATED session, it receives a
+    // per-socket cli_disconnected snapshot so it shows the Reconnect UI. No
+    // auto-relaunch — the frontend opens a WS for every session on page load,
+    // which would respawn every CLI and exhaust RAM.
     const relaunchCb = vi.fn();
     const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
 
-    bridge.getOrCreateSession("s1");
+    const session = bridge.getOrCreateSession("s1");
+    // Drive the session to "terminated" (starting → initializing → reconnecting
+    // → terminated is a valid path).
+    session.stateMachine.transition("initializing", "test");
+    session.stateMachine.transition("terminated", "test");
+
     const browser = makeBrowserSocket("s1");
     bridge.handleBrowserOpen(browser, "s1");
 
@@ -1413,6 +1422,20 @@ describe("Browser handlers", () => {
     expect(disconnectedMsg).toBeDefined();
 
     off();
+  });
+
+  it("handleBrowserOpen: does NOT send cli_disconnected when phase is not terminated", () => {
+    // A session that is still starting/initializing/ready must NOT trigger the
+    // Reconnect UI on browser connect — only "terminated" does.
+    const session = bridge.getOrCreateSession("s1");
+    expect(session.stateMachine.phase).toBe("starting");
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const disconnectedMsg = calls.find((c: any) => c.type === "cli_disconnected");
+    expect(disconnectedMsg).toBeUndefined();
   });
 
   it("handleBrowserOpen: does NOT relaunch when Codex adapter is attached but still initializing", () => {
@@ -4763,121 +4786,282 @@ describe("set_ai_validation browser message", () => {
   });
 });
 
+// ─── notifyCliConnection dedupe & relaunch-on-send ───────────────────────────
+
+describe("CLI connection notification (dedupe)", () => {
+  it("does not broadcast a duplicate cli_connected", async () => {
+    // notifyCliConnection dedupes on session.lastConnectionBroadcast, so two
+    // connect edges in a row only produce one cli_connected.
+    mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1"); // new adapter → cli_connected (1)
+    // Simulate a redundant connect signal (e.g. WS reconnect of same adapter).
+    bridge.handleCLIOpen(cli, "s1"); // same adapter → would re-notify, but deduped
+
+    const connectedCount = browser.send.mock.calls
+      .map(([arg]: [string]) => JSON.parse(arg))
+      .filter((c: any) => c.type === "cli_connected").length;
+    expect(connectedCount).toBe(1);
+  });
+
+  it("re-broadcasts on connected → disconnected → connected", async () => {
+    // Dedupe must reset on the opposite edge so a genuine reconnect after a
+    // disconnect is surfaced.
+    vi.useFakeTimers();
+    mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    const { proc, closeStdout } = makeStdioProc();
+    bridge.handleCLIStdioReady("s1", proc); // connected (1)
+
+    // Disconnect: stdout EOF → short stdio debounce → cli_disconnected.
+    closeStdout();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(3000); // > STDIO_DISCONNECT_DEBOUNCE_MS
+
+    // Reconnect with a fresh process → cli_connected again.
+    const second = makeStdioProc();
+    bridge.handleCLIStdioReady("s1", second.proc);
+
+    const types = browser.send.mock.calls
+      .map(([arg]: [string]) => JSON.parse(arg))
+      .filter((c: any) => c.type === "cli_connected" || c.type === "cli_disconnected")
+      .map((c: any) => c.type);
+    expect(types).toEqual(["cli_connected", "cli_disconnected", "cli_connected"]);
+    vi.useRealTimers();
+  });
+});
+
+describe("Relaunch-on-send", () => {
+  it("emits session:relaunch-needed when sending to a terminated session", () => {
+    // A user_message to a dead (terminated) session enqueues the message AND
+    // requests a --resume relaunch so the message is delivered post-init.
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const session = bridge.getOrCreateSession("s1");
+    session.stateMachine.transition("initializing", "test");
+    session.stateMachine.transition("terminated", "test");
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "wake up" }));
+
+    expect(relaunchCb).toHaveBeenCalledWith("s1");
+    // Message must be queued (delivered after the relaunch finishes init).
+    expect(session.pendingMessages.length).toBe(1);
+    // UI hint: the session shows "reconnecting" while the relaunch is in flight.
+    expect(session.stateMachine.phase).toBe("reconnecting");
+  });
+
+  it("does NOT emit relaunch-needed when the adapter is connected", () => {
+    // Normal send path — backend is alive, no relaunch.
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "hi" }));
+
+    expect(relaunchCb).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Idle kill watchdog ─────────────────────────────────────────────────────
 
 describe("Idle kill watchdog", () => {
+  // CHANGED (was browser-presence based): per the owner's policy the watchdog is
+  // now ACTIVITY-based and browser-INDEPENDENT. It starts when the CLI connects
+  // (not when the last browser leaves), measures idle from the most recent
+  // activity on EITHER side (user OR CLI), and only kills when the session is at
+  // rest (phase === "ready"). A focused-but-idle session is still killed to free
+  // RAM. There is no auto-reconnect.
+  //
+  // Default threshold is 24h (COMPANION_IDLE_KILL_MINUTES unset in CI per the
+  // task instructions). We drive the session to "ready" via system.init, then
+  // advance fake time past the threshold.
   beforeEach(() => {
     vi.useFakeTimers();
+    mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("starts watchdog when last browser disconnects and emits idle-kill after threshold", () => {
-    // When the last browser disconnects, the bridge should start a periodic
-    // idle check. If no CLI activity occurs for IDLE_KILL_THRESHOLD_MS and
-    // no browser reconnects, the session:idle-kill event should fire.
+  // Bring a session to phase === "ready" via CLI connect + system.init.
+  async function makeReadySession(sessionId: string) {
+    const cli = makeCliSocket(sessionId);
+    bridge.handleCLIOpen(cli, sessionId);
+    await bridge.handleCLIMessage(cli, makeInitMsg());
+    const session = bridge.getSession(sessionId)!;
+    expect(session.stateMachine.phase).toBe("ready");
+    return { cli, session };
+  }
+
+  it("emits idle-kill + cli_disconnected after threshold while at rest (ready)", async () => {
+    // No activity (user or CLI) for the threshold while in "ready" → the watchdog
+    // emits session:idle-kill AND notifies browsers via cli_disconnected.
     const idleKillHandler = vi.fn();
     companionBus.on("session:idle-kill", idleKillHandler);
 
-    const cli = makeCliSocket("s1");
     const browser = makeBrowserSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
     bridge.handleBrowserOpen(browser, "s1");
+    await makeReadySession("s1");
+    browser.send.mockClear();
 
-    // Disconnect the browser — should start idle watchdog
-    bridge.handleBrowserClose(browser);
+    // Advance past the idle threshold (24h) + a check interval (60s).
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
 
-    // Advance past the idle kill threshold (default 24h) + check interval (60s)
-    // The watchdog checks every 60s, so we need to advance enough for:
-    // 1) The idle threshold to be exceeded (24h)
-    // 2) A check interval to fire
-    vi.advanceTimersByTime(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls).toContainEqual(expect.objectContaining({ type: "cli_disconnected" }));
+  });
+
+  it("kills regardless of browser presence (browser still connected)", async () => {
+    // The defining behavior change: a focused browser does NOT keep the session
+    // alive. Idle past threshold → killed even with a browser connected.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    await makeReadySession("s1");
+    expect(bridge.getSession("s1")!.browserSockets.size).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
 
     expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
   });
 
-  it("cancels watchdog when browser reconnects before idle threshold", () => {
-    // If a browser reconnects before the idle threshold, the watchdog
-    // should be cancelled and no idle-kill event should fire.
+  it("user activity resets the idle timer", async () => {
+    // A user_message bumps lastUserActivityTs, so the idle window restarts.
     const idleKillHandler = vi.fn();
     companionBus.on("session:idle-kill", idleKillHandler);
 
-    const cli = makeCliSocket("s1");
-    const browser1 = makeBrowserSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-    bridge.handleBrowserOpen(browser1, "s1");
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { session } = await makeReadySession("s1");
 
-    // Disconnect browser — starts watchdog
-    bridge.handleBrowserClose(browser1);
+    // Advance most of the way to the threshold.
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
 
-    // Advance a bit (5 min) but not past threshold
-    vi.advanceTimersByTime(5 * 60_000);
+    // User sends a message → resets activity. (Session transitions to streaming;
+    // bring it back to ready so the kill gate could fire if the timer hadn't reset.)
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "still here" }));
+    session.stateMachine.transition("ready", "test_back_to_ready");
 
-    // Reconnect a browser — should cancel watchdog
-    const browser2 = makeBrowserSocket("s1");
-    bridge.handleBrowserOpen(browser2, "s1");
+    // Another 23h (total > 24h from start, but < 24h since the user message).
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
 
-    // Advance well past the 24h threshold
-    vi.advanceTimersByTime(25 * 60 * 60_000);
+    // Now exceed the threshold measured from the user message.
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
 
-    // Should NOT have triggered idle kill
+  it("CLI activity resets the idle timer", async () => {
+    // A CLI message (onActivityUpdate / onBrowserMessage) bumps
+    // lastCliActivityTs, restarting the idle window.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { cli } = await makeReadySession("s1");
+
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+
+    // CLI emits a fresh message (distinct uuid so the adapter's dedup window
+    // doesn't drop it) → resets lastCliActivityTs.
+    await bridge.handleCLIMessage(cli, makeInitMsg({ uuid: "uuid-activity-2" }));
+
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("does NOT kill while streaming", async () => {
+    // Work in flight (phase !== ready) must never be killed, even past threshold.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { session } = await makeReadySession("s1");
+
+    // Enter streaming and stay there. Manually backdate activity so the idle
+    // window is exceeded — the only thing protecting the session is the phase gate.
+    session.stateMachine.transition("streaming", "user_message");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
     expect(idleKillHandler).not.toHaveBeenCalled();
   });
 
-  it("checkIdleKill stops watchdog if session is removed", () => {
+  it("does NOT kill while awaiting_permission (protects the user's place)", async () => {
+    // A pending permission must not be lost to an idle-kill.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { session } = await makeReadySession("s1");
+
+    session.stateMachine.transition("streaming", "user_message");
+    session.stateMachine.transition("awaiting_permission", "permission_requested");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+  });
+
+  it("does NOT kill before the threshold", async () => {
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    await makeReadySession("s1");
+
+    // Well under 24h.
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+  });
+
+  it("checkIdleKill stops watchdog if session is removed", async () => {
     // If the session is removed while the watchdog is running (e.g. user
     // deleted it), the watchdog should clean itself up on the next tick.
     const idleKillHandler = vi.fn();
     companionBus.on("session:idle-kill", idleKillHandler);
 
-    const cli = makeCliSocket("s1");
-    const browser = makeBrowserSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-    bridge.handleBrowserOpen(browser, "s1");
-
-    // Disconnect browser — starts watchdog
-    bridge.handleBrowserClose(browser);
-
-    // Remove session while watchdog is active
+    await makeReadySession("s1");
     bridge.removeSession("s1");
 
-    // Advance past 24h threshold + check interval
-    vi.advanceTimersByTime(24 * 60 * 60_000 + 60_000);
-
-    // Should NOT fire idle-kill because session was removed
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
     expect(idleKillHandler).not.toHaveBeenCalled();
   });
 
-  it("checkIdleKill stops watchdog if browser reconnects before check fires", () => {
-    // Edge case: browser reconnects between check intervals. The next
-    // check should see browserSockets.size > 0 and cancel the watchdog.
+  it("watchdog starts on CLI connect, not on last-browser-close", async () => {
+    // Regression guard for the behavior change: connecting the CLI is what
+    // starts the watchdog. handleBrowserClose no longer starts it.
+    const { session } = await makeReadySession("s1");
+    // The private timer map isn't exposed, but we can prove the watchdog is
+    // active by confirming an idle-kill fires with NO browser ever attached.
     const idleKillHandler = vi.fn();
     companionBus.on("session:idle-kill", idleKillHandler);
+    expect(session.browserSockets.size).toBe(0);
 
-    const cli = makeCliSocket("s1");
-    const browser1 = makeBrowserSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-    bridge.handleBrowserOpen(browser1, "s1");
-
-    // Disconnect browser
-    bridge.handleBrowserClose(browser1);
-
-    // Advance 10 min (past one check interval but under threshold)
-    vi.advanceTimersByTime(10 * 60_000);
-
-    // Manually add a browser socket directly to simulate reconnect
-    // without calling handleBrowserOpen (which would cancel watchdog)
-    const session = bridge.getSession("s1")!;
-    const browser2 = makeBrowserSocket("s1");
-    session.browserSockets.add(browser2);
-
-    // Advance past 24h threshold
-    vi.advanceTimersByTime(24 * 60 * 60_000);
-
-    // Watchdog should have noticed the browser and cancelled itself
-    expect(idleKillHandler).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
   });
 });
 

@@ -61,11 +61,11 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // After PR #651, the Claude lineup is Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5.
+    // Claude lineup: Opus 4.8, Fable 5, Opus 4.7, Opus 4.6, Sonnet 5, Haiku 4.5.
     // Match exact labels because /Opus/ alone now matches multiple entries.
     expect(screen.getByRole("option", { name: /Opus 4\.7/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Opus 4\.6/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Sonnet 4\.6/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Sonnet 5/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Haiku 4\.5/ })).toBeInTheDocument();
   });
 
@@ -76,7 +76,7 @@ describe("ModelSwitcher", () => {
     const opusOption = screen.getByRole("option", { name: /Opus 4\.6/ });
     expect(opusOption).toHaveAttribute("aria-selected", "true");
 
-    const sonnetOption = screen.getByRole("option", { name: /Sonnet 4\.6/ });
+    const sonnetOption = screen.getByRole("option", { name: /Sonnet 5/ });
     expect(sonnetOption).toHaveAttribute("aria-selected", "false");
 
     // The newly added Opus 4.7 is not the active one in this fixture.
@@ -87,22 +87,22 @@ describe("ModelSwitcher", () => {
   it("sends set_model via WebSocket on selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5/ }));
 
     expect(mockSendToSession).toHaveBeenCalledWith("s1", {
       type: "set_model",
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
     });
   });
 
   it("optimistically updates the store after selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet 4\.6/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5/ }));
 
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     const updatedSessions = mockSetSdkSessions.mock.calls[0][0];
-    expect(updatedSessions[0].model).toBe("claude-sonnet-4-6");
+    expect(updatedSessions[0].model).toBe("claude-sonnet-5");
   });
 
   it("does not send when selecting the already-active model", () => {

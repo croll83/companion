@@ -57,10 +57,17 @@ export interface Session {
   processedClientMessageIdSet: Set<string>;
   /** Timestamp of last non-keepalive CLI message (for idle detection) */
   lastCliActivityTs: number;
+  /** Timestamp of last real user interaction (user_message / permission_response). */
+  lastUserActivityTs: number;
   /** Formal session state machine tracking phase and validating transitions. */
   stateMachine: SessionStateMachine;
   /** Cleanup function for state machine transition listener — call on session teardown. */
   unsubscribeStateMachine?: () => void;
+  /**
+   * Last connection state broadcast to browsers, for deduping cli_connected /
+   * cli_disconnected notifications (see WsBridge.notifyCliConnection).
+   */
+  lastConnectionBroadcast?: "connected" | "disconnected";
 }
 
 export type GitSessionKey =

@@ -190,6 +190,21 @@ export class SessionOrchestrator {
       if (session?.stateMachine) {
         session.stateMachine.transition("terminated", "process_exited");
       }
+      // Notify browsers the CLI is gone so they show the Reconnect button —
+      // UNLESS an immediate relaunch is in progress. Suppression cases:
+      //  - relaunchingSet has it: an auto-relaunch OR a model/effort change is
+      //    respawning the process right now (a cli_disconnected here would flash
+      //    the Reconnect UI mid-relaunch). Model/effort handlers add to the set
+      //    for exactly this reason.
+      //  - session gone / archived: deleted or archived sessions are torn down
+      //    intentionally; no Reconnect affordance is wanted.
+      // Idle-kill is deliberately NOT in relaunchingSet, so it DOES notify here
+      // (the idle-kill watchdog also notifies directly, and notifyCliDisconnected
+      // is deduped, so the double path is harmless).
+      if (this.relaunchingSet.has(sessionId)) return;
+      const info = this.launcher.getSession(sessionId);
+      if (!info || info.archived) return;
+      this.wsBridge.notifyCliDisconnected(sessionId);
     });
 
     // Proactive keepalive disabled — sessions only relaunch when a browser
@@ -224,7 +239,15 @@ export class SessionOrchestrator {
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "model_change_relaunch");
       }
-      await this.launcher.relaunch(sessionId);
+      // Mark as relaunching so the session:exited handler (fired when the old
+      // process dies) suppresses cli_disconnected — this is an intentional
+      // respawn, not a crash. Cleared in finally once relaunch returns.
+      this.relaunchingSet.add(sessionId);
+      try {
+        await this.launcher.relaunch(sessionId);
+      } finally {
+        this.relaunchingSet.delete(sessionId);
+      }
     });
 
     // Effort change: like model change, the CLI only accepts `--effort` at
@@ -245,7 +268,14 @@ export class SessionOrchestrator {
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "effort_change_relaunch");
       }
-      await this.launcher.relaunch(sessionId);
+      // See model-change above: suppress the spurious cli_disconnected from the
+      // old process's exit during this intentional respawn.
+      this.relaunchingSet.add(sessionId);
+      try {
+        await this.launcher.relaunch(sessionId);
+      } finally {
+        this.relaunchingSet.delete(sessionId);
+      }
     });
 
     // Kill CLI process when idle with no browsers for 24 hours.
