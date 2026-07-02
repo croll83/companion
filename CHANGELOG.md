@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.102.0](https://github.com/croll83/companion/compare/the-companion-v0.101.0...the-companion-v0.102.0) (2026-07-02)
+
+
+### Features
+
+* **models:** bump Sonnet 4.6 -&gt; Sonnet 5 in the session model list ([60ddd7d](https://github.com/croll83/companion/commit/60ddd7d3b67c61ba926682bc460e352061e7e519))
+* robust connection lifecycle + Sonnet 5 model bump ([ff4d793](https://github.com/croll83/companion/commit/ff4d7931c2f6de5ed6ca52fbd9eb7608cc6d108a))
+* **ws-bridge:** robust, activity-based connection lifecycle ([05015ca](https://github.com/croll83/companion/commit/05015ca80f275602cec6e6adc556998aa2855449))
+
+
+### Bug Fixes
+
+* **claude-adapter:** self-heal lost attach input on stdio re-attach ([baf4017](https://github.com/croll83/companion/commit/baf4017865ed0c9bd7a17a092f90b0ada53016df))
+
 ## [0.101.0](https://github.com/croll83/companion/compare/the-companion-v0.100.0...the-companion-v0.101.0) (2026-06-12)
 
 
