@@ -22,6 +22,7 @@ const mockApi = {
   unarchiveSession: vi.fn().mockResolvedValue({}),
   renameSession: vi.fn().mockResolvedValue({}),
   getArchiveInfo: vi.fn().mockResolvedValue({ hasLinkedIssue: false, issueNotDone: false }),
+  getTelegramStatus: vi.fn().mockResolvedValue({ tokenConfigured: false, running: false, boundSessionIds: [] }),
 };
 
 vi.mock("../api.js", () => ({
@@ -32,6 +33,7 @@ vi.mock("../api.js", () => ({
     unarchiveSession: (...args: unknown[]) => mockApi.unarchiveSession(...args),
     renameSession: (...args: unknown[]) => mockApi.renameSession(...args),
     getArchiveInfo: (...args: unknown[]) => mockApi.getArchiveInfo(...args),
+    getTelegramStatus: (...args: unknown[]) => mockApi.getTelegramStatus(...args),
   },
 }));
 

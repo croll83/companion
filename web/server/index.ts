@@ -33,6 +33,7 @@ import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
 
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
+import { telegramBridgeManager } from "./telegram-bridge-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
@@ -382,6 +383,10 @@ restoreTailscaleFunnel(port).catch((err) => {
   console.warn("[server] Tailscale Funnel restoration failed:", err);
 });
 
+// ── Telegram bridge ─────────────────────────────────────────────────────────
+// Supervises the single bridge child (spawned only when a bot token is set).
+telegramBridgeManager.start(port);
+
 // ── Update checker ──────────────────────────────────────────────────────────
 startPeriodicCheck();
 if (isRunningAsService()) {
@@ -422,6 +427,7 @@ setInterval(() => {
 // ── Graceful shutdown — persist container state ──────────────────────────────
 function gracefulShutdown() {
   console.log("[server] Persisting container state before shutdown...");
+  telegramBridgeManager.stop();
   containerManager.persistState(CONTAINER_STATE_PATH);
   cleanupTailscaleFunnel(port);
   closeLogFile();

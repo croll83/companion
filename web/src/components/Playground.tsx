@@ -2976,6 +2976,8 @@ const noopSessionItemProps = {
   onArchive: (e: React.MouseEvent) => e.stopPropagation(),
   onUnarchive: (e: React.MouseEvent) => e.stopPropagation(),
   onDelete: (e: React.MouseEvent) => e.stopPropagation(),
+  onConnectTelegram: () => {},
+  telegramConfigured: true,
   onClearRecentlyRenamed: () => {},
   editingSessionId: null,
   editingName: "",

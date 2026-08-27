@@ -44,6 +44,8 @@ function buildProps(overrides: Partial<ComponentProps<typeof SessionItem>> = {})
     onArchive: vi.fn(),
     onUnarchive: vi.fn(),
     onDelete: vi.fn(),
+    onConnectTelegram: vi.fn(),
+    telegramConfigured: true,
     onClearRecentlyRenamed: vi.fn(),
     editingSessionId: null,
     editingName: "",
@@ -256,6 +258,32 @@ describe("SessionItem", () => {
     fireEvent.click(screen.getByText("Archive"));
 
     expect(onArchive).toHaveBeenCalled();
+  });
+
+  it("calls onConnectTelegram when the Telegram menu item is clicked (token configured)", () => {
+    // With a bot token configured the item is an enabled button.
+    const onConnectTelegram = vi.fn();
+    render(<SessionItem {...buildProps({ onConnectTelegram, telegramConfigured: true })} />);
+
+    fireEvent.click(screen.getByTitle("Session actions"));
+    fireEvent.click(screen.getByText("Connect to Telegram"));
+
+    expect(onConnectTelegram).toHaveBeenCalledWith("session-1");
+  });
+
+  it("disables the Telegram item and explains why when no bot token is configured", () => {
+    // Without a token the item is a non-interactive, aria-disabled row with a
+    // caption pointing the user to Settings, and clicking it does nothing.
+    const onConnectTelegram = vi.fn();
+    render(<SessionItem {...buildProps({ onConnectTelegram, telegramConfigured: false })} />);
+
+    fireEvent.click(screen.getByTitle("Session actions"));
+    const item = screen.getByText("Connect to Telegram").closest("[role='menuitem']");
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText(/bot token in Impostazioni/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Connect to Telegram"));
+    expect(onConnectTelegram).not.toHaveBeenCalled();
   });
 
   it("calls onUnarchive when Restore menu item is clicked", () => {

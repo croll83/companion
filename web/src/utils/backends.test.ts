@@ -5,6 +5,7 @@ import {
   getModesForBackend,
   getAgentModesForBackend,
   getDefaultModel,
+  DEFAULT_CLAUDE_MODEL,
   getDefaultMode,
   getDefaultAgentMode,
   CLAUDE_MODELS,
@@ -95,8 +96,11 @@ describe("getModesForBackend", () => {
 });
 
 describe("getDefaultModel", () => {
-  it("returns first claude model for claude backend", () => {
-    expect(getDefaultModel("claude")).toBe(CLAUDE_MODELS[0].value);
+  it("returns the explicit default claude model (decoupled from list order)", () => {
+    // The default is intentionally NOT CLAUDE_MODELS[0]: the list can be
+    // reordered (e.g. Fable 5 shown first) without changing the default.
+    expect(getDefaultModel("claude")).toBe(DEFAULT_CLAUDE_MODEL);
+    expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4-8");
   });
 
   it("returns first codex model for codex backend", () => {

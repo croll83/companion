@@ -106,8 +106,15 @@ export function getAgentModesForBackend(backend: BackendType): ModeOption[] {
   return backend === "codex" ? CODEX_AGENT_MODES : CLAUDE_AGENT_MODES;
 }
 
+/**
+ * Default model for a new Claude session. Decoupled from CLAUDE_MODELS ordering
+ * so the list can be reordered (e.g. Fable 5 shown first) without silently
+ * changing the default to a pricier model.
+ */
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
+
 export function getDefaultModel(backend: BackendType): string {
-  return backend === "codex" ? CODEX_MODELS[0].value : CLAUDE_MODELS[0].value;
+  return backend === "codex" ? CODEX_MODELS[0].value : DEFAULT_CLAUDE_MODEL;
 }
 
 export function getDefaultMode(backend: BackendType): string {

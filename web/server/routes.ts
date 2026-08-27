@@ -25,6 +25,7 @@ import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
 import { registerSettingsRoutes } from "./routes/settings-routes.js";
+import { registerTelegramRoutes } from "./routes/telegram-routes.js";
 import { registerTailscaleRoutes } from "./routes/tailscale-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
@@ -1241,6 +1242,7 @@ export function createRoutes(
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api);
+  registerTelegramRoutes(api);
 
   // ─── Tailscale ──────────────────────────────────────────────────────
 

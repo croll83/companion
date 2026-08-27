@@ -66,6 +66,8 @@ export interface CompanionSettings {
   dockerAutoUpdate: boolean;
   /** See CliBridgeMode. Defaults to "loopback". Optional in fixtures; normalize() applies the default. */
   cliBridgeMode?: CliBridgeMode;
+  /** Telegram bot token (single bot bridging sessions to Telegram groups/topics). */
+  telegramBotToken: string;
   updatedAt: number;
 }
 
@@ -98,6 +100,7 @@ let settings: CompanionSettings = {
   updateChannel: "stable",
   dockerAutoUpdate: false,
   cliBridgeMode: "loopback",
+  telegramBotToken: "",
   updatedAt: 0,
 };
 
@@ -137,6 +140,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
           : raw?.cliBridgeMode === "stdio"
             ? "stdio"
             : "loopback",
+    telegramBotToken: typeof raw?.telegramBotToken === "string" ? raw.telegramBotToken : "",
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -165,7 +169,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "cliBridgeMode">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "cliBridgeMode" | "telegramBotToken">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -193,6 +197,7 @@ export function updateSettings(
     updateChannel: patch.updateChannel ?? settings.updateChannel,
     dockerAutoUpdate: patch.dockerAutoUpdate ?? settings.dockerAutoUpdate,
     cliBridgeMode: patch.cliBridgeMode ?? settings.cliBridgeMode,
+    telegramBotToken: patch.telegramBotToken ?? settings.telegramBotToken,
     updatedAt: Date.now(),
   });
   persist();

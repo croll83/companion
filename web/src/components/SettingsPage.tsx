@@ -65,6 +65,12 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [claudeCodeTokenConfigured, setClaudeCodeTokenConfigured] = useState(false);
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const [openaiApiKeyConfigured, setOpenaiApiKeyConfigured] = useState(false);
+  const [telegramBotToken, setTelegramBotToken] = useState("");
+  const [telegramBotTokenConfigured, setTelegramBotTokenConfigured] = useState(false);
+  const [telegramFocused, setTelegramFocused] = useState(false);
+  const [telegramSaving, setTelegramSaving] = useState(false);
+  const [telegramSaved, setTelegramSaved] = useState(false);
+  const [telegramError, setTelegramError] = useState("");
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
   const [providerError, setProviderError] = useState("");
@@ -133,6 +139,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         setConfigured(s.anthropicApiKeyConfigured);
         setClaudeCodeTokenConfigured(s.claudeCodeOAuthTokenConfigured);
         setOpenaiApiKeyConfigured(s.openaiApiKeyConfigured);
+        setTelegramBotTokenConfigured(s.telegramBotTokenConfigured);
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
@@ -691,6 +698,76 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   <p className="text-xs text-cc-muted">
                     {openaiApiKeyConfigured ? "OpenAI key configured" : "OpenAI key not configured"}
                   </p>
+                </div>
+
+                {/* Telegram bot token — a single bot bridges any session to a
+                    Telegram group/topic. Configured once, applies to all sessions. */}
+                <div className="space-y-2 pt-2 border-t border-cc-separator">
+                  <label className="block text-sm font-medium" htmlFor="telegram-bot-token">
+                    Telegram Bot Token
+                  </label>
+                  <p className="text-xs text-cc-muted">
+                    Un unico bot (da <code className="font-mono-code bg-cc-code-bg px-1 py-0.5 rounded text-cc-code-fg">@BotFather</code>) fa da ponte tra le sessioni e Telegram. Impostato qui, vale per TUTTE le sessioni; poi usa "Connect to Telegram" nel menu della singola sessione.
+                  </p>
+                  <input
+                    id="telegram-bot-token"
+                    type="password"
+                    value={telegramBotTokenConfigured && !telegramFocused && !telegramBotToken ? "••••••••••••••••" : telegramBotToken}
+                    onChange={(e) => setTelegramBotToken(e.target.value)}
+                    onFocus={() => setTelegramFocused(true)}
+                    onBlur={() => setTelegramFocused(false)}
+                    placeholder={telegramBotTokenConfigured ? "Enter a new token to replace" : "123456:ABC-DEF..."}
+                    className="w-full px-3 py-2.5 min-h-[44px] text-sm bg-cc-bg rounded-lg text-cc-fg placeholder:text-cc-muted focus:outline-none focus:ring-1 focus:ring-cc-primary/40 transition-shadow"
+                  />
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-cc-muted flex-1">
+                      {telegramBotTokenConfigured ? "Bot token configured" : "Bot token not configured"}
+                    </p>
+                    {telegramBotTokenConfigured && (
+                      <button
+                        type="button"
+                        disabled={telegramSaving}
+                        onClick={async () => {
+                          setTelegramSaving(true); setTelegramError("");
+                          try {
+                            const res = await api.updateSettings({ telegramBotToken: "" });
+                            setTelegramBotTokenConfigured(res.telegramBotTokenConfigured);
+                            setTelegramBotToken("");
+                          } catch (err: unknown) {
+                            setTelegramError(err instanceof Error ? err.message : String(err));
+                          } finally { setTelegramSaving(false); }
+                        }}
+                        className="text-xs text-cc-error hover:underline cursor-pointer disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  {telegramError && (
+                    <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">{telegramError}</div>
+                  )}
+                  {telegramSaved && (
+                    <div className="px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">Telegram bot token saved.</div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={telegramSaving || !telegramBotToken.trim()}
+                    onClick={async () => {
+                      setTelegramSaving(true); setTelegramError(""); setTelegramSaved(false);
+                      try {
+                        const res = await api.updateSettings({ telegramBotToken: telegramBotToken.trim() });
+                        setTelegramBotTokenConfigured(res.telegramBotTokenConfigured);
+                        setTelegramBotToken("");
+                        setTelegramSaved(true);
+                        setTimeout(() => setTelegramSaved(false), 1800);
+                      } catch (err: unknown) {
+                        setTelegramError(err instanceof Error ? err.message : String(err));
+                      } finally { setTelegramSaving(false); }
+                    }}
+                    className="px-4 py-2 text-sm font-medium rounded-lg bg-cc-primary hover:bg-cc-primary-hover text-white transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {telegramSaving ? "Saving…" : "Save Telegram token"}
+                  </button>
                 </div>
 
                 {providerError && (

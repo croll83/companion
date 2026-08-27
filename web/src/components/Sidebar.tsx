@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useStore } from "../store.js";
 import { api, type ArchiveInfo } from "../api.js";
 import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinearModal.js";
+import { TelegramBridgeModal } from "./TelegramBridgeModal.js";
 import { connectAllSessions, disconnectSession } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
 import { ProjectGroup } from "./ProjectGroup.js";
@@ -119,6 +120,9 @@ export function Sidebar() {
   const [archiveModalContainerized, setArchiveModalContainerized] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const [telegramModalSessionId, setTelegramModalSessionId] = useState<string | null>(null);
+  const [telegramConfigured, setTelegramConfigured] = useState(false);
+  const [telegramBoundIds, setTelegramBoundIds] = useState<Set<string>>(new Set());
   const [hash, setHash] = useState(() => (typeof window !== "undefined" ? window.location.hash : ""));
   const editInputRef = useRef<HTMLInputElement>(null);
   const deleteModalRef = useRef<HTMLDivElement>(null);
@@ -466,6 +470,32 @@ export function Sidebar() {
     [activeSessions],
   );
 
+  // ─── Telegram bridge: fetch global status + handlers ──────────────────────
+  useEffect(() => {
+    let alive = true;
+    api.getTelegramStatus()
+      .then((s) => {
+        if (!alive) return;
+        setTelegramConfigured(s.tokenConfigured);
+        setTelegramBoundIds(new Set(s.boundSessionIds));
+      })
+      .catch(() => { /* endpoint may be unavailable */ });
+    return () => { alive = false; };
+  }, []);
+
+  const handleConnectTelegram = useCallback((id: string) => {
+    setTelegramModalSessionId(id);
+  }, []);
+
+  const handleTelegramChanged = useCallback((sessionId: string, bound: boolean) => {
+    setTelegramBoundIds((prev) => {
+      const next = new Set(prev);
+      if (bound) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
   // Shared props for SessionItem / ProjectGroup
   const sessionItemProps = {
     onSelect: handleSelectSession,
@@ -473,6 +503,9 @@ export function Sidebar() {
     onArchive: handleArchiveSession,
     onUnarchive: handleUnarchiveSession,
     onDelete: handleDeleteSession,
+    onConnectTelegram: handleConnectTelegram,
+    telegramConfigured,
+    telegramBoundIds,
     onClearRecentlyRenamed: clearRecentlyRenamed,
     editingSessionId,
     editingName,
@@ -823,6 +856,15 @@ export function Sidebar() {
           hasBacklogState={archiveModalInfo.hasBacklogState || false}
           onConfirm={handleArchiveModalConfirm}
           onCancel={handleArchiveModalCancel}
+        />
+      )}
+      {/* Telegram bridge config modal */}
+      {telegramModalSessionId && (
+        <TelegramBridgeModal
+          sessionId={telegramModalSessionId}
+          sessionName={sessionNames.get(telegramModalSessionId) || telegramModalSessionId.slice(0, 8)}
+          onClose={() => setTelegramModalSessionId(null)}
+          onChanged={handleTelegramChanged}
         />
       )}
     </aside>
