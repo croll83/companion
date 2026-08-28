@@ -552,6 +552,25 @@ describe("send() — outgoing message translation", () => {
     expect(sent.message.content[1].text).toBe("Describe this");
   });
 
+  it("user_message with a PDF attachment → emits a document block (not image)", () => {
+    // PDFs are carried in the same `images` field but must become `document`
+    // blocks so Claude reads them natively (the composer attaches PDFs too).
+    adapter.send({
+      type: "user_message",
+      content: "Summarize this",
+      images: [{ media_type: "application/pdf", data: "pdfbase64" }],
+    });
+    const sent = getLastSent();
+    expect(Array.isArray(sent.message.content)).toBe(true);
+    expect(sent.message.content[0].type).toBe("document");
+    expect(sent.message.content[0].source).toEqual({
+      type: "base64",
+      media_type: "application/pdf",
+      data: "pdfbase64",
+    });
+    expect(sent.message.content[1]).toEqual({ type: "text", text: "Summarize this" });
+  });
+
   it("permission_response allow → sends correct control_response NDJSON", () => {
     // An "allow" permission response should be translated into a
     // control_response with behavior: "allow" and updatedInput.

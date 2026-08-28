@@ -13,8 +13,8 @@
  * Runs standalone under Bun (`bun telegram-bridge-child.ts`); imports only node
  * built-ins + the shared binding type, so it never pulls in server internals.
  */
-import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, basename, extname } from "node:path";
 import { homedir } from "node:os";
 import type { TelegramBinding } from "./session-telegram-bindings.js";
 
@@ -33,6 +33,11 @@ const MAX_INPUT_CHARS = Number(process.env.TG_MAX_INPUT_CHARS) || 100000;
 const TURN_TIMEOUT_MS = 20 * 60 * 1000;
 const TG_CHUNK = 3900;
 const FABLE_PREFIX = "🐟 Fable →\n";
+// Telegram getFile serves files up to 20 MB — cap downloads accordingly.
+const MAX_FILE_BYTES = Number(process.env.TG_MAX_FILE_BYTES) || 20 * 1024 * 1024;
+const IMAGE_MEDIA = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+interface Attachment { media_type: string; data: string } // base64 image for user_message.images
 
 function readJson<T>(file: string, fallback: T): T {
   try { return JSON.parse(readFileSync(file, "utf-8")) as T; } catch { return fallback; }
@@ -92,6 +97,25 @@ async function typing(chatId: number, topicId: number | null): Promise<void> {
   await tg("sendChatAction", { chat_id: chatId, message_thread_id: topicId ?? undefined, action: "typing" });
 }
 
+/** Download a Telegram file (getFile → file server). Enforces the size cap. */
+async function downloadTelegramFile(fileId: string): Promise<Buffer | null> {
+  const info = await tg("getFile", { file_id: fileId });
+  const filePath: string | undefined = info.result?.file_path;
+  const size: number | undefined = info.result?.file_size;
+  if (!filePath) return null;
+  if (typeof size === "number" && size > MAX_FILE_BYTES) return null;
+  const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  return buf.length <= MAX_FILE_BYTES ? buf : null;
+}
+
+/** Safe filename: strip any path, keep a sane extension. */
+function safeName(name: string | undefined, fallbackExt: string): string {
+  const base = basename(name || "").replace(/[^\w.\- ]+/g, "_").trim() || `file-${Date.now()}${fallbackExt}`;
+  return base.slice(0, 120);
+}
+
 // ── Per-session bridge over companion WS ─────────────────────────────────────
 class SessionBridge {
   sessionId: string;
@@ -101,10 +125,12 @@ class SessionBridge {
   private disposed = false;
   private turn: { resolve: (t: string) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private buffer: string[] = [];
+  private pendingImages: Attachment[] = [];
   private bufferFrom: number | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private queue: string[] = [];
+  private queue: { text: string; images: Attachment[] }[] = [];
   private stopped = false;
+  cwd: string | null = null;
 
   constructor(sessionId: string, binding: TelegramBinding) {
     this.sessionId = sessionId;
@@ -131,6 +157,7 @@ class SessionBridge {
   private onWsMessage(raw: string): void {
     let m: any;
     try { m = JSON.parse(raw); } catch { return; }
+    if (m.type === "session_init" && m.session?.cwd) this.cwd = m.session.cwd;
     if (m.type === "result" && this.turn) {
       const d = m.data || {};
       let text: string;
@@ -152,9 +179,16 @@ class SessionBridge {
     return this.debounceTimer !== null && this.bufferFrom === fromId;
   }
 
-  ingest(text: string, fromId: number, chatId: number, messageId: number): void {
+  /** Directory where downloaded Telegram files land (inside the session cwd). */
+  inboxDir(): string {
+    const base = this.cwd || join(COMPANION_HOME, "telegram-bridge", this.sessionId);
+    return join(base, ".telegram-inbox");
+  }
+
+  ingest(text: string, fromId: number, chatId: number, messageId: number, image?: Attachment): void {
     if (this.stopped || !this.binding.enabled) return;
-    this.buffer.push(text);
+    if (text) this.buffer.push(text);
+    if (image) this.pendingImages.push(image);
     this.bufferFrom = fromId;
     react(chatId, messageId, "👀").catch(() => {});
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
@@ -164,21 +198,31 @@ class SessionBridge {
   private flushBuffer(): void {
     this.debounceTimer = null;
     this.bufferFrom = null;
-    if (this.buffer.length === 0) return;
-    const coalesced = this.buffer.join("\n").slice(0, MAX_INPUT_CHARS);
+    if (this.buffer.length === 0 && this.pendingImages.length === 0) return;
+    const payload = {
+      text: this.buffer.join("\n").slice(0, MAX_INPUT_CHARS),
+      images: this.pendingImages,
+    };
     this.buffer = [];
-    if (this.turn) { this.queue.push(coalesced); return; }
-    void this.runTurn(coalesced);
+    this.pendingImages = [];
+    if (this.turn) { this.queue.push(payload); return; }
+    void this.runTurn(payload);
   }
 
-  private async runTurn(text: string): Promise<void> {
+  private async runTurn(payload: { text: string; images: Attachment[] }): Promise<void> {
     if (this.stopped || this.disposed) return;
     const { groupId, topicId } = this.binding;
-    audit({ dir: "in", session: this.sessionId, text });
+    audit({ dir: "in", session: this.sessionId, text: payload.text, images: payload.images.length });
     await typing(groupId, topicId).catch(() => {});
     if (!this.connected) await new Promise((r) => setTimeout(r, 500));
     const client_msg_id = `tg-${Date.now()}-${Math.floor(performance.now())}`;
-    try { this.ws?.send(JSON.stringify({ type: "user_message", content: text, client_msg_id })); }
+    const frame = {
+      type: "user_message",
+      content: payload.text,
+      images: payload.images.length ? payload.images : undefined,
+      client_msg_id,
+    };
+    try { this.ws?.send(JSON.stringify(frame)); }
     catch (e) { await sendText(groupId, topicId, `⚠️ invio fallito: ${(e as Error).message}`); return; }
 
     const answer = await new Promise<string>((resolve) => {
@@ -246,12 +290,14 @@ function findBridge(chatId: number, topicId: number | null): SessionBridge | nul
 
 async function handleUpdate(u: any): Promise<void> {
   const msg = u.message;
-  if (!msg || !msg.text) return;
+  const hasPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0;
+  const hasDoc = !!msg?.document;
+  if (!msg || (!msg.text && !msg.caption && !hasPhoto && !hasDoc)) return;
   const chatId: number = msg.chat?.id;
   const topicId: number | null = msg.message_thread_id ?? null;
   const br = findBridge(chatId, topicId);
   if (!br) {
-    console.log(`[discover] chat.id=${chatId} type=${msg.chat?.type} topic=${topicId ?? "none"} from.id=${msg.from?.id} (@${msg.from?.username}) text=${JSON.stringify((msg.text || "").slice(0, 40))}`);
+    console.log(`[discover] chat.id=${chatId} type=${msg.chat?.type} topic=${topicId ?? "none"} from.id=${msg.from?.id} (@${msg.from?.username}) text=${JSON.stringify((msg.text || msg.caption || "").slice(0, 40))}`);
     return;
   }
   const fromId: number = msg.from?.id;
@@ -261,17 +307,18 @@ async function handleUpdate(u: any): Promise<void> {
     return;
   }
 
-  let text: string = msg.text.trim();
+  const rawText: string = msg.text || msg.caption || "";
+  let text: string = rawText.trim();
   if (br.binding.requireMention && !text.startsWith("/")) {
     const isReplyToBot = msg.reply_to_message?.from?.id === BOT_ID;
-    const mentions = (msg.entities || [])
+    const entities = msg.entities || msg.caption_entities || [];
+    const mentions = entities
       .filter((e: any) => e.type === "mention")
-      .map((e: any) => (msg.text as string).slice(e.offset, e.offset + e.length).toLowerCase());
+      .map((e: any) => rawText.slice(e.offset, e.offset + e.length).toLowerCase());
     const isTagged = !!BOT_USERNAME && mentions.includes(`@${BOT_USERNAME.toLowerCase()}`);
     if (isTagged) {
       // Strip the @mention so the model doesn't see it.
       if (BOT_USERNAME) text = text.replace(new RegExp(`@${BOT_USERNAME}\\b`, "ig"), "").replace(/\s{2,}/g, " ").trim();
-      if (!text) { await sendText(br.binding.groupId, br.binding.topicId, "🐟 sì? scrivimi cosa serve nel tag."); return; }
     } else if (!isReplyToBot && !br.continuationOpen(fromId)) {
       // Not tagged, not a reply, and no open coalesce window from this user →
       // free chat in the topic. Ignore. (Continuation parts of a split paste
@@ -280,12 +327,46 @@ async function handleUpdate(u: any): Promise<void> {
     }
   }
 
-  if (text === "/stop") { br.stop(); await sendText(br.binding.groupId, br.binding.topicId, "⏹️ bridge fermato. /resume per riprendere."); return; }
-  if (text === "/resume") { br.resume(); await sendText(br.binding.groupId, br.binding.topicId, "▶️ bridge ripreso."); return; }
-  if (text === "/status") { await sendText(br.binding.groupId, br.binding.topicId, "ℹ️ " + br.statusLine()); return; }
-  if (text.startsWith("/")) return;
+  // Commands only apply to plain-text messages.
+  if (!hasPhoto && !hasDoc) {
+    if (text === "/stop") { br.stop(); await sendText(br.binding.groupId, br.binding.topicId, "⏹️ bridge fermato. /resume per riprendere."); return; }
+    if (text === "/resume") { br.resume(); await sendText(br.binding.groupId, br.binding.topicId, "▶️ bridge ripreso."); return; }
+    if (text === "/status") { await sendText(br.binding.groupId, br.binding.topicId, "ℹ️ " + br.statusLine()); return; }
+    if (text.startsWith("/")) return;
+    if (!text) return;
+    br.ingest(text, fromId, chatId, msg.message_id);
+    return;
+  }
 
-  br.ingest(text, fromId, chatId, msg.message_id);
+  // ── Attachment: photo → inline image; document → saved to the session's inbox ──
+  try {
+    if (hasPhoto) {
+      const largest = msg.photo[msg.photo.length - 1];
+      const buf = await downloadTelegramFile(largest.file_id);
+      if (!buf) { await sendText(br.binding.groupId, br.binding.topicId, `⚠️ immagine troppo grande o non scaricabile (max ${Math.round(MAX_FILE_BYTES / 1e6)}MB).`); return; }
+      br.ingest(text || "Guarda questa immagine.", fromId, chatId, msg.message_id, { media_type: "image/jpeg", data: buf.toString("base64") });
+    } else {
+      const doc = msg.document;
+      const buf = await downloadTelegramFile(doc.file_id);
+      if (!buf) { await sendText(br.binding.groupId, br.binding.topicId, `⚠️ file troppo grande o non scaricabile (max ${Math.round(MAX_FILE_BYTES / 1e6)}MB).`); return; }
+      const mime: string = doc.mime_type || "";
+      // Small images sent as documents → inline; everything else → to disk.
+      if (IMAGE_MEDIA.has(mime)) {
+        br.ingest(text || "Guarda questa immagine.", fromId, chatId, msg.message_id, { media_type: mime, data: buf.toString("base64") });
+      } else {
+        const name = safeName(doc.file_name, extname(doc.file_name || "") || ".bin");
+        const dir = br.inboxDir();
+        mkdirSync(dir, { recursive: true });
+        const savedPath = join(dir, name);
+        writeFileSync(savedPath, buf);
+        audit({ event: "file_saved", session: br.sessionId, path: savedPath, bytes: buf.length, mime });
+        const note = `📎 File ricevuto via Telegram, salvato in \`${savedPath}\` (nome: ${name}${mime ? `, tipo: ${mime}` : ""}, ${buf.length} byte). Leggilo/analizzalo.`;
+        br.ingest(text ? `${text}\n\n${note}` : note, fromId, chatId, msg.message_id);
+      }
+    }
+  } catch (e) {
+    await sendText(br.binding.groupId, br.binding.topicId, `⚠️ errore gestione file: ${(e as Error).message}`);
+  }
 }
 
 // ── Telegram long-poll loop ──────────────────────────────────────────────────

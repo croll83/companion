@@ -277,7 +277,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
     if (!files) return;
     const newImages: ImageAttachment[] = [];
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
+      const isPdf = file.type === "application/pdf";
+      if (!file.type.startsWith("image/") && !(isPdf && !isCodex)) continue; // PDFs: Claude only
       const { base64, mediaType } = await readFileAsBase64(file);
       newImages.push({ name: file.name, base64, mediaType });
     }
@@ -294,11 +295,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
     if (!items) return;
     const newImages: ImageAttachment[] = [];
     for (const item of Array.from(items)) {
-      if (!item.type.startsWith("image/")) continue;
+      const isPdf = item.type === "application/pdf";
+      if (!item.type.startsWith("image/") && !(isPdf && !isCodex)) continue; // PDFs: Claude only
       const file = item.getAsFile();
       if (!file) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: `pasted-${Date.now()}.${file.type.split("/")[1]}`, base64, mediaType });
+      const ext = file.type === "application/pdf" ? "pdf" : file.type.split("/")[1];
+      newImages.push({ name: file.name || `pasted-${Date.now()}.${ext}`, base64, mediaType });
     }
     if (newImages.length > 0) {
       e.preventDefault();
@@ -360,19 +363,31 @@ export function Composer({ sessionId }: { sessionId: string }) {
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
       <div className="max-w-3xl mx-auto">
-        {/* Image thumbnails */}
+        {/* Attachment previews: image thumbnail, or a file chip for PDFs */}
         {images.length > 0 && (
           <div className="flex items-center gap-2 mb-2 px-3 sm:px-0 flex-wrap">
-            {images.map((img, i) => (
+            {images.map((att, i) => (
               <div key={i} className="relative group">
-                <img
-                  src={`data:${img.mediaType};base64,${img.base64}`}
-                  alt={img.name}
-                  className="w-12 h-12 rounded-lg object-cover border border-cc-border"
-                />
+                {att.mediaType === "application/pdf" ? (
+                  <div
+                    title={att.name}
+                    className="h-12 max-w-[10rem] px-2 rounded-lg border border-cc-border bg-cc-bg flex items-center gap-1.5"
+                  >
+                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4 text-cc-error shrink-0">
+                      <path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h4.09a1.5 1.5 0 0 1 1.06.44l2.91 2.91a1.5 1.5 0 0 1 .44 1.06V14.5A1.5 1.5 0 0 1 12.5 16h-7A1.5 1.5 0 0 1 4 14.5v-13Z" />
+                    </svg>
+                    <span className="text-[10px] text-cc-fg truncate">{att.name}</span>
+                  </div>
+                ) : (
+                  <img
+                    src={`data:${att.mediaType};base64,${att.base64}`}
+                    alt={att.name}
+                    className="w-12 h-12 rounded-lg object-cover border border-cc-border"
+                  />
+                )}
                 <button
                   onClick={() => removeImage(i)}
-                  aria-label="Remove image"
+                  aria-label="Remove attachment"
                   className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity cursor-pointer"
                 >
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
@@ -388,11 +403,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept={isCodex ? "image/*" : "image/*,application/pdf"}
           multiple
           onChange={handleFileSelect}
           className="hidden"
-          aria-label="Attach images"
+          aria-label={isCodex ? "Attach images" : "Attach images or PDFs"}
         />
 
         {/* Prompt suggestion chips */}

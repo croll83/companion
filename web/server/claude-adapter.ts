@@ -404,12 +404,22 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Build content: if images are present, use content block array; otherwise plain string
     let content: string | unknown[];
     if (msg.images?.length) {
+      // The `images` field carries any base64 attachment. PDFs become
+      // `document` blocks (Claude reads them natively); everything else is an
+      // `image` block. This lets the composer attach PDFs, not just images.
       const blocks: unknown[] = [];
-      for (const img of msg.images) {
-        blocks.push({
-          type: "image",
-          source: { type: "base64", media_type: img.media_type, data: img.data },
-        });
+      for (const att of msg.images) {
+        if (att.media_type === "application/pdf") {
+          blocks.push({
+            type: "document",
+            source: { type: "base64", media_type: "application/pdf", data: att.data },
+          });
+        } else {
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: att.media_type, data: att.data },
+          });
+        }
       }
       blocks.push({ type: "text", text: msg.content });
       content = blocks;
