@@ -33,6 +33,8 @@ const MAX_INPUT_CHARS = Number(process.env.TG_MAX_INPUT_CHARS) || 100000;
 const TURN_TIMEOUT_MS = 20 * 60 * 1000;
 const TG_CHUNK = 3900;
 const FABLE_PREFIX = "🐟 Fable →\n";
+// Cap queued turns so a flood while a turn is running can't grow memory unbounded.
+const MAX_QUEUE = Number(process.env.TG_MAX_QUEUE) || 20;
 // Telegram getFile serves files up to 20 MB — cap downloads accordingly.
 const MAX_FILE_BYTES = Number(process.env.TG_MAX_FILE_BYTES) || 20 * 1024 * 1024;
 const IMAGE_MEDIA = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -110,9 +112,18 @@ async function downloadTelegramFile(fileId: string): Promise<Buffer | null> {
   return buf.length <= MAX_FILE_BYTES ? buf : null;
 }
 
-/** Safe filename: strip any path, keep a sane extension. */
-function safeName(name: string | undefined, fallbackExt: string): string {
-  const base = basename(name || "").replace(/[^\w.\- ]+/g, "_").trim() || `file-${Date.now()}${fallbackExt}`;
+/**
+ * Safe filename for a downloaded attachment. Defends against path traversal:
+ * `basename` drops any directory component, the char whitelist strips separators
+ * and shell/markdown metacharacters, and leading dots are removed so a name of
+ * "." / ".." / "..evil" can never escape or target the inbox dir itself.
+ */
+export function safeName(name: string | undefined, fallbackExt: string): string {
+  let base = basename(name || "")
+    .replace(/[^\w.\- ]+/g, "_")   // strip separators + metacharacters
+    .replace(/^[.\s]+/, "")         // no leading dots/spaces (., .., dotfiles)
+    .trim();
+  if (!base || base === "." || base === "..") base = `file-${Date.now()}${fallbackExt.replace(/[^\w.]/g, "") || ".bin"}`;
   return base.slice(0, 120);
 }
 
@@ -205,7 +216,14 @@ class SessionBridge {
     };
     this.buffer = [];
     this.pendingImages = [];
-    if (this.turn) { this.queue.push(payload); return; }
+    if (this.turn) {
+      if (this.queue.length >= MAX_QUEUE) {
+        void sendText(this.binding.groupId, this.binding.topicId, "⚠️ troppi messaggi in coda — aspetta che finisca il turno.");
+        return;
+      }
+      this.queue.push(payload);
+      return;
+    }
     void this.runTurn(payload);
   }
 
@@ -395,11 +413,14 @@ async function pollLoop(): Promise<void> {
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
-if (!BOT_TOKEN) {
-  console.error("[bridge] no telegramBotToken in settings — exiting.");
-  process.exit(0);
+// Guarded so the module can be imported by tests without starting the bot.
+if (import.meta.main) {
+  if (!BOT_TOKEN) {
+    console.error("[bridge] no telegramBotToken in settings — exiting.");
+    process.exit(0);
+  }
+  process.on("SIGHUP", () => { console.log("[bridge] SIGHUP — reloading bindings"); reconcile(); });
+  process.on("SIGTERM", () => { for (const br of bridges.values()) br.dispose(); process.exit(0); });
+  reconcile();
+  void pollLoop();
 }
-process.on("SIGHUP", () => { console.log("[bridge] SIGHUP — reloading bindings"); reconcile(); });
-process.on("SIGTERM", () => { for (const br of bridges.values()) br.dispose(); process.exit(0); });
-reconcile();
-void pollLoop();
