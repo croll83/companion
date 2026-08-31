@@ -339,7 +339,7 @@ class SessionBridge {
   dispose(): void {
     this.disposed = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    if (this.turn) clearTimeout(this.turn.timer);
+    if (this.turn) for (const tm of this.turn.timers) clearTimeout(tm);
     try { this.ws?.close(); } catch { /* noop */ }
   }
 }

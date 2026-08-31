@@ -1387,8 +1387,10 @@ describe("prompt_suggestion", () => {
 // send a second message to deliver the first" bug. The CLI emits output only
 // AFTER receiving the first user message, so total silence after the write
 // means it was lost; we then re-send once. Armed only on re-attaches (not the
-// first/cold start) and cleared on the first inbound byte, so it never fires
-// when the CLI is actually alive.
+// first/cold start) and cleared by a frame that PROVES intake (system/assistant/
+// stream_event/result), so it never fires when the CLI actually took the turn.
+// Unrelated stdout must NOT count as an ack — that was the bug: the CLI's own
+// chatter cancelled the self-heal while our message had in fact been lost.
 describe("ClaudeAdapter stdio attach-input self-heal", () => {
   function makeStdioProc() {
     let ctrl!: ReadableStreamDefaultController<Uint8Array>;
@@ -1414,18 +1416,18 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
     expect(p2.stdin.write).toHaveBeenCalledTimes(1);
     const firstWrite = p2.stdin.write.mock.calls[0][0];
 
-    // No inbound bytes within the ack window → the write was lost → re-send once.
-    await vi.advanceTimersByTimeAsync(6500);
+    // No intake frame within the ack window → the write was lost → re-send once.
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p2.stdin.write).toHaveBeenCalledTimes(2);
     expect(p2.stdin.write.mock.calls[1][0]).toBe(firstWrite);
 
     // Only re-sends ONCE, never loops.
-    await vi.advanceTimersByTimeAsync(6500);
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p2.stdin.write).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 
-  it("does NOT re-send when the CLI produces output (alive)", async () => {
+  it("does NOT re-send once a frame proves the CLI took the turn", async () => {
     vi.useFakeTimers();
     const adapter = new ClaudeAdapter("sess-alive");
     const p1 = makeStdioProc();
@@ -1436,11 +1438,32 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
     adapter.send(userMsg);
     expect(p2.stdin.write).toHaveBeenCalledTimes(1);
 
-    // Any inbound byte on the active reader cancels the self-heal.
-    p1.pushStdout("k");
+    // system/init is emitted only AFTER the CLI consumes a user message → ack.
+    p1.pushStdout(JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }) + "\n");
     await vi.advanceTimersByTimeAsync(10);
-    await vi.advanceTimersByTimeAsync(6500);
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p2.stdin.write).toHaveBeenCalledTimes(1); // no re-send
+    vi.useRealTimers();
+  });
+
+  it("still re-sends when stdout carries only non-intake output", async () => {
+    // Regression: unrelated CLI chatter used to cancel the self-heal, so a
+    // message lost to the stdin race was never retried and the turn hung for
+    // the caller's whole timeout budget.
+    vi.useFakeTimers();
+    const adapter = new ClaudeAdapter("sess-noise");
+    const p1 = makeStdioProc();
+    adapter.attachStdio(p1.proc);
+    const p2 = makeStdioProc();
+    adapter.attachStdio(p2.proc); // attachCount 2
+
+    adapter.send(userMsg);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(1);
+
+    p1.pushStdout(JSON.stringify({ type: "control_response", response: { subtype: "success" } }) + "\n");
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(12500);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(2); // lost message retried
     vi.useRealTimers();
   });
 
@@ -1452,7 +1475,7 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
 
     adapter.send(userMsg);
     expect(p1.stdin.write).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(6500);
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p1.stdin.write).toHaveBeenCalledTimes(1); // cold start never re-sends
     vi.useRealTimers();
   });

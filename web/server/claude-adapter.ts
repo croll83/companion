@@ -89,7 +89,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     process.env.COMPANION_STDIO_ATTACH_WINDOW_MS || "2000",
   );
   private static readonly INPUT_ACK_TIMEOUT_MS = Number(
-    process.env.COMPANION_STDIO_INPUT_ACK_MS || "6000",
+    process.env.COMPANION_STDIO_INPUT_ACK_MS || "12000",
   );
 
   // Callbacks registered by the bridge via on*() methods
@@ -209,9 +209,10 @@ export class ClaudeAdapter implements IBackendAdapter {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        // Any inbound byte means the CLI is alive and reading stdin — our last
-        // attach input was received, so cancel the re-send self-heal.
-        this.clearInputAckTimer();
+        // NOTE: inbound bytes alone do NOT prove the CLI consumed our input —
+        // it emits unrelated output (control responses, diagnostics) too. The
+        // self-heal is cleared in routeCLIMessage(), on a frame that can only
+        // exist because our user message was taken up.
         buffer += decoder.decode(value, { stream: true });
         const lastNl = buffer.lastIndexOf("\n");
         if (lastNl === -1) continue;
@@ -335,6 +336,14 @@ export class ClaudeAdapter implements IBackendAdapter {
 
       if (isDuplicateCLIMessage(msg, line, this.dedupState, CLI_DEDUP_WINDOW)) {
         continue;
+      }
+
+      // Proof the CLI actually consumed our input: `system` (the CLI emits
+      // system/init ONLY after receiving a user message) or any turn output.
+      // Anything else is not an ack — see startStdioReader().
+      const t = (msg as { type?: string }).type;
+      if (t === "system" || t === "assistant" || t === "stream_event" || t === "result") {
+        this.clearInputAckTimer();
       }
 
       this.routeCLIMessage(msg);
