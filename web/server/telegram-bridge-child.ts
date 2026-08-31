@@ -30,7 +30,13 @@ const DEBOUNCE_MS = Number(process.env.TG_DEBOUNCE_MS) || 4000;
 // Generous cap: a single coalesced turn (e.g. Ema pasting a large Codex output
 // that Telegram split into several messages). Guards against runaway input.
 const MAX_INPUT_CHARS = Number(process.env.TG_MAX_INPUT_CHARS) || 100000;
-const TURN_TIMEOUT_MS = 20 * 60 * 1000;
+// Hard cap on how long we wait for a turn's `result`. Raised well above real
+// task durations (a full suite+build can run 30+ min) so a legit long turn still
+// gets its answer delivered instead of a spurious timeout. Env-overridable.
+const TURN_TIMEOUT_MS = Number(process.env.TG_TURN_TIMEOUT_MS) || 90 * 60 * 1000;
+// One-time \"still working\" heads-up so a long turn doesn't look dead. Does NOT
+// resolve the turn — the real result is still forwarded whenever it lands.
+const TURN_ACK_MS = Number(process.env.TG_TURN_ACK_MS) || 10 * 60 * 1000;
 const TG_CHUNK = 3900;
 const FABLE_PREFIX = "🐟 Fable →\n";
 // Cap queued turns so a flood while a turn is running can't grow memory unbounded.
@@ -134,7 +140,7 @@ class SessionBridge {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
-  private turn: { resolve: (t: string) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean } | null = null;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
   private bufferFrom: number | null = null;
@@ -176,8 +182,15 @@ class SessionBridge {
       else if (d.stop_reason === "refusal") text = `⚠️ Fable ha rifiutato (${d.stop_details?.category || "policy"}).`;
       else text = d.result || "(nessun testo nel result)";
       const t = this.turn; this.turn = null;
-      clearTimeout(t.timer);
+      for (const tm of t.timers) clearTimeout(tm);
       t.resolve(text);
+    }
+    // CLI died mid-turn (crash / idle-kill): proactively relaunch it — like the
+    // web UI does on send — so the session recovers instead of hanging until the
+    // hard cap. Once per turn, to avoid a relaunch loop.
+    if (m.type === "cli_disconnected" && this.turn && !this.turn.relaunched) {
+      this.turn.relaunched = true;
+      void this.requestRelaunch("cli disconnected mid-turn");
     }
   }
 
@@ -244,12 +257,40 @@ class SessionBridge {
     catch (e) { await sendText(groupId, topicId, `⚠️ invio fallito: ${(e as Error).message}`); return; }
 
     const answer = await new Promise<string>((resolve) => {
-      const timer = setTimeout(() => { this.turn = null; resolve("⚠️ timeout: nessun result entro 20 min."); }, TURN_TIMEOUT_MS);
-      this.turn = { resolve, timer };
+      // One-time heads-up: the turn is long but alive. Keep waiting.
+      const ackTimer = setTimeout(() => {
+        void sendText(groupId, topicId, "⏳ turno lungo — sto ancora elaborando, ti mando la risposta appena pronta.");
+      }, TURN_ACK_MS);
+      // Hard cap: give up, but first relaunch the CLI so a wedged turn can't keep
+      // blocking every following message queued on this session.
+      const hardTimer = setTimeout(() => {
+        this.turn = null;
+        void this.requestRelaunch("turn timeout");
+        resolve(`⚠️ timeout: nessun result entro ${Math.round(TURN_TIMEOUT_MS / 60000)} min. Ho ripristinato la sessione, riprova il messaggio.`);
+      }, TURN_TIMEOUT_MS);
+      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false };
     });
     audit({ dir: "out", session: this.sessionId, chars: answer.length });
     await sendText(groupId, topicId, FABLE_PREFIX + answer);
     if (this.queue.length) { const next = this.queue.shift()!; void this.runTurn(next); }
+  }
+
+  /**
+   * Ask companion to relaunch this session's CLI (POST /api/sessions/:id/relaunch),
+   * exactly what the web UI does on send to a dead session. Kills a wedged/dead
+   * CLI and respawns it with --resume so the next message hits a live process.
+   * Localhost → server auth-bypasses, but we send the bearer token anyway.
+   */
+  private async requestRelaunch(reason: string): Promise<void> {
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${COMPANION_PORT}/api/sessions/${this.sessionId}/relaunch`,
+        { method: "POST", headers: { authorization: `Bearer ${COMPANION_AUTH}` } },
+      );
+      console.log(`[relaunch] ${this.sessionId.slice(0, 8)} (${reason}) → ${res.status}`);
+    } catch (e) {
+      console.error(`[relaunch] ${this.sessionId.slice(0, 8)} failed:`, (e as Error).message);
+    }
   }
 
   stop(): void {
