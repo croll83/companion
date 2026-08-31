@@ -237,6 +237,7 @@ class SessionBridge {
     this.buffer = [];
     this.pendingImages = [];
     if (this.turn) {
+      audit({ dir: "queued", session: this.sessionId, text: payload.text.slice(0, 200), depth: this.queue.length + 1 });
       if (this.queue.length >= MAX_QUEUE) {
         void sendText(this.binding.groupId, this.binding.topicId, "⚠️ troppi messaggi in coda — aspetta che finisca il turno.");
         return;
