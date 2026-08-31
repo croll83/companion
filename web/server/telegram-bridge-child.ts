@@ -37,6 +37,12 @@ const TURN_TIMEOUT_MS = Number(process.env.TG_TURN_TIMEOUT_MS) || 90 * 60 * 1000
 // One-time \"still working\" heads-up so a long turn doesn't look dead. Does NOT
 // resolve the turn — the real result is still forwarded whenever it lands.
 const TURN_ACK_MS = Number(process.env.TG_TURN_ACK_MS) || 10 * 60 * 1000;
+// A relaunch KILLS the CLI, which makes companion emit `cli_disconnected` — the
+// very event we also relaunch on. Without this cooldown the second relaunch
+// lands on the freshly spawned CLI ~0ms after `--resume`, which cli-launcher
+// reads as a failed resume and CLEARS cliSessionId: the session then restarts
+// with no context and the in-flight message is lost. One relaunch per window.
+const RELAUNCH_COOLDOWN_MS = Number(process.env.TG_RELAUNCH_COOLDOWN_MS) || 120 * 1000;
 const TG_CHUNK = 3900;
 const FABLE_PREFIX = "🐟 Fable →\n";
 // Cap queued turns so a flood while a turn is running can't grow memory unbounded.
@@ -141,6 +147,7 @@ class SessionBridge {
   private connected = false;
   private disposed = false;
   private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean } | null = null;
+  private lastRelaunchAt = 0;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
   private bufferFrom: number | null = null;
@@ -282,6 +289,12 @@ class SessionBridge {
    * Localhost → server auth-bypasses, but we send the bearer token anyway.
    */
   private async requestRelaunch(reason: string): Promise<void> {
+    const since = Date.now() - this.lastRelaunchAt;
+    if (since < RELAUNCH_COOLDOWN_MS) {
+      console.log(`[relaunch] ${this.sessionId.slice(0, 8)} SKIPPED (${reason}) — ${Math.round(since / 1000)}s since last relaunch`);
+      return;
+    }
+    this.lastRelaunchAt = Date.now();
     try {
       const res = await fetch(
         `http://127.0.0.1:${COMPANION_PORT}/api/sessions/${this.sessionId}/relaunch`,
