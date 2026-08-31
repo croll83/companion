@@ -43,6 +43,13 @@ const TURN_ACK_MS = Number(process.env.TG_TURN_ACK_MS) || 10 * 60 * 1000;
 // reads as a failed resume and CLEARS cliSessionId: the session then restarts
 // with no context and the in-flight message is lost. One relaunch per window.
 const RELAUNCH_COOLDOWN_MS = Number(process.env.TG_RELAUNCH_COOLDOWN_MS) || 120 * 1000;
+// A live CLI starts streaming within seconds of receiving a message. Total
+// silence for this long means the message never landed (sent into a CLI that
+// was dying/being relaunched) — fail fast instead of burning the full
+// TURN_TIMEOUT_MS, which would also block every message queued behind it.
+// This is deliberately NOT a general inactivity timeout: a turn that has
+// started may legitimately go quiet for a long time inside one tool call.
+const FIRST_ACTIVITY_MS = Number(process.env.TG_FIRST_ACTIVITY_MS) || 3 * 60 * 1000;
 const TG_CHUNK = 3900;
 const FABLE_PREFIX = "🐟 Fable →\n";
 // Cap queued turns so a flood while a turn is running can't grow memory unbounded.
@@ -146,7 +153,7 @@ class SessionBridge {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
-  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean } | null = null;
+  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean } | null = null;
   private lastRelaunchAt = 0;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
@@ -182,6 +189,10 @@ class SessionBridge {
     let m: any;
     try { m = JSON.parse(raw); } catch { return; }
     if (m.type === "session_init" && m.session?.cwd) this.cwd = m.session.cwd;
+    // Any sign the CLI actually picked the turn up (see FIRST_ACTIVITY_MS).
+    if (this.turn && (m.type === "assistant" || m.type === "stream_event" || m.type === "system_event" || m.type === "result" || m.type === "permission_request")) {
+      this.turn.sawActivity = true;
+    }
     if (m.type === "result" && this.turn) {
       const d = m.data || {};
       let text: string;
@@ -271,12 +282,20 @@ class SessionBridge {
       }, TURN_ACK_MS);
       // Hard cap: give up, but first relaunch the CLI so a wedged turn can't keep
       // blocking every following message queued on this session.
+      // Message never taken up → recover in minutes, not in TURN_TIMEOUT_MS.
+      const startTimer = setTimeout(() => {
+        if (!this.turn || this.turn.sawActivity) return;
+        const t = this.turn; this.turn = null;
+        for (const tm of t.timers) clearTimeout(tm);
+        void this.requestRelaunch("no activity after send");
+        t.resolve("⚠️ il messaggio non è stato preso in carico dal CLI (nessuna attività). Ho ripristinato la sessione — rimandalo.");
+      }, FIRST_ACTIVITY_MS);
       const hardTimer = setTimeout(() => {
         this.turn = null;
         void this.requestRelaunch("turn timeout");
         resolve(`⚠️ timeout: nessun result entro ${Math.round(TURN_TIMEOUT_MS / 60000)} min. Ho ripristinato la sessione, riprova il messaggio.`);
       }, TURN_TIMEOUT_MS);
-      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false };
+      this.turn = { resolve, timers: [ackTimer, hardTimer, startTimer], relaunched: false, sawActivity: false };
     });
     audit({ dir: "out", session: this.sessionId, chars: answer.length });
     await sendText(groupId, topicId, FABLE_PREFIX + answer);
