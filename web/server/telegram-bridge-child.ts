@@ -17,6 +17,7 @@ import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, basename, extname } from "node:path";
 import { homedir } from "node:os";
 import type { TelegramBinding } from "./session-telegram-bindings.js";
+import { cliWorking } from "./cli-liveness.js";
 
 // ── Paths / config ───────────────────────────────────────────────────────────
 const COMPANION_HOME = process.env.COMPANION_HOME || join(homedir(), ".companion");
@@ -24,6 +25,7 @@ const COMPANION_PORT = process.env.COMPANION_PORT || "3456";
 const SETTINGS_FILE = join(COMPANION_HOME, "settings.json");
 const AUTH_FILE = join(COMPANION_HOME, "auth.json");
 const BINDINGS_FILE = join(COMPANION_HOME, "session-telegram-bindings.json");
+const LAUNCHER_FILE = join(COMPANION_HOME, "sessions", "launcher.json");
 const AUDIT_LOG = join(COMPANION_HOME, "telegram-bridge", "audit.jsonl");
 
 const DEBOUNCE_MS = Number(process.env.TG_DEBOUNCE_MS) || 4000;
@@ -160,7 +162,7 @@ class SessionBridge {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
-  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout> } | null = null;
+  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout>; startTimer?: ReturnType<typeof setTimeout> } | null = null;
   private lastRelaunchAt = 0;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
@@ -221,9 +223,10 @@ class SessionBridge {
   }
 
   /** Clear every timer attached to a turn (fixed set + the rolling stall timer). */
-  private clearTurnTimers(t: { timers: ReturnType<typeof setTimeout>[]; stallTimer?: ReturnType<typeof setTimeout> }): void {
+  private clearTurnTimers(t: { timers: ReturnType<typeof setTimeout>[]; stallTimer?: ReturnType<typeof setTimeout>; startTimer?: ReturnType<typeof setTimeout> }): void {
     for (const tm of t.timers) clearTimeout(tm);
     if (t.stallTimer) clearTimeout(t.stallTimer);
+    if (t.startTimer) clearTimeout(t.startTimer);
   }
 
   /**
@@ -238,6 +241,7 @@ class SessionBridge {
     if (t.stallTimer) clearTimeout(t.stallTimer);
     t.stallTimer = setTimeout(() => {
       if (this.turn !== t) return;
+      if (this.busyGuard("mid-turn stall")) { this.bumpStall(); return; }
       this.turn = null;
       this.clearTurnTimers(t);
       void this.requestRelaunch("mid-turn stall");
@@ -316,13 +320,19 @@ class SessionBridge {
       // Hard cap: give up, but first relaunch the CLI so a wedged turn can't keep
       // blocking every following message queued on this session.
       // Message never taken up → recover in minutes, not in TURN_TIMEOUT_MS.
-      const startTimer = setTimeout(() => {
-        if (!this.turn || this.turn.sawActivity) return;
-        const t = this.turn; this.turn = null;
+      // No-activity guard: if the turn produces NO frame at all, the message was
+      // likely dropped (dead CLI / stdin race). But defer while the CLI is
+      // provably working (slow --resume init) — re-check instead of killing it.
+      const armStart = (): ReturnType<typeof setTimeout> => setTimeout(() => {
+        const t = this.turn;
+        if (!t || t.sawActivity) return;
+        if (this.busyGuard("no activity after send")) { t.startTimer = armStart(); return; }
+        this.turn = null;
         this.clearTurnTimers(t);
         void this.requestRelaunch("no activity after send");
         t.resolve("⚠️ il messaggio non è stato preso in carico dal CLI (nessuna attività). Ho ripristinato la sessione — rimandalo.");
       }, FIRST_ACTIVITY_MS);
+      const startTimer = armStart();
       const hardTimer = setTimeout(() => {
         const t = this.turn; if (!t) return;
         this.turn = null;
@@ -330,7 +340,7 @@ class SessionBridge {
         void this.requestRelaunch("turn timeout");
         resolve(`⚠️ timeout: nessun result entro ${Math.round(TURN_TIMEOUT_MS / 60000)} min. Ho ripristinato la sessione, riprova il messaggio.`);
       }, TURN_TIMEOUT_MS);
-      this.turn = { resolve, timers: [ackTimer, hardTimer, startTimer], relaunched: false, sawActivity: false, stallTimer: undefined };
+      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false, sawActivity: false, stallTimer: undefined, startTimer };
     });
     audit({ dir: "out", session: this.sessionId, chars: answer.length });
     await sendText(groupId, topicId, FABLE_PREFIX + answer);
@@ -343,6 +353,29 @@ class SessionBridge {
    * CLI and respawns it with --resume so the next message hits a live process.
    * Localhost → server auth-bypasses, but we send the bearer token anyway.
    */
+  /** This session's live CLI pid from companion's launcher state, or null. */
+  private cliPid(): number | null {
+    try {
+      const arr = JSON.parse(readFileSync(LAUNCHER_FILE, "utf-8")) as Array<{ sessionId?: string; pid?: number }>;
+      const e = Array.isArray(arr) ? arr.find((x) => x.sessionId === this.sessionId) : null;
+      return e && typeof e.pid === "number" ? e.pid : null;
+    } catch { return null; }
+  }
+
+  /**
+   * A stall/no-activity relaunch must NOT fire while the CLI is provably working
+   * (an API connection or a running tool): that is exactly what was killing CLIs
+   * mid --resume or mid long tool and corrupting the session. Returns true if the
+   * relaunch was suppressed because the CLI is busy (caller should just re-arm).
+   */
+  private busyGuard(reason: string): boolean {
+    if (cliWorking(this.cliPid())) {
+      console.log(`[relaunch] ${this.sessionId.slice(0, 8)} DEFERRED (${reason}) — CLI is working (api/tool active)`);
+      return true;
+    }
+    return false;
+  }
+
   private async requestRelaunch(reason: string): Promise<void> {
     const since = Date.now() - this.lastRelaunchAt;
     if (since < RELAUNCH_COOLDOWN_MS) {
