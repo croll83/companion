@@ -50,6 +50,13 @@ const RELAUNCH_COOLDOWN_MS = Number(process.env.TG_RELAUNCH_COOLDOWN_MS) || 120 
 // This is deliberately NOT a general inactivity timeout: a turn that has
 // started may legitimately go quiet for a long time inside one tool call.
 const FIRST_ACTIVITY_MS = Number(process.env.TG_FIRST_ACTIVITY_MS) || 3 * 60 * 1000;
+// Rolling mid-turn stall guard: a turn that HAS started (streamed frames) then
+// goes silent this long has deadlocked inside the CLI (observed: the model turn
+// after a tool_result never resumes; process idle, no network, no tool child).
+// Reset on every frame. Kept above BASH_MAX_TIMEOUT_MS's 10-min ceiling so a
+// legitimately long synchronous tool can't trip it, yet far below TURN_TIMEOUT_MS
+// so recovery is minutes, not 90.
+const STALL_MS = Number(process.env.TG_STALL_MS) || 12 * 60 * 1000;
 const TG_CHUNK = 3900;
 const FABLE_PREFIX = "🐟 Fable →\n";
 // Cap queued turns so a flood while a turn is running can't grow memory unbounded.
@@ -153,7 +160,7 @@ class SessionBridge {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
-  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean } | null = null;
+  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout> } | null = null;
   private lastRelaunchAt = 0;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
@@ -192,6 +199,7 @@ class SessionBridge {
     // Any sign the CLI actually picked the turn up (see FIRST_ACTIVITY_MS).
     if (this.turn && (m.type === "assistant" || m.type === "stream_event" || m.type === "system_event" || m.type === "result" || m.type === "permission_request")) {
       this.turn.sawActivity = true;
+      this.bumpStall();
     }
     if (m.type === "result" && this.turn) {
       const d = m.data || {};
@@ -200,7 +208,7 @@ class SessionBridge {
       else if (d.stop_reason === "refusal") text = `⚠️ Fable ha rifiutato (${d.stop_details?.category || "policy"}).`;
       else text = d.result || "(nessun testo nel result)";
       const t = this.turn; this.turn = null;
-      for (const tm of t.timers) clearTimeout(tm);
+      this.clearTurnTimers(t);
       t.resolve(text);
     }
     // CLI died mid-turn (crash / idle-kill): proactively relaunch it — like the
@@ -210,6 +218,31 @@ class SessionBridge {
       this.turn.relaunched = true;
       void this.requestRelaunch("cli disconnected mid-turn");
     }
+  }
+
+  /** Clear every timer attached to a turn (fixed set + the rolling stall timer). */
+  private clearTurnTimers(t: { timers: ReturnType<typeof setTimeout>[]; stallTimer?: ReturnType<typeof setTimeout> }): void {
+    for (const tm of t.timers) clearTimeout(tm);
+    if (t.stallTimer) clearTimeout(t.stallTimer);
+  }
+
+  /**
+   * (Re)arm the rolling mid-turn stall timer. Called on every inbound frame once
+   * a turn has started: as long as the CLI keeps streaming, this keeps sliding
+   * forward. If it ever fires, the turn produced nothing for STALL_MS despite
+   * having started — a CLI-internal deadlock — so relaunch and free the queue.
+   */
+  private bumpStall(): void {
+    const t = this.turn;
+    if (!t) return;
+    if (t.stallTimer) clearTimeout(t.stallTimer);
+    t.stallTimer = setTimeout(() => {
+      if (this.turn !== t) return;
+      this.turn = null;
+      this.clearTurnTimers(t);
+      void this.requestRelaunch("mid-turn stall");
+      t.resolve(`⚠️ turno bloccato: nessuna attività per ${Math.round(STALL_MS / 60000)} min dopo l'avvio. Ho ripristinato la sessione — rimanda il messaggio.`);
+    }, STALL_MS);
   }
 
   /**
@@ -286,16 +319,18 @@ class SessionBridge {
       const startTimer = setTimeout(() => {
         if (!this.turn || this.turn.sawActivity) return;
         const t = this.turn; this.turn = null;
-        for (const tm of t.timers) clearTimeout(tm);
+        this.clearTurnTimers(t);
         void this.requestRelaunch("no activity after send");
         t.resolve("⚠️ il messaggio non è stato preso in carico dal CLI (nessuna attività). Ho ripristinato la sessione — rimandalo.");
       }, FIRST_ACTIVITY_MS);
       const hardTimer = setTimeout(() => {
+        const t = this.turn; if (!t) return;
         this.turn = null;
+        this.clearTurnTimers(t);
         void this.requestRelaunch("turn timeout");
         resolve(`⚠️ timeout: nessun result entro ${Math.round(TURN_TIMEOUT_MS / 60000)} min. Ho ripristinato la sessione, riprova il messaggio.`);
       }, TURN_TIMEOUT_MS);
-      this.turn = { resolve, timers: [ackTimer, hardTimer, startTimer], relaunched: false, sawActivity: false };
+      this.turn = { resolve, timers: [ackTimer, hardTimer, startTimer], relaunched: false, sawActivity: false, stallTimer: undefined };
     });
     audit({ dir: "out", session: this.sessionId, chars: answer.length });
     await sendText(groupId, topicId, FABLE_PREFIX + answer);
@@ -339,7 +374,7 @@ class SessionBridge {
   dispose(): void {
     this.disposed = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    if (this.turn) for (const tm of this.turn.timers) clearTimeout(tm);
+    if (this.turn) this.clearTurnTimers(this.turn);
     try { this.ws?.close(); } catch { /* noop */ }
   }
 }
