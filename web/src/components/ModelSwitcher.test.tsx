@@ -61,7 +61,7 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // Claude lineup: Opus 4.8, Fable 5, Opus 4.7, Opus 4.6, Sonnet 5, Haiku 4.5.
+    // Claude lineup: Opus 4.8, Fable 5.1, Opus 4.7, Opus 4.6, Sonnet 5, Haiku 4.5.
     // Match exact labels because /Opus/ alone now matches multiple entries.
     expect(screen.getByRole("option", { name: /Opus 4\.7/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Opus 4\.6/ })).toBeInTheDocument();

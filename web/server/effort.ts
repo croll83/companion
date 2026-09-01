@@ -26,6 +26,7 @@ export const DEFAULT_EFFORT: EffortLevel = "high";
  * `--effort` flag — passing one to a non-supporting model is rejected.
  */
 const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
+  "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
   "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],

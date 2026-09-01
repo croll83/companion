@@ -407,7 +407,7 @@ const MSG_REFUSAL: ChatMessage = {
   refusal: {
     category: "cyber",
     explanation: "This request involves developing capabilities that could enable cyberattacks against systems without authorization.",
-    model: "claude-fable-5",
+    model: "claude-fable-5-1",
   },
 };
 
