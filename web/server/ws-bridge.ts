@@ -473,12 +473,25 @@ export class WsBridge {
 
       // -- status_change: update compacting flag ---------------------------
       if (msg.type === "status_change") {
-        session.state.is_compacting = msg.status === "compacting";
-        if (msg.status === "compacting") {
+        const st = (msg as { status?: string | null }).status ?? null;
+        const ph = session.stateMachine.phase;
+        session.state.is_compacting = st === "compacting";
+        if (st === "compacting") {
           session.stateMachine.transition("compacting", "compaction_started");
-        } else {
+        } else if (ph === "compacting") {
+          // Compaction ended. Rest at ready; the next assistant/stream frame
+          // (see below) flips back to streaming if a turn is still in flight.
           session.stateMachine.transition("ready", "compaction_ended");
+        } else if (st === "requesting" && (ph === "ready" || ph === "initializing")) {
+          // The CLI is starting a model request: a turn is in flight even if
+          // nothing routed a user_message through here (post-relaunch flush).
+          session.stateMachine.transition("streaming", "cli_requesting");
         }
+        // NEVER force `ready` from `streaming` on an arbitrary status: the CLI
+        // emits status "requesting" before every API call, and doing so put a
+        // live turn in `ready`, where the idle-kill watchdog would SIGTERM it
+        // after 5 quiet minutes (long thinking / long tool). Root cause of the
+        // "hangs" and lost answers seen over 2026-08-31 → 09-02.
         // Claude status messages may include permissionMode (not in the typed interface).
         // When the CLI changes mode autonomously (e.g. after ExitPlanMode approval),
         // we must broadcast the update so browsers sync their UI (plan toggle, etc.).
@@ -505,6 +518,7 @@ export class WsBridge {
 
       // -- assistant: append to history, notify listeners ------------------
       if (msg.type === "assistant") {
+        this.markStreamingOnCliOutput(session, "assistant_frame");
         const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now() };
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
@@ -526,6 +540,7 @@ export class WsBridge {
       }
 
       if (msg.type === "stream_event") {
+        this.markStreamingOnCliOutput(session, "stream_event");
         companionBus.emit("message:stream_event", { sessionId: session.id, message: msg });
       }
 
@@ -894,7 +909,7 @@ export class WsBridge {
       for (const raw of queued) {
         try {
           const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
-          adapter.send(queued_msg);
+          if (adapter.send(queued_msg)) this.noteFlushedUserTurn(session, queued_msg);
         } catch {
           console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
         }
@@ -964,7 +979,7 @@ export class WsBridge {
       for (const raw of queued) {
         try {
           const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
-          adapter.send(queued_msg);
+          if (adapter.send(queued_msg)) this.noteFlushedUserTurn(session, queued_msg);
         } catch {
           console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
         }
@@ -1475,6 +1490,29 @@ export class WsBridge {
     session.pendingMessages.push(raw);
   }
 
+  /**
+   * A queued user_message delivered by a post-(re)launch flush bypasses
+   * routeBrowserMessage, so it never bumped lastUserActivityTs nor moved the
+   * phase to streaming — leaving the whole turn in `ready`, where the idle-kill
+   * watchdog could SIGTERM it mid-work. Mirror that bookkeeping here.
+   */
+  private noteFlushedUserTurn(session: Session, msg: BrowserOutgoingMessage): void {
+    if (msg.type !== "user_message") return;
+    session.lastUserActivityTs = Date.now();
+    const ph = session.stateMachine.phase;
+    if (ph === "ready" || ph === "initializing" || ph === "starting" || ph === "reconnecting") {
+      session.stateMachine.transition("streaming", "user_message_flushed");
+    }
+  }
+
+  /** CLI is visibly producing output: a turn is in flight, whatever started it. */
+  private markStreamingOnCliOutput(session: Session, trigger: string): void {
+    const ph = session.stateMachine.phase;
+    if (ph === "ready" || ph === "initializing") {
+      session.stateMachine.transition("streaming", trigger);
+    }
+  }
+
   private flushQueuedBrowserMessages(session: Session, adapter: IBackendAdapter, reason: string): void {
     if (session.pendingMessages.length === 0) return;
 
@@ -1501,6 +1539,7 @@ export class WsBridge {
       }
 
       const sent = adapter.send(queuedMsg);
+      if (sent) this.noteFlushedUserTurn(session, queuedMsg);
       if (!sent && RETRYABLE_BACKEND_MESSAGE_TYPES.has(queuedMsg.type)) {
         const remaining = queued.slice(i);
         session.pendingMessages = remaining.concat(session.pendingMessages);

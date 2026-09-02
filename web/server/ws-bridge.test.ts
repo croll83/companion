@@ -1488,7 +1488,10 @@ describe("Browser handlers", () => {
     bridge.handleBrowserOpen(browser, "s1");
     browser.send.mockClear();
 
-    // Ask for replay after seq=2 (session_phase + cli_connected). Both stream events should replay.
+    // Ask for replay after seq=2 (session_phase + cli_connected). The first
+    // stream_event also flips the phase initializing→streaming (CLI output while
+    // at rest = turn in flight), so the buffer holds that session_phase + both
+    // stream events.
     bridge.handleBrowserMessage(browser, JSON.stringify({
       type: "session_subscribe",
       last_seq: 2,
@@ -1497,10 +1500,12 @@ describe("Browser handlers", () => {
     const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
     const replay = calls.find((c: any) => c.type === "event_replay");
     expect(replay).toBeDefined();
-    expect(replay.events).toHaveLength(2);
+    expect(replay.events).toHaveLength(3);
     expect(replay.events[0].seq).toBe(3);
-    expect(replay.events[0].message.type).toBe("stream_event");
+    expect(replay.events[0].message.type).toBe("session_phase");
+    expect(replay.events[0].message.phase).toBe("streaming");
     expect(replay.events[1].message.type).toBe("stream_event");
+    expect(replay.events[2].message.type).toBe("stream_event");
   });
 
   it("session_subscribe: sends full message_history on first subscribe even without a replay gap", async () => {
@@ -4438,6 +4443,15 @@ describe("sendToCLI error path", () => {
 // ─── CLI message deduplication (Bun.hash-based) ─────────────────────────────
 
 describe("CLI message deduplication", () => {
+  // The first CLI output frame after init also flips ready→streaming, which
+  // broadcasts a session_phase. Dedup assertions care about forwarded CLI
+  // frames only, so count everything except that phase notification.
+  function forwarded(browser: { send: { mock: { calls: [string][] } } }) {
+    return browser.send.mock.calls
+      .map(([arg]) => JSON.parse(arg) as { type: string })
+      .filter((m) => m.type !== "session_phase");
+  }
+
   async function setupSession() {
     const cli = makeCliSocket("s1");
     const browser = makeBrowserSocket("s1");
@@ -4454,12 +4468,12 @@ describe("CLI message deduplication", () => {
 
     // First send — should forward to browser
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).toHaveBeenCalledTimes(1);
+    expect(forwarded(browser)).toHaveLength(1);
 
     // Same message again (simulates CLI replay on WS reconnect) — should be filtered
     browser.send.mockClear();
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).not.toHaveBeenCalled();
+    expect(forwarded(browser)).toHaveLength(0);
   });
 
   it("forwards non-duplicate assistant messages normally", async () => {
@@ -4470,7 +4484,7 @@ describe("CLI message deduplication", () => {
     await bridge.handleCLIMessage(cli, msg1);
     await bridge.handleCLIMessage(cli, msg2);
 
-    expect(browser.send).toHaveBeenCalledTimes(2);
+    expect(forwarded(browser)).toHaveLength(2);
   });
 
   it("evicts oldest hashes when window is exceeded", async () => {
@@ -4505,12 +4519,12 @@ describe("CLI message deduplication", () => {
 
     // First send — should forward to browser
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).toHaveBeenCalledTimes(1);
+    expect(forwarded(browser)).toHaveLength(1);
 
     // Same uuid again (simulates CLI replay on WS reconnect) — should be filtered
     browser.send.mockClear();
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).not.toHaveBeenCalled();
+    expect(forwarded(browser)).toHaveLength(0);
   });
 
   it("forwards stream_event messages without uuid (no dedup possible)", async () => {
@@ -4526,7 +4540,7 @@ describe("CLI message deduplication", () => {
     await bridge.handleCLIMessage(cli, msg);
 
     // Both should be forwarded — no uuid means no dedup
-    expect(browser.send).toHaveBeenCalledTimes(2);
+    expect(forwarded(browser)).toHaveLength(2);
   });
 });
 
@@ -5035,6 +5049,67 @@ describe("Idle kill watchdog", () => {
     // Well under 24h.
     await vi.advanceTimersByTimeAsync(60 * 60_000);
     expect(idleKillHandler).not.toHaveBeenCalled();
+  });
+
+  // ─── Regression: phase truth vs the idle-kill gate ───────────────────────
+  // Production failure (2026-09-02): the CLI emits system/status
+  // {status:"requesting"} at the start of every API call; the status_change
+  // handler treated any non-"compacting" status as "compaction ended" and
+  // forced the phase back to `ready` MID-TURN. The idle-kill gate then saw
+  // `ready` + a quiet stretch (long thinking / long tool) and SIGTERM'd a live
+  // turn, losing its answer. Turns started by a post-relaunch flush never even
+  // entered `streaming`.
+  function makeStatusMsg(status: string, uuid: string) {
+    return JSON.stringify({ type: "system", subtype: "status", status, session_id: "cli-123", uuid });
+  }
+  function makeAssistantFrame(id: string) {
+    return JSON.stringify({
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "working…" }], stop_reason: null,
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+      uuid: `u-${id}`,
+    });
+  }
+
+  it("status 'requesting' does NOT drop a streaming turn back to ready", async () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { cli, session } = await makeReadySession("s1");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "go" }));
+    expect(session.stateMachine.phase).toBe("streaming");
+
+    await bridge.handleCLIMessage(cli, makeStatusMsg("requesting", "u-req-1"));
+    expect(session.stateMachine.phase).toBe("streaming");
+  });
+
+  it("CLI output while at rest moves the phase to streaming (flushed turn)", async () => {
+    const { cli, session } = await makeReadySession("s1");
+    expect(session.stateMachine.phase).toBe("ready");
+
+    await bridge.handleCLIMessage(cli, makeStatusMsg("requesting", "u-req-2"));
+    expect(session.stateMachine.phase).toBe("streaming");
+
+    // And an assistant frame alone is enough too.
+    session.stateMachine.transition("ready", "test_back_to_ready");
+    await bridge.handleCLIMessage(cli, makeAssistantFrame("msg-flushed-1"));
+    expect(session.stateMachine.phase).toBe("streaming");
+  });
+
+  it("idle-kill never fires during a turn that went quiet after 'requesting'", async () => {
+    const idleKillHandler = vi.fn();
+    const off = companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { cli } = await makeReadySession("s1");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "long task" }));
+    await bridge.handleCLIMessage(cli, makeStatusMsg("requesting", "u-req-3"));
+
+    // Long silent stretch (model thinking / tool running) well past the threshold.
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+    off();
   });
 
   it("checkIdleKill stops watchdog if session is removed", async () => {

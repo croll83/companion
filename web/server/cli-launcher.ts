@@ -372,6 +372,7 @@ export class CliLauncher {
    * that connects back to the same session in the WsBridge.
    */
   async relaunch(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    console.log(`[cli-launcher] relaunch() requested for ${sessionId}`);
     const info = this.sessions.get(sessionId);
     if (!info) return { ok: false, error: "Session not found" };
 
@@ -1298,6 +1299,9 @@ export class CliLauncher {
    * Kill a session's CLI process.
    */
   async kill(sessionId: string): Promise<boolean> {
+    // Attribution: SIGTERMs used to be unlogged, making mid-turn kills
+    // untraceable (see the 2026-09-02 lost-answer forensics).
+    console.log(`[cli-launcher] kill() requested for ${sessionId}`);
     const proxy = this.codexWsProxies.get(sessionId);
     if (proxy) {
       try { proxy.kill("SIGTERM"); } catch {}
