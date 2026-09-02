@@ -1,35 +1,38 @@
 import { describe, it, expect } from "vitest";
-import { establishedExternalInodes } from "./cli-liveness.js";
+import { parseCpuTicks, parseChildren, anyNonMcp, cliWorking } from "./cli-liveness.js";
 
-// /proc/net/tcp columns: sl local_address rem_address st ... inode ...
-// st 01 = ESTABLISHED. rem_address is "IP:PORT" little-endian hex.
-const HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
-function row(rem: string, st: string, inode: string) {
-  return `   0: 0100007F:0CEA ${rem} ${st} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000 0`;
-}
+describe("parseCpuTicks", () => {
+  it("sums utime+stime from /proc/<pid>/stat", () => {
+    // pid (comm) state ppid pgrp sess tty tpgid flags minflt cminflt majflt cmajflt utime stime ...
+    const stat = "1893153 (claude) S 494429 1 1 0 -1 4194560 100 0 0 0 300 162 0 0 20 0 10 0 12345 1 0";
+    expect(parseCpuTicks(stat)).toBe(462);
+  });
+  it("survives a comm with spaces and parentheses", () => {
+    const stat = "42 (my (odd) name) R 1 1 1 0 -1 0 0 0 0 0 7 3 0 0 20 0 1 0 0 0 0";
+    expect(parseCpuTicks(stat)).toBe(10);
+  });
+  it("returns null on garbage", () => {
+    expect(parseCpuTicks("")).toBeNull();
+    expect(parseCpuTicks("nope")).toBeNull();
+  });
+});
 
-describe("establishedExternalInodes", () => {
-  it("keeps ESTABLISHED connections to a real remote host", () => {
-    // 160.79.104.10 -> little-endian hex 0A684FA0 ; port 443 = 01BB
-    const s = [HEADER, row("0A684FA0:01BB", "01", "131230317")].join("\n");
-    expect(establishedExternalInodes(s).has("131230317")).toBe(true);
+describe("parseChildren / anyNonMcp", () => {
+  it("parses the children list", () => {
+    expect(parseChildren(" 12 34 56 \n")).toEqual([12, 34, 56]);
+    expect(parseChildren("")).toEqual([]);
   });
-  it("drops loopback remotes (local MCP / companion WS)", () => {
-    const s = [HEADER, row("0100007F:0D80", "01", "999")].join("\n");
-    expect(establishedExternalInodes(s).has("999")).toBe(false);
+  it("ignores persistent MCP servers but flags a real tool", () => {
+    expect(anyNonMcp(["npm\0exec\0@modelcontextprotocol/server-github", "sh\0-c\0mcp-server-github"])).toBe(false);
+    expect(anyNonMcp(["npm\0exec\0@modelcontextprotocol/server-github", "bash\0-c\0npx vitest run"])).toBe(true);
+    expect(anyNonMcp([])).toBe(false);
   });
-  it("drops non-ESTABLISHED sockets (listen/time-wait)", () => {
-    const s = [HEADER, row("0A684FA0:01BB", "0A", "888"), row("0A684FA0:01BB", "06", "777")].join("\n");
-    const r = establishedExternalInodes(s);
-    expect(r.has("888")).toBe(false);
-    expect(r.has("777")).toBe(false);
-  });
-  it("drops all-zero remote (unconnected)", () => {
-    const s = [HEADER, row("00000000:0000", "01", "555")].join("\n");
-    expect(establishedExternalInodes(s).has("555")).toBe(false);
-  });
-  it("handles empty / header-only input", () => {
-    expect(establishedExternalInodes("").size).toBe(0);
-    expect(establishedExternalInodes(HEADER).size).toBe(0);
+});
+
+describe("cliWorking", () => {
+  it("is not fooled by a missing/invalid pid", () => {
+    expect(cliWorking(null, null).working).toBe(false);
+    expect(cliWorking(0, null).working).toBe(false);
+    expect(cliWorking(999999999, null).working).toBe(false); // no such process
   });
 });

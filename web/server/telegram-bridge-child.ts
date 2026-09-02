@@ -17,7 +17,7 @@ import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, basename, extname } from "node:path";
 import { homedir } from "node:os";
 import type { TelegramBinding } from "./session-telegram-bindings.js";
-import { cliWorking } from "./cli-liveness.js";
+import { cliWorking, cpuTicks } from "./cli-liveness.js";
 
 // ── Paths / config ───────────────────────────────────────────────────────────
 const COMPANION_HOME = process.env.COMPANION_HOME || join(homedir(), ".companion");
@@ -162,7 +162,7 @@ class SessionBridge {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
-  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout>; startTimer?: ReturnType<typeof setTimeout> } | null = null;
+  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout>; startTimer?: ReturnType<typeof setTimeout>; cpu: number | null } | null = null;
   private lastRelaunchAt = 0;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
@@ -241,7 +241,7 @@ class SessionBridge {
     if (t.stallTimer) clearTimeout(t.stallTimer);
     t.stallTimer = setTimeout(() => {
       if (this.turn !== t) return;
-      if (this.busyGuard("mid-turn stall")) { this.bumpStall(); return; }
+      if (this.busyGuard("mid-turn stall", t)) { this.bumpStall(); return; }
       this.turn = null;
       this.clearTurnTimers(t);
       void this.requestRelaunch("mid-turn stall");
@@ -326,7 +326,7 @@ class SessionBridge {
       const armStart = (): ReturnType<typeof setTimeout> => setTimeout(() => {
         const t = this.turn;
         if (!t || t.sawActivity) return;
-        if (this.busyGuard("no activity after send")) { t.startTimer = armStart(); return; }
+        if (this.busyGuard("no activity after send", t)) { t.startTimer = armStart(); return; }
         this.turn = null;
         this.clearTurnTimers(t);
         void this.requestRelaunch("no activity after send");
@@ -340,7 +340,8 @@ class SessionBridge {
         void this.requestRelaunch("turn timeout");
         resolve(`⚠️ timeout: nessun result entro ${Math.round(TURN_TIMEOUT_MS / 60000)} min. Ho ripristinato la sessione, riprova il messaggio.`);
       }, TURN_TIMEOUT_MS);
-      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false, sawActivity: false, stallTimer: undefined, startTimer };
+      const pid0 = this.cliPid();
+      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false, sawActivity: false, stallTimer: undefined, startTimer, cpu: pid0 ? cpuTicks(pid0) : null };
     });
     audit({ dir: "out", session: this.sessionId, chars: answer.length });
     await sendText(groupId, topicId, FABLE_PREFIX + answer);
@@ -368,9 +369,11 @@ class SessionBridge {
    * mid --resume or mid long tool and corrupting the session. Returns true if the
    * relaunch was suppressed because the CLI is busy (caller should just re-arm).
    */
-  private busyGuard(reason: string): boolean {
-    if (cliWorking(this.cliPid())) {
-      console.log(`[relaunch] ${this.sessionId.slice(0, 8)} DEFERRED (${reason}) — CLI is working (api/tool active)`);
+  private busyGuard(reason: string, t: { cpu: number | null }): boolean {
+    const r = cliWorking(this.cliPid(), t.cpu);
+    t.cpu = r.ticks;
+    if (r.working) {
+      console.log(`[relaunch] ${this.sessionId.slice(0, 8)} DEFERRED (${reason}) — CLI is working (tool child or CPU active)`);
       return true;
     }
     return false;

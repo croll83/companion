@@ -1,83 +1,71 @@
 /**
  * Liveness probe for a companion-spawned Claude CLI, used by the Telegram bridge
- * to avoid relaunching a session that is actually working (the earlier watchdogs
- * relaunched on frame-silence alone, which killed CLIs mid --resume init or
- * mid long tool — corrupting the resume and losing context).
+ * so a stall/no-activity relaunch never kills a CLI that is actually working.
  *
- * "Working" = the CLI process has EITHER a non-MCP child (a tool running) OR an
- * ESTABLISHED TCP connection to a non-loopback address (talking to the model
- * API). A deadlocked CLI has neither: event loop parked, no request in flight.
+ * "Working" = the CLI has a non-MCP child (a tool running) OR it has burned
+ * CPU since the last check (streaming / parsing / thinking). A deadlocked or
+ * finished-and-idle CLI does neither: event loop parked, ~0 CPU.
  *
- * Reads /proc directly (Linux). Only `establishedExternalInodes` is pure and
- * unit-tested; the /proc glue is best-effort and fails safe (returns false =
- * "not proven working" only when it truly can't tell).
+ * Deliberately NOT "has an external TCP connection": the HTTP client keeps an
+ * idle keep-alive socket to the API open for minutes after a request, which
+ * made an idle CLI look busy forever (observed: lastrcv 5 min old, 2 KB total,
+ * 0 CPU ticks over 3 s — and the watchdog deferred indefinitely).
+ *
+ * Reads /proc (Linux). Fails safe: if it cannot read the process it reports
+ * "not proven working" so the caller's recovery path still runs.
  */
-import { readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
-function isZeroHex(h: string): boolean { return /^0+$/.test(h); }
-function isLoopbackHex(h: string): boolean {
-  // /proc/net/tcp encodes the IP little-endian hex. 127.0.0.1 -> "0100007F".
-  // IPv6 ::1 -> "00000000000000000000000001000000". v4-mapped loopback ends 0100007F.
-  if (h === "0100007F") return true;
-  if (h === "00000000000000000000000001000000") return true;
-  if (h.endsWith("0100007F")) return true;
-  return false;
+/** utime+stime clock ticks from the contents of /proc/<pid>/stat, or null. */
+export function parseCpuTicks(stat: string): number | null {
+  // comm may contain spaces/parens: fields start after the LAST ')'.
+  const rest = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
+  // rest[0] = state (field 3); utime = field 14 → rest[11]; stime = field 15 → rest[12]
+  const ut = Number(rest[11]), st = Number(rest[12]);
+  return Number.isFinite(ut) && Number.isFinite(st) ? ut + st : null;
 }
 
-/** Socket inodes with an ESTABLISHED (st=01) connection to a real remote host. */
-export function establishedExternalInodes(procNetTcp: string): Set<string> {
-  const out = new Set<string>();
-  const lines = procNetTcp.split("\n");
-  for (let i = 1; i < lines.length; i++) {
-    const f = lines[i].trim().split(/\s+/);
-    if (f.length < 10) continue;
-    if (f[3] !== "01") continue;                 // 01 = TCP_ESTABLISHED
-    const ipHex = (f[2].split(":")[0] || "").toUpperCase();
-    if (isZeroHex(ipHex) || isLoopbackHex(ipHex)) continue;
-    out.add(f[9]);                               // inode
-  }
-  return out;
+/** utime+stime clock ticks of a live pid, or null if unreadable. */
+export function cpuTicks(pid: number): number | null {
+  try { return parseCpuTicks(readFileSync(`/proc/${pid}/stat`, "utf-8")); } catch { return null; }
 }
 
-function socketInodesOfPid(pid: number): Set<string> {
-  const out = new Set<string>();
-  let fds: string[];
-  try { fds = readdirSync(`/proc/${pid}/fd`); } catch { return out; }
-  for (const fd of fds) {
-    try {
-      const m = readlinkSync(`/proc/${pid}/fd/${fd}`).match(/^socket:\[(\d+)\]$/);
-      if (m) out.add(m[1]);
-    } catch { /* fd vanished */ }
-  }
-  return out;
+/** Parse the whitespace-separated child pid list from /proc/<pid>/task/<pid>/children. */
+export function parseChildren(raw: string): number[] {
+  return raw.trim().split(/\s+/).filter(Boolean).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/** True if any command line is a real tool/subagent (not a persistent MCP server). */
+export function anyNonMcp(cmdlines: string[]): boolean {
+  return cmdlines.some((c) => {
+    const s = c.replace(/\0/g, " ").trim();
+    return s.length > 0 && !/mcp|modelcontextprotocol/i.test(s);
+  });
 }
 
 function hasNonMcpChild(pid: number): boolean {
   let raw: string;
   try { raw = readFileSync(`/proc/${pid}/task/${pid}/children`, "utf-8"); } catch { return false; }
-  for (const cpid of raw.trim().split(/\s+/).filter(Boolean)) {
-    let cmd = "";
-    try { cmd = readFileSync(`/proc/${cpid}/cmdline`, "utf-8").replace(/\0/g, " ").trim(); } catch { continue; }
-    if (!cmd) continue;
-    if (/mcp|modelcontextprotocol/i.test(cmd)) continue; // persistent MCP server, not a tool
-    return true;
+  const cmds: string[] = [];
+  for (const c of parseChildren(raw)) {
+    try { cmds.push(readFileSync(`/proc/${c}/cmdline`, "utf-8")); } catch { /* gone */ }
   }
-  return false;
+  return anyNonMcp(cmds);
 }
 
-/** True if the CLI is provably doing work (a tool child, or an API connection). */
-export function cliWorking(pid: number | null): boolean {
-  if (!pid || pid <= 0) return false;
-  try {
-    if (hasNonMcpChild(pid)) return true;
-    const inodes = socketInodesOfPid(pid);
-    if (inodes.size === 0) return false;
-    const ext = new Set<string>();
-    for (const p of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-      try { for (const ino of establishedExternalInodes(readFileSync(p, "utf-8"))) ext.add(ino); }
-      catch { /* one family may be absent */ }
-    }
-    for (const ino of inodes) if (ext.has(ino)) return true;
-    return false;
-  } catch { return false; }
+/** Minimum CPU ticks over the observation window to count as "working". */
+export const CPU_ACTIVE_TICKS = Number(process.env.TG_CPU_ACTIVE_TICKS) || 20;
+
+/**
+ * Decide if the CLI is working. `prevTicks` is the cpuTicks() sample taken at
+ * the previous check (or when the turn started); the caller stores the returned
+ * `ticks` for the next call. With no baseline we only trust the child check.
+ */
+export function cliWorking(pid: number | null, prevTicks: number | null): { working: boolean; ticks: number | null } {
+  if (!pid || pid <= 0) return { working: false, ticks: null };
+  const ticks = cpuTicks(pid);
+  if (ticks === null) return { working: false, ticks: null };            // process gone
+  if (hasNonMcpChild(pid)) return { working: true, ticks };
+  if (prevTicks !== null && ticks - prevTicks >= CPU_ACTIVE_TICKS) return { working: true, ticks };
+  return { working: false, ticks };
 }
