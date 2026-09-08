@@ -53,19 +53,61 @@ function hasNonMcpChild(pid: number): boolean {
   return anyNonMcp(cmds);
 }
 
-/** Minimum CPU ticks over the observation window to count as "working". */
-export const CPU_ACTIVE_TICKS = Number(process.env.TG_CPU_ACTIVE_TICKS) || 20;
+/**
+ * Minimum CPU RATE (clock ticks per second, 100 ticks = 1 CPU-second) over the
+ * observation window to count as "working". An idle CLI still burns ~0.5-1
+ * tick/s of housekeeping (timers, MCP keepalive, GC) — over a 3-minute window
+ * that is well over 100 ticks, which is why an absolute tick threshold was
+ * fooled (observed: 40 s CPU over 92 idle minutes, 0 ticks in any 3 s sample).
+ * Streaming/parsing a turn runs at several ticks/s.
+ */
+export const CPU_ACTIVE_TICKS_PER_SEC = Number(process.env.TG_CPU_ACTIVE_TPS) || 3;
+
+/** ms since a socket last RECEIVED data, from `ss -tnpi` output, for one pid. */
+export function parseSsLastRcv(ssOutput: string, pid: number): number[] {
+  const out: number[] = [];
+  const lines = ssOutput.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].includes(`pid=${pid},`)) continue;
+    // skip loopback peers (companion WS, local MCP)
+    const cols = lines[i].trim().split(/\s+/);
+    const peer = cols[4] || "";
+    if (/^(127\.|\[?::1\]?:)/.test(peer)) continue;
+    const info = lines[i + 1] || "";
+    const m = info.match(/lastrcv:(\d+)/);
+    if (m) out.push(Number(m[1]));
+  }
+  return out;
+}
+
+/** An external socket that received data recently = a model response in flight. */
+export const SOCKET_ACTIVE_MS = Number(process.env.TG_SOCKET_ACTIVE_MS) || 30_000;
+
+function hasActiveExternalSocket(pid: number): boolean {
+  try {
+    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    const out = execFileSync("ss", ["-tnpi"], { encoding: "utf-8", timeout: 3000 });
+    return parseSsLastRcv(out, pid).some((ms) => ms < SOCKET_ACTIVE_MS);
+  } catch { return false; }
+}
 
 /**
- * Decide if the CLI is working. `prevTicks` is the cpuTicks() sample taken at
- * the previous check (or when the turn started); the caller stores the returned
- * `ticks` for the next call. With no baseline we only trust the child check.
+ * Decide if the CLI is working. `prev` is the sample returned by the previous
+ * call (or taken when the turn started); the caller stores the returned sample.
+ * Working = a tool child, OR an external socket with recent traffic, OR a CPU
+ * rate above idle housekeeping. With no baseline, CPU is not consulted.
  */
-export function cliWorking(pid: number | null, prevTicks: number | null): { working: boolean; ticks: number | null } {
-  if (!pid || pid <= 0) return { working: false, ticks: null };
+export interface CpuSample { ticks: number; at: number }
+export function cliWorking(pid: number | null, prev: CpuSample | null): { working: boolean; sample: CpuSample | null } {
+  if (!pid || pid <= 0) return { working: false, sample: null };
   const ticks = cpuTicks(pid);
-  if (ticks === null) return { working: false, ticks: null };            // process gone
-  if (hasNonMcpChild(pid)) return { working: true, ticks };
-  if (prevTicks !== null && ticks - prevTicks >= CPU_ACTIVE_TICKS) return { working: true, ticks };
-  return { working: false, ticks };
+  if (ticks === null) return { working: false, sample: null };          // process gone
+  const sample = { ticks, at: Date.now() };
+  if (hasNonMcpChild(pid)) return { working: true, sample };
+  if (hasActiveExternalSocket(pid)) return { working: true, sample };
+  if (prev) {
+    const secs = Math.max(1, (sample.at - prev.at) / 1000);
+    if ((ticks - prev.ticks) / secs >= CPU_ACTIVE_TICKS_PER_SEC) return { working: true, sample };
+  }
+  return { working: false, sample };
 }

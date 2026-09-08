@@ -17,7 +17,7 @@ import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, basename, extname } from "node:path";
 import { homedir } from "node:os";
 import type { TelegramBinding } from "./session-telegram-bindings.js";
-import { cliWorking, cpuTicks } from "./cli-liveness.js";
+import { cliWorking, cpuTicks, type CpuSample } from "./cli-liveness.js";
 
 // ── Paths / config ───────────────────────────────────────────────────────────
 const COMPANION_HOME = process.env.COMPANION_HOME || join(homedir(), ".companion");
@@ -162,7 +162,7 @@ class SessionBridge {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
-  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout>; startTimer?: ReturnType<typeof setTimeout>; cpu: number | null } | null = null;
+  private turn: { resolve: (t: string) => void; timers: ReturnType<typeof setTimeout>[]; relaunched: boolean; sawActivity: boolean; stallTimer?: ReturnType<typeof setTimeout>; startTimer?: ReturnType<typeof setTimeout>; cpu: CpuSample | null } | null = null;
   private lastRelaunchAt = 0;
   private buffer: string[] = [];
   private pendingImages: Attachment[] = [];
@@ -341,7 +341,8 @@ class SessionBridge {
         resolve(`⚠️ timeout: nessun result entro ${Math.round(TURN_TIMEOUT_MS / 60000)} min. Ho ripristinato la sessione, riprova il messaggio.`);
       }, TURN_TIMEOUT_MS);
       const pid0 = this.cliPid();
-      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false, sawActivity: false, stallTimer: undefined, startTimer, cpu: pid0 ? cpuTicks(pid0) : null };
+      const t0 = pid0 ? cpuTicks(pid0) : null;
+      this.turn = { resolve, timers: [ackTimer, hardTimer], relaunched: false, sawActivity: false, stallTimer: undefined, startTimer, cpu: t0 === null ? null : { ticks: t0, at: Date.now() } };
     });
     audit({ dir: "out", session: this.sessionId, chars: answer.length });
     await sendText(groupId, topicId, FABLE_PREFIX + answer);
@@ -369,9 +370,9 @@ class SessionBridge {
    * mid --resume or mid long tool and corrupting the session. Returns true if the
    * relaunch was suppressed because the CLI is busy (caller should just re-arm).
    */
-  private busyGuard(reason: string, t: { cpu: number | null }): boolean {
+  private busyGuard(reason: string, t: { cpu: CpuSample | null }): boolean {
     const r = cliWorking(this.cliPid(), t.cpu);
-    t.cpu = r.ticks;
+    t.cpu = r.sample;
     if (r.working) {
       console.log(`[relaunch] ${this.sessionId.slice(0, 8)} DEFERRED (${reason}) — CLI is working (tool child or CPU active)`);
       return true;
