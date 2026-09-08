@@ -155,6 +155,7 @@ const DEFAULT_RPC_TIMEOUT_MS = 60_000;
 /** Per-method timeout overrides (ms). */
 const RPC_METHOD_TIMEOUTS: Record<string, number> = {
   "turn/start": 120_000,
+  "turn/steer": 15_000,
   "turn/interrupt": 15_000,
   "codex/configureSession": 30_000,
   "thread/start": 30_000,
@@ -1208,6 +1209,41 @@ export class CodexAdapter implements IBackendAdapter {
         turnParams.collaborationMode = this.mapCollaborationMode(this.currentCollaborationModeKind);
         this.lastSentCollaborationModeKind = this.currentCollaborationModeKind;
       }
+      // Mid-turn steering: when a turn is already in flight, Codex can fold new
+      // input INTO it instead of queueing a separate turn. `expectedTurnId` is a
+      // server-side precondition — if that turn finished in the meantime the
+      // call fails rather than silently landing somewhere unintended, and we
+      // fall through to a normal turn/start below.
+      const activeTurnId = this.currentTurnId;
+      if (activeTurnId) {
+        try {
+          await this.transport.call("turn/steer", {
+            threadId: this.threadId,
+            expectedTurnId: activeTurnId,
+            input,
+          });
+          log.info("codex-adapter", "Steered the in-flight turn", {
+            sessionId: this.sessionId,
+            turnId: activeTurnId,
+          });
+          this.reconnectRetryCount = 0;
+          this.overloadRetryCount = 0;
+          return;
+        } catch (steerErr) {
+          // Precondition lost (turn ended between our check and the call) or the
+          // server refused: fall back to opening a fresh turn with the same
+          // input, so the message is never dropped.
+          const m = steerErr instanceof Error ? steerErr.message : String(steerErr);
+          if (m === "Transport reconnected" || m === "Transport closed") throw steerErr;
+          log.info("codex-adapter", "Steer rejected, starting a new turn instead", {
+            sessionId: this.sessionId,
+            turnId: activeTurnId,
+            reason: m,
+          });
+          this.currentTurnId = null;
+        }
+      }
+
       const result = await this.transport.call("turn/start", turnParams) as { turn: { id: string } };
 
       this.currentTurnId = result.turn.id;

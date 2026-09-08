@@ -732,6 +732,89 @@ describe("CodexAdapter", () => {
     expect(allWritten).toContain("thr_123");
   });
 
+  // ─── Mid-turn steering ────────────────────────────────────────────────────
+  // Codex can fold new input INTO the turn already running (turn/steer) instead
+  // of opening a second one. `expectedTurnId` is a server-side precondition, so
+  // if that turn ended in the meantime the call fails and we must still deliver
+  // the message — never drop it.
+  async function initAdapter(a: CodexAdapter, threadId = "thr_123") {
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: threadId } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  /** JSON-RPC id of the last request written for `method`, or null. */
+  function lastRequestId(method: string): number | null {
+    const ids = stdin.chunks.join("").split("\n").filter(Boolean)
+      .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((o: { method?: string; id?: number } | null) => o && o.method === method && typeof o.id === "number")
+      .map((o: { id: number }) => o.id);
+    return ids.length ? ids[ids.length - 1] : null;
+  }
+
+  it("steers the in-flight turn instead of opening a second one", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    await initAdapter(adapter);
+
+    adapter.sendBrowserMessage({ type: "user_message", content: "first" });
+    await new Promise((r) => setTimeout(r, 50));
+    const startId = lastRequestId("turn/start")!;
+    stdout.push(JSON.stringify({ id: startId, result: { turn: { id: "turn_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "also check the nonce" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const written = stdin.chunks.join("");
+    expect(written).toContain('"method":"turn/steer"');
+    expect(written).toContain('"expectedTurnId":"turn_1"');
+    expect(written).toContain("also check the nonce");
+    // Must NOT have opened a competing turn.
+    expect(written).not.toContain('"method":"turn/start"');
+  });
+
+  it("falls back to turn/start when the steer precondition fails", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    await initAdapter(adapter);
+
+    adapter.sendBrowserMessage({ type: "user_message", content: "first" });
+    await new Promise((r) => setTimeout(r, 50));
+    const startId = lastRequestId("turn/start")!;
+    stdout.push(JSON.stringify({ id: startId, result: { turn: { id: "turn_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "late message" });
+    await new Promise((r) => setTimeout(r, 50));
+    const steerId = lastRequestId("turn/steer")!;
+    // The turn ended between our check and the call: precondition rejected.
+    stdout.push(JSON.stringify({
+      id: steerId,
+      error: { code: -32600, message: "expectedTurnId does not match the active turn" },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+
+    const written = stdin.chunks.join("");
+    // The message is delivered as a fresh turn rather than lost.
+    expect(written).toContain('"method":"turn/start"');
+    expect(written).toContain("late message");
+  });
+
+  it("opens a normal turn when nothing is running", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    await initAdapter(adapter);
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "hello" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const written = stdin.chunks.join("");
+    expect(written).toContain('"method":"turn/start"');
+    expect(written).not.toContain('"method":"turn/steer"');
+  });
+
   it("uses executionCwd for turn/start when receiving user_message", async () => {
     const adapter = new CodexAdapter(proc as never, "test-session", {
       model: "o4-mini",

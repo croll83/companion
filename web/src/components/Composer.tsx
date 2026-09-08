@@ -358,6 +358,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   const sessionStatus = useStore((s) => s.sessionStatus);
   const isRunning = sessionStatus.get(sessionId) === "running";
+  // Codex can fold new input into the turn already running (turn/steer); Claude
+  // queues it for the next one. The composer says which, because "send" means
+  // two different things and the user has to know before pressing enter.
+  const willSteer = isCodex && isRunning;
   const canSend = text.trim().length > 0 && isConnected;
 
   return (
@@ -652,9 +656,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
               onKeyUp={syncCaret}
               onPaste={handlePaste}
               aria-label="Message input"
-              placeholder={isConnected
-                ? "Type a message... (/ + @)"
-                : "Waiting for CLI connection..."}
+              placeholder={!isConnected
+                ? "Waiting for CLI connection..."
+                : willSteer
+                  ? "Add to what it's doing now... (/ + @)"
+                  : isRunning
+                    ? "Queue a message for the next turn... (/ + @)"
+                    : "Type a message... (/ + @)"}
               disabled={!isConnected}
               rows={1}
               className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
