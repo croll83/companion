@@ -1690,6 +1690,15 @@ export class CodexAdapter implements IBackendAdapter {
       case "deprecationNotice":
       case "codex/event/deprecation_notice":
         break;
+      // Informational status notifications observed live against codex-cli
+      // 0.153.4 (spike 2026-09-08). They carry no turn content — the thread's
+      // own settings echo and the remote-control feature's on/off state — but
+      // hitting `default:` surfaced a "protocol drift" error banner in the UI
+      // on every Codex turn. Explicitly benign.
+      case "thread/settings/updated":
+      case "remoteControl/status/changed":
+      case "thread/goal/cleared":
+        break;
       // Legacy event variants already covered by canonical item/* handlers.
       case "codex/event/mcp_startup_update":
       case "codex/event/turn_aborted":
