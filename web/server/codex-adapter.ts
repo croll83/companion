@@ -24,6 +24,7 @@ import type {
 import type { RecorderManager } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
+import { INLINE_IMAGE_TYPES, saveAttachment, attachmentNote, type SavedAttachment } from "./attachment-store.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -1159,18 +1160,34 @@ export class CodexAdapter implements IBackendAdapter {
 
     const input: Array<{ type: string; text?: string; url?: string }> = [];
 
-    // Add images if present
+    // Codex turn input has no file variant (text/image/localImage/audio/
+    // localAudio/skill/mention), so anything that isn't an inline image is
+    // written to disk under COMPANION_HOME and referenced by path instead of
+    // being dropped. Images still travel inline as data URLs.
+    const savedFiles: SavedAttachment[] = [];
     if (msg.images?.length) {
       for (const img of msg.images) {
-        input.push({
-          type: "image",
-          url: `data:${img.media_type};base64,${img.data}`,
-        });
+        if (INLINE_IMAGE_TYPES.has(img.media_type)) {
+          input.push({
+            type: "image",
+            url: `data:${img.media_type};base64,${img.data}`,
+          });
+          continue;
+        }
+        try {
+          savedFiles.push(saveAttachment(this.sessionId, img));
+        } catch (e) {
+          log.error("codex-adapter", "Failed to persist attachment", {
+            sessionId: this.sessionId,
+            mediaType: img.media_type,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
     }
 
     // Add text
-    input.push({ type: "text", text: msg.content });
+    input.push({ type: "text", text: msg.content + attachmentNote(savedFiles) });
 
     try {
       // Only send collaborationMode on mode transitions — sending it every turn

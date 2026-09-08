@@ -15,6 +15,7 @@ import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
 import { isValidEffort } from "./effort.js";
+import { isValidCodexEffort } from "./codex-models.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
@@ -900,6 +901,12 @@ export class CliLauncher {
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
     args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
+    // not as a runtime call — same shape as Claude's `--effort` flag, so a change
+    // means relaunch with thread/resume. Levels are per-model, hence the check.
+    if (options.effort && isValidCodexEffort(options.model, options.effort)) {
+      args.push("-c", `model_reasoning_effort=${options.effort}`);
+    }
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1137,6 +1144,12 @@ export class CliLauncher {
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
     args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
+    // not as a runtime call — same shape as Claude's `--effort` flag, so a change
+    // means relaunch with thread/resume. Levels are per-model, hence the check.
+    if (options.effort && isValidCodexEffort(options.model, options.effort)) {
+      args.push("-c", `model_reasoning_effort=${options.effort}`);
+    }
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,

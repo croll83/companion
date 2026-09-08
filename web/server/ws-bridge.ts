@@ -1322,7 +1322,7 @@ export class WsBridge {
     // -- set_effort (Claude): reasoning effort can only be set via the
     // `--effort` launch flag (no runtime control_request), so mirror the
     // set_model flow — persist + relaunch with --resume.
-    if (msg.type === "set_effort" && session.backendType === "claude") {
+    if (msg.type === "set_effort" && (session.backendType === "claude" || session.backendType === "codex")) {
       session.state.effort = msg.effort;
       this.persistSession(session);
       this.broadcastToBrowsers(session, {

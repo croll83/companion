@@ -315,7 +315,7 @@ export type ContentBlock =
 
 /** Messages the browser sends to the bridge */
 export type BrowserOutgoingMessage =
-  | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string }[]; client_msg_id?: string }
+  | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string; name?: string }[]; client_msg_id?: string }
   | { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown>; updated_permissions?: PermissionUpdate[]; message?: string; client_msg_id?: string }
   | { type: "session_subscribe"; last_seq: number }
   | { type: "session_ack"; last_seq: number }
@@ -391,6 +391,12 @@ export interface SessionState {
   model: string;
   /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
   effort?: string;
+  /**
+   * Effort levels this session's model accepts. Only populated for Codex, whose
+   * levels vary per model and are only knowable server-side (models cache); the
+   * Claude UI resolves them from the static table in effort.ts.
+   */
+  supportedEfforts?: string[];
   cwd: string;
   tools: string[];
   permissionMode: string;

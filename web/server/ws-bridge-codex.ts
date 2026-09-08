@@ -9,6 +9,7 @@ import { appendHistory } from "./ws-bridge-persist.js";
 import { validatePermission } from "./ai-validator.js";
 import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
+import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 
 /**
  * @deprecated This file is no longer used in production. Codex adapters are now
@@ -53,6 +54,16 @@ export function attachCodexAdapterHandlers(
         ...(skills?.length ? { skills } : {}),
         backend_type: "codex",
       };
+      // Codex effort levels are per-model and only readable server-side, so
+      // hand them to the UI with the session instead of hardcoding a table.
+      const codexModel = session.state.model;
+      const levels = getCodexEffortLevels(codexModel);
+      if (levels.length > 0) {
+        session.state.supportedEfforts = levels;
+        if (!session.state.effort) {
+          session.state.effort = getCodexDefaultEffort(codexModel) ?? undefined;
+        }
+      }
       deps.refreshGitInfo(session, { notifyPoller: true });
       deps.persistSession(session);
       session.stateMachine.transition("ready", "codex_session_init");

@@ -256,7 +256,9 @@ export class SessionOrchestrator {
     companionBus.on("session:effort-change", async ({ sessionId, effort }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      if (info.backendType !== "claude") return;
+      // Both backends take effort at launch only (Claude `--effort`, Codex
+      // `-c model_reasoning_effort`), so both relaunch to apply it.
+      if (info.backendType !== "claude" && info.backendType !== "codex") return;
       log.info("orchestrator", "Effort change → relaunching CLI", {
         sessionId,
         from: info.effort,

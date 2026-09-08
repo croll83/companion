@@ -11,9 +11,17 @@ import {
 // lock in the exact level sets so a wrong entry can't silently pass an invalid
 // `--effort` to a model (which the API rejects).
 describe("effort capability matrix", () => {
-  it("exposes the 5 canonical levels with high as default", () => {
-    expect(EFFORT_LEVELS).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  it("exposes every level either backend can use, with high as default", () => {
+    // `ultra` exists only on Codex models (astra/sol/terra); no Claude model
+    // lists it, so widening the union must not widen any Claude level set.
+    expect(EFFORT_LEVELS).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(DEFAULT_EFFORT).toBe("high");
+  });
+
+  it("never offers `ultra` to a Claude model", () => {
+    for (const m of ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"]) {
+      expect(getEffortLevels(m)).not.toContain("ultra");
+    }
   });
 
   it("gives fable-5 and Opus 4.8/4.7 all five levels", () => {

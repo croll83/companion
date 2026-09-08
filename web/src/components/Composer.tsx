@@ -142,7 +142,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       type: "user_message",
       content: msg,
       session_id: sessionId,
-      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
+      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64, name: img.name })) : undefined,
       client_msg_id: clientMsgId,
     });
 
@@ -150,7 +150,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       id: clientMsgId,
       role: "user",
       content: msg,
-      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
+      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64, name: img.name })) : undefined,
       timestamp: Date.now(),
     });
 
@@ -278,7 +278,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
     const newImages: ImageAttachment[] = [];
     for (const file of Array.from(files)) {
       const isPdf = file.type === "application/pdf";
-      if (!file.type.startsWith("image/") && !(isPdf && !isCodex)) continue; // PDFs: Claude only
+      if (!file.type.startsWith("image/") && !isPdf) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
       newImages.push({ name: file.name, base64, mediaType });
     }
@@ -296,7 +296,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
     const newImages: ImageAttachment[] = [];
     for (const item of Array.from(items)) {
       const isPdf = item.type === "application/pdf";
-      if (!item.type.startsWith("image/") && !(isPdf && !isCodex)) continue; // PDFs: Claude only
+      if (!item.type.startsWith("image/") && !isPdf) continue;
       const file = item.getAsFile();
       if (!file) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
@@ -403,11 +403,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
         <input
           ref={fileInputRef}
           type="file"
-          accept={isCodex ? "image/*" : "image/*,application/pdf"}
+          accept="image/*,application/pdf"
           multiple
           onChange={handleFileSelect}
           className="hidden"
-          aria-label={isCodex ? "Attach images" : "Attach images or PDFs"}
+          aria-label="Attach images or PDFs"
         />
 
         {/* Prompt suggestion chips */}

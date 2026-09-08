@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
-import { getEffortLevels, modelSupportsEffort, DEFAULT_EFFORT } from "../utils/backends.js";
+import { getEffortLevels, DEFAULT_EFFORT } from "../utils/backends.js";
 
 interface EffortSwitcherProps {
   sessionId: string;
@@ -14,13 +14,15 @@ const EFFORT_LABELS: Record<string, string> = {
   high: "High",
   xhigh: "X-High",
   max: "Max",
+  ultra: "Ultra",
 };
 
 /**
  * Reasoning-effort selector. Effort is the primary depth control on fable-5 and
- * Opus 4.6+, but the Claude CLI only accepts it via the `--effort` launch flag,
- * so changing it relaunches the CLI with `--resume` (same as a model switch).
- * Hidden for models that don't support effort, for Codex, and when disconnected.
+ * Opus 4.6+, and on Codex models too. Neither CLI accepts it at runtime — Claude
+ * takes `--effort`, Codex takes `-c model_reasoning_effort` — so changing it
+ * relaunches the CLI (with `--resume` / `thread/resume`), same as a model switch.
+ * Hidden when the model exposes no levels, or when disconnected.
  */
 export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
   const [open, setOpen] = useState(false);
@@ -35,7 +37,12 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
   const backendType = sdkSession?.backendType ?? runtimeSession?.backend_type ?? "claude";
   const currentModel = runtimeSession?.model ?? sdkSession?.model ?? "";
   const currentEffort = runtimeSession?.effort ?? sdkSession?.effort ?? DEFAULT_EFFORT;
-  const levels = getEffortLevels(currentModel);
+  // Codex reports its per-model levels with the session (they vary by model and
+  // are only knowable server-side); Claude resolves them from the static table.
+  const codexLevels = runtimeSession?.supportedEfforts;
+  const levels = backendType === "codex"
+    ? ((codexLevels ?? []) as ReturnType<typeof getEffortLevels>)
+    : getEffortLevels(currentModel);
 
   const handleSelect = useCallback(
     (effort: string) => {
@@ -78,7 +85,7 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
   }, [open]);
 
   // Hide for Codex, when disconnected, or when the model doesn't support effort.
-  if (backendType === "codex" || !cliConnected || !modelSupportsEffort(currentModel)) {
+  if (!cliConnected || levels.length === 0) {
     return null;
   }
 
