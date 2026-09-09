@@ -405,6 +405,16 @@ export function getClaudeSessionHistoryPage(
   };
 }
 
+/**
+ * Whether a Claude CLI transcript for `cliSessionId` exists on disk (any
+ * project dir). Used by the launcher to tell a genuinely missing resume target
+ * (transcript pruned) from a transient launch failure (network down, API 5xx)
+ * — the two look identical from the process exit code alone.
+ */
+export function claudeTranscriptExists(cliSessionId: string, projectsRoot?: string): boolean {
+  return resolveSessionSourceFile(cliSessionId, getProjectsRoot(projectsRoot)) !== null;
+}
+
 export function clearClaudeSessionHistoryCacheForTests(): void {
   parsedHistoryCache.clear();
 }

@@ -47,6 +47,9 @@ const isMockedPath = vi.hoisted(() => (path: string): boolean => {
   return path.includes(".claude") || path.startsWith("/tmp/worktrees/") || path.startsWith("/tmp/main-repo");
 });
 
+const mockTranscriptExists = vi.hoisted(() => vi.fn(() => true));
+vi.mock("./claude-session-history.js", () => ({ claudeTranscriptExists: mockTranscriptExists }));
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
   return {
@@ -1459,5 +1462,67 @@ describe("cliBridgeMode=tlsLoopback", () => {
       delete process.env.COMPANION_SDK_BRIDGE_HOST;
       delete process.env.COMPANION_SDK_BRIDGE_PORT;
     }
+  });
+});
+// ─── --resume quick-exit: clearing cliSessionId must be non-destructive ──────
+// A quick exit right after --resume used to discard cliSessionId on the spot.
+// That conflated "transcript is gone" with "the launch failed for an unrelated
+// reason" (network down during a relaunch discarded an intact 13.7 MB
+// transcript on 2026-09-08). Now the id is only cleared when the transcript is
+// genuinely missing, or after repeated consecutive failures.
+describe("--resume quick exit", () => {
+  const SID = "test-session-id";
+
+  /** launch → give it a cliSessionId → relaunch (which passes --resume) → quick exit. */
+  async function relaunchAndQuickExit(exitCode = 1): Promise<void> {
+    const resolveOld = exitResolve;             // proc from launch()
+    mockSpawn.mockReturnValue(createMockProc(222)); // relaunch spawns this one; exitResolve → proc 222
+    const relaunching = launcher.relaunch(SID);
+    resolveOld(0);                               // let relaunch's kill/await of the old proc finish
+    await relaunching;
+    const [cmdAndArgs] = mockSpawn.mock.calls[mockSpawn.mock.calls.length - 1];
+    expect(cmdAndArgs).toContain("--resume");
+    exitResolve(exitCode);                       // proc 222 dies immediately after --resume
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  beforeEach(() => {
+    mockTranscriptExists.mockReturnValue(true);
+    launcher.launch({ cwd: "/tmp" });
+    launcher.setCLISessionId(SID, "cli-keep-me");
+  });
+
+  it("keeps cliSessionId after ONE quick exit when the transcript is on disk", async () => {
+    await relaunchAndQuickExit();
+    const info = launcher.getSession(SID)!;
+    expect(info.cliSessionId).toBe("cli-keep-me");
+    expect(info.resumeFailures).toBe(1);
+  });
+
+  it("clears cliSessionId immediately when the transcript is missing on disk", async () => {
+    mockTranscriptExists.mockReturnValue(false);
+    await relaunchAndQuickExit();
+    expect(launcher.getSession(SID)!.cliSessionId).toBeUndefined();
+  });
+
+  it("clears cliSessionId only after RESUME_MAX_FAILURES consecutive quick exits", async () => {
+    for (let i = 1; i < CliLauncher.RESUME_MAX_FAILURES; i++) {
+      await relaunchAndQuickExit();
+      expect(launcher.getSession(SID)!.cliSessionId).toBe("cli-keep-me");
+      expect(launcher.getSession(SID)!.resumeFailures).toBe(i);
+    }
+    await relaunchAndQuickExit();
+    expect(launcher.getSession(SID)!.cliSessionId).toBeUndefined();
+  });
+
+  it("does not touch cliSessionId on a quick exit that was NOT a --resume launch", async () => {
+    // A fresh launch (no --resume) that dies fast is a different problem
+    // (bad binary, bad flags) and must not be mistaken for a bad transcript.
+    launcher.setCLISessionId(SID, undefined as unknown as string);
+    mockSpawn.mockReturnValue(createMockProc(333));
+    launcher.launch({ cwd: "/tmp" });
+    exitResolve(1);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(launcher.getSession(SID)!.resumeFailures ?? 0).toBe(0);
   });
 });

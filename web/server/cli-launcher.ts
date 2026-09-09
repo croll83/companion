@@ -16,6 +16,7 @@ import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
 import { isValidEffort } from "./effort.js";
 import { isValidCodexEffort } from "./codex-models.js";
+import { claudeTranscriptExists } from "./claude-session-history.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
@@ -95,6 +96,12 @@ export interface SdkSessionInfo {
   createdAt: number;
   /** The CLI's internal session ID (from system.init), used for --resume */
   cliSessionId?: string;
+  /**
+   * Consecutive quick exits right after a `--resume` launch. Reset by any run
+   * that survives the startup window. See the exit handler for why one quick
+   * exit is NOT enough to discard cliSessionId.
+   */
+  resumeFailures?: number;
   archived?: boolean;
   /** User-facing session name */
   name?: string;
@@ -191,6 +198,10 @@ export interface LaunchOptions {
  * or Codex via app-server stdio/WebSocket).
  */
 export class CliLauncher {
+  /** An exit faster than this after `--resume` counts as a failed resume attempt. */
+  static readonly RESUME_QUICK_EXIT_MS = 5000;
+  /** Consecutive quick exits (with the transcript present) before giving up on it. */
+  static readonly RESUME_MAX_FAILURES = 3;
   private sessions = new Map<string, SdkSessionInfo>();
   private processes = new Map<string, Subprocess>();
   /** Recent stderr (bounded) per stdio session, used to detect a too-old CLI. */
@@ -747,12 +758,36 @@ export class CliLauncher {
         session.state = "exited";
         session.exitCode = exitCode;
 
-        // If the process exited almost immediately with --resume, the resume likely failed.
-        // Clear cliSessionId so the next relaunch starts fresh.
+        // A quick exit right after `--resume` is AMBIGUOUS: the transcript may be
+        // gone (cleanupPeriodDays pruned it), or the launch simply failed for a
+        // reason that has nothing to do with the transcript — network down, API
+        // 5xx, a relaunch racing another relaunch. Clearing cliSessionId is
+        // irreversible: it throws away the whole conversation context. So it is
+        // only done when the evidence is unambiguous:
+        //  - the transcript file is genuinely missing on disk, or
+        //  - resuming the SAME transcript has failed this many times in a row.
+        // (2026-09-08: a 3.4 s exit during a network drop discarded a 13.7 MB,
+        // perfectly intact transcript. This guard is the fix.)
         const uptime = Date.now() - spawnedAt;
-        if (uptime < 5000 && options.resumeSessionId) {
-          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
-          session.cliSessionId = undefined;
+        if (uptime < CliLauncher.RESUME_QUICK_EXIT_MS && options.resumeSessionId) {
+          const resumeId = options.resumeSessionId;
+          const transcriptOnDisk = claudeTranscriptExists(resumeId);
+          const failures = (session.resumeFailures ?? 0) + 1;
+          session.resumeFailures = failures;
+          if (!transcriptOnDisk) {
+            console.error(`[cli-launcher] Session ${sessionId} exited ${uptime}ms after --resume and transcript ${resumeId} is missing on disk. Clearing cliSessionId for fresh start.`);
+            session.cliSessionId = undefined;
+            session.resumeFailures = 0;
+          } else if (failures >= CliLauncher.RESUME_MAX_FAILURES) {
+            console.error(`[cli-launcher] Session ${sessionId} exited ${uptime}ms after --resume ${failures} times in a row (transcript present). Clearing cliSessionId for fresh start.`);
+            session.cliSessionId = undefined;
+            session.resumeFailures = 0;
+          } else {
+            console.warn(`[cli-launcher] Session ${sessionId} exited ${uptime}ms after --resume (attempt ${failures}/${CliLauncher.RESUME_MAX_FAILURES}); transcript is on disk — keeping cliSessionId for the next relaunch.`);
+          }
+        } else if (uptime >= CliLauncher.RESUME_QUICK_EXIT_MS) {
+          // A run that survived the startup window proves the transcript resumes fine.
+          session.resumeFailures = 0;
         }
 
         // Runtime backstop for stdio mode: a quick non-zero exit whose stderr
