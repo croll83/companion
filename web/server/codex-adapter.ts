@@ -26,6 +26,11 @@ import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { INLINE_IMAGE_TYPES, saveAttachment, attachmentNote, type SavedAttachment } from "./attachment-store.js";
 
+/** Retryable: thread/resume refused because the previous app-server still holds the thread lock. */
+class CodexThreadLockConflict extends Error {
+  constructor(message: string) { super(message); this.name = "CodexThreadLockConflict"; }
+}
+
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
 interface JsonRpcRequest {
@@ -950,6 +955,10 @@ export class CodexAdapter implements IBackendAdapter {
 
   /** Max retries for thread/start or thread/resume during initialization. */
   private static readonly INIT_THREAD_MAX_RETRIES = 3;
+  /** Codex's error when a thread is still locked by a (dying) previous app-server. */
+  static isThreadLockConflict(message: string): boolean {
+    return /thread-store conflict|already has an active writer/i.test(message);
+  }
   private static readonly INIT_THREAD_RETRY_BASE_MS = 500;
 
   private async initialize(): Promise<void> {
@@ -1026,6 +1035,15 @@ export class CodexAdapter implements IBackendAdapter {
               const isTransport = resumeErr instanceof Error && resumeErr.message === "Transport closed";
               if (isTransport) throw resumeErr; // Let outer retry handle transient errors
               const resumeErrMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+              // "thread-store conflict: thread X already has an active writer" is
+              // NOT a bad rollout: the previous app-server still holds the
+              // thread lock while shutting down. Starting a fresh thread here
+              // throws away a perfectly good context. Treat it as transient —
+              // let the outer loop retry with backoff — and only give up (with
+              // the fallback below) once the retries are exhausted.
+              if (CodexAdapter.isThreadLockConflict(resumeErrMsg) && attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
+                throw new CodexThreadLockConflict(resumeErrMsg);
+              }
               console.warn(
                 `[codex-adapter] thread/resume failed for ${this.sessionId} (threadId=${this.options.threadId}), falling back to thread/start: ${resumeErrMsg}`,
               );
@@ -1062,11 +1080,12 @@ export class CodexAdapter implements IBackendAdapter {
         } catch (threadErr) {
           lastThreadError = threadErr;
           const isTransportClosed = threadErr instanceof Error && threadErr.message === "Transport closed";
-          if (!isTransportClosed || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
+          const isLockConflict = threadErr instanceof CodexThreadLockConflict;
+          if ((!isTransportClosed && !isLockConflict) || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
             break; // Non-transient error or last attempt — give up
           }
           const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt);
-          console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Transport closed), retrying in ${delay}ms`);
+          console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (${isLockConflict ? "thread lock held by previous process" : "Transport closed"}), retrying in ${delay}ms`);
           await new Promise((r) => setTimeout(r, delay));
         }
       }

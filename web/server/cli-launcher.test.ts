@@ -99,7 +99,8 @@ function createMockProc(pid = 12345) {
   exitResolve = resolve!;
   return {
     pid,
-    kill: vi.fn(),
+    // Like a real process: SIGTERM may be ignored, SIGKILL always ends it.
+    kill: vi.fn((sig?: string) => { if (sig === "SIGKILL") resolve!(137); }),
     exited: exitedPromise,
     stdout: null,
     stderr: null,
@@ -114,7 +115,7 @@ function createMockCodexProc(pid = 12345) {
   exitResolve = resolve!;
   return {
     pid,
-    kill: vi.fn(),
+    kill: vi.fn((sig?: string) => { if (sig === "SIGKILL") resolve!(137); }),
     exited: exitedPromise,
     stdin: new WritableStream<Uint8Array>(),
     stdout: new ReadableStream<Uint8Array>(),
@@ -163,6 +164,8 @@ beforeEach(() => {
   delete process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER;
   // Default to stdio for most tests; WS launcher behavior is covered explicitly below.
   process.env.COMPANION_CODEX_TRANSPORT = "stdio";
+  // relaunch() waits a real grace period for the old process; keep it tiny here.
+  process.env.COMPANION_RELAUNCH_GRACE_MS = "50";
   tempDir = mkdtempSync(join(tmpdir(), "launcher-test-"));
   store = new SessionStore(tempDir);
   launcher = new CliLauncher(3456);
@@ -176,6 +179,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.COMPANION_CODEX_TRANSPORT;
+  delete process.env.COMPANION_RELAUNCH_GRACE_MS;
   delete process.env.COMPANION_CODEX_WS_CONNECT_TIMEOUT_MS;
   delete process.env.COMPANION_CODEX_PONG_TIMEOUT_MS;
   rmSync(tempDir, { recursive: true, force: true });
@@ -1068,6 +1072,81 @@ describe("codex websocket launcher", () => {
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(proxy1.proc.kill).toHaveBeenCalledWith("SIGTERM");
     expect(mockSpawn).toHaveBeenCalledTimes(4);
+  });
+
+  it("relaunch escalates to SIGKILL and waits when the old codex process ignores SIGTERM", async () => {
+    // A Codex app-server that outlives the grace period keeps the thread-writer
+    // lock; spawning the replacement while it is alive makes thread/resume fail
+    // with "already has an active writer" and the adapter starts a FRESH thread
+    // (context lost — 2026-09-11). relaunch must not spawn until the old one is gone.
+    vi.useFakeTimers();
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 3101,
+      // Ignores SIGTERM (still flushing / holding the lock); only SIGKILL ends it.
+      kill: vi.fn((sig?: string) => { if (sig === "SIGKILL") resolveCodex1(137); }),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(3102);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    const codexProc2 = createMockProc(3103);
+    const proxy2 = createPendingCodexWsProxyProc(3104);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+    const relaunching = launcher.relaunch("test-session-id");
+    // Inside the grace window: SIGTERM sent, no SIGKILL yet, and NO new spawn.
+    await vi.advanceTimersByTimeAsync(CliLauncher.RELAUNCH_GRACE_MS - 1);
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(codexProc1.kill).not.toHaveBeenCalledWith("SIGKILL");
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+    // Grace expired → SIGKILL → the old proc exits → only now the replacement spawns.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGKILL");
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await relaunching;
+    expect(result).toEqual({ ok: true });
+    expect(mockSpawn).toHaveBeenCalledTimes(4);
+    vi.useRealTimers();
+  });
+
+  it("relaunch does not SIGKILL an old codex process that exits promptly on SIGTERM", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 3201,
+      kill: vi.fn(() => resolveCodex1(0)),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(3202);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(createMockProc(3203) as any)
+      .mockReturnValueOnce(createPendingCodexWsProxyProc(3204).proc as any);
+
+    launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    await new Promise((r) => setTimeout(r, 0));
+    await launcher.relaunch("test-session-id");
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(codexProc1.kill).not.toHaveBeenCalledWith("SIGKILL");
   });
 
   it("kill() returns true and kills the proxy when only a ws proxy remains", async () => {

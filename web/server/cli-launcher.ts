@@ -202,6 +202,15 @@ export class CliLauncher {
   static readonly RESUME_QUICK_EXIT_MS = 5000;
   /** Consecutive quick exits (with the transcript present) before giving up on it. */
   static readonly RESUME_MAX_FAILURES = 3;
+  /**
+   * Graceful-shutdown window for the OLD process on relaunch before SIGKILL.
+   * Env-overridable (COMPANION_RELAUNCH_GRACE_MS) so tests don't burn 5 real
+   * seconds per relaunch.
+   */
+  static get RELAUNCH_GRACE_MS(): number {
+    const v = Number(process.env.COMPANION_RELAUNCH_GRACE_MS);
+    return Number.isFinite(v) && v > 0 ? v : 5000;
+  }
   private sessions = new Map<string, SdkSessionInfo>();
   private processes = new Map<string, Subprocess>();
   /** Recent stderr (bounded) per stdio session, used to detect a too-old CLI. */
@@ -404,12 +413,28 @@ export class CliLauncher {
       this.codexWsProxies.delete(sessionId);
     }
     if (oldProc) {
+      // The old process MUST be gone before the new one starts: a Codex
+      // app-server that is still shutting down keeps the thread-writer lock,
+      // so a new app-server resuming the same thread hits "thread-store
+      // conflict: already has an active writer" and the adapter falls back to
+      // a FRESH thread — losing the whole context (observed 2026-09-11: a 2 s
+      // grace was not enough, the old process outlived it as an orphan holding
+      // the lock). Give it a real grace period, then escalate to SIGKILL and
+      // wait for the exit for real.
       try {
         oldProc.kill("SIGTERM");
-        await Promise.race([
-          oldProc.exited,
-          new Promise((r) => setTimeout(r, 2000)),
+        const gone = await Promise.race([
+          oldProc.exited.then(() => true),
+          new Promise<false>((r) => setTimeout(() => r(false), CliLauncher.RELAUNCH_GRACE_MS)),
         ]);
+        if (!gone) {
+          console.warn(`[cli-launcher] relaunch: old process for ${sessionId} still alive after ${CliLauncher.RELAUNCH_GRACE_MS}ms — SIGKILL`);
+          try { oldProc.kill("SIGKILL"); } catch {}
+          await Promise.race([
+            oldProc.exited,
+            new Promise((r) => setTimeout(r, Math.min(2000, CliLauncher.RELAUNCH_GRACE_MS))),
+          ]);
+        }
       } catch {}
       this.processes.delete(sessionId);
     } else if (info.pid) {

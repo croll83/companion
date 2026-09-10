@@ -815,6 +815,59 @@ describe("CodexAdapter", () => {
     expect(written).not.toContain('"method":"turn/steer"');
   });
 
+  // ─── thread/resume vs the thread-writer lock ───────────────────────────────
+  // When a relaunch races the previous app-server, thread/resume is refused with
+  // "thread-store conflict: thread X already has an active writer". That is a
+  // transient lock, not a bad rollout — falling back to thread/start there
+  // discards the whole context (observed 2026-09-11). The adapter must retry
+  // the resume and only give up after the retry budget.
+  const LOCK_ERR = { code: -32000, message: "Failed to create session: thread-store conflict: thread thr_old already has an active writer" };
+
+  it("retries thread/resume on a thread-lock conflict instead of starting a fresh thread", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 1st resume → refused (lock still held by the dying process)
+    const r1 = lastRequestId("thread/resume")!;
+    stdout.push(JSON.stringify({ id: r1, error: LOCK_ERR }) + "\n");
+    await new Promise((r) => setTimeout(r, 700)); // > INIT_THREAD_RETRY_BASE_MS
+
+    // It must have RETRIED the resume, not fallen back.
+    const r2 = lastRequestId("thread/resume")!;
+    expect(r2).toBeGreaterThan(r1);
+    expect(stdin.chunks.join("")).not.toContain('"method":"thread/start"');
+
+    // 2nd resume → lock released → same thread comes back.
+    stdout.push(JSON.stringify({ id: r2, result: { thread: { id: "thr_old" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(adapter.getThreadId()).toBe("thr_old");
+  });
+
+  it("gives up on the thread only after the retry budget, and says so", async () => {
+    const errors: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
+    adapter.onBrowserMessage((m) => { if (m.type === "error") errors.push(String((m as { message: string }).message)); });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Refuse every resume attempt (3 = INIT_THREAD_MAX_RETRIES), waiting out each backoff.
+    for (const wait of [700, 1300, 100]) {
+      const rid = lastRequestId("thread/resume")!;
+      stdout.push(JSON.stringify({ id: rid, error: LOCK_ERR }) + "\n");
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    // Only now the fallback: a fresh thread, and the user is told the context is gone.
+    const startId = lastRequestId("thread/start");
+    expect(startId).not.toBeNull();
+    stdout.push(JSON.stringify({ id: startId, result: { thread: { id: "thr_fresh" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(adapter.getThreadId()).toBe("thr_fresh");
+    expect(errors.some((e) => e.includes("could not be restored"))).toBe(true);
+  });
+
   it("uses executionCwd for turn/start when receiving user_message", async () => {
     const adapter = new CodexAdapter(proc as never, "test-session", {
       model: "o4-mini",
