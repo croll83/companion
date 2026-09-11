@@ -868,6 +868,41 @@ describe("CodexAdapter", () => {
     expect(errors.some((e) => e.includes("could not be restored"))).toBe(true);
   });
 
+  // ─── drift: known-but-unhandled vs genuinely unknown ──────────────────────
+  // A notification the protocol declares but the adapter ignores must NOT reach
+  // the user as an error (that produced a red banner on every turn, e.g.
+  // thread/goal/updated on 2026-09-11). Only something outside the protocol is
+  // worth alarming about.
+  async function adapterWithErrors() {
+    const errors: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((m) => { if (m.type === "error") errors.push(String((m as { message: string }).message)); });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+    errors.length = 0;
+    return { adapter, errors };
+  }
+
+  it("stays silent on a known notification it does not handle", async () => {
+    const { errors } = await adapterWithErrors();
+    stdout.push(JSON.stringify({
+      method: "thread/goal/updated",
+      params: { threadId: "thr_123", goal: { objective: "ship it", status: "active" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(errors.filter((e) => e.includes("protocol drift"))).toEqual([]);
+  });
+
+  it("still reports drift for a notification outside the protocol", async () => {
+    const { errors } = await adapterWithErrors();
+    stdout.push(JSON.stringify({ method: "thread/teleport/engaged", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(errors.some((e) => e.includes("protocol drift") && e.includes("thread/teleport/engaged"))).toBe(true);
+  });
+
   it("uses executionCwd for turn/start when receiving user_message", async () => {
     const adapter = new CodexAdapter(proc as never, "test-session", {
       model: "o4-mini",

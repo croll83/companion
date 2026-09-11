@@ -23,6 +23,7 @@ import type {
 } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
+import { isKnownServerNotification } from "./codex-protocol-known.js";
 import { log } from "./logger.js";
 import { INLINE_IMAGE_TYPES, saveAttachment, attachmentNote, type SavedAttachment } from "./attachment-store.js";
 
@@ -1782,7 +1783,15 @@ export class CodexAdapter implements IBackendAdapter {
         this.handleWsReconnected();
         break;
       default:
-        this.reportProtocolDrift("notification", method, { payload: params });
+        // A notification the protocol declares but we don't act on is normal —
+        // Codex emits plenty (goal/settings/telemetry updates). Note it once and
+        // stay silent. Only something OUTSIDE the known protocol is real drift
+        // worth putting in front of the user.
+        if (isKnownServerNotification(method)) {
+          this.noteUnhandledNotification(method);
+        } else {
+          this.reportProtocolDrift("notification", method, { payload: params });
+        }
         break;
     }
     } catch (err) {
@@ -2844,6 +2853,17 @@ export class CodexAdapter implements IBackendAdapter {
 
   private emit(msg: BrowserIncomingMessage): void {
     this.browserMessageCb?.(msg);
+  }
+
+  /** Log a known-but-unhandled notification once per adapter, at info level. */
+  private noteUnhandledNotification(method: string): void {
+    const key = `known-unhandled:${method}`;
+    if (this.protocolDriftSeen.has(key)) return;
+    this.protocolDriftSeen.add(key);
+    log.info("codex-adapter", "Ignoring a known Codex notification we don't handle", {
+      sessionId: this.sessionId,
+      method,
+    });
   }
 
   private reportProtocolDrift(
