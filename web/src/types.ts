@@ -28,6 +28,12 @@ export interface ChatMessage {
   stopReason?: string | null;
   /** Present when the model declined (stop_reason "refusal"); rendered as a banner. */
   refusal?: { category?: string; explanation?: string; model?: string };
+  /**
+   * Backend-reported error (protocol drift, init failure, …). Rendered in red
+   * on a dark plate: these used to look identical to the grey "system" hairline
+   * separators and were easy to scroll straight past.
+   */
+  isError?: boolean;
 }
 
 export interface TaskItem {

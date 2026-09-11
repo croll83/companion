@@ -981,6 +981,7 @@ function handleParsedMessage(
         role: "system",
         content: data.message,
         timestamp: Date.now(),
+        isError: true,
       });
       break;
     }

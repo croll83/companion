@@ -631,3 +631,40 @@ describe("MessageBubble - ContentBlockRenderer", () => {
     expect(screen.getByText("file contents here")).toBeTruthy();
   });
 });
+
+// Backend errors (protocol drift, init failures) arrive as role "system" — the
+// same role as the decorative hairline separators — so without their own
+// treatment they rendered as small grey italics and were easy to scroll past.
+describe("MessageBubble: backend errors", () => {
+  function sysMsg(over: Partial<ChatMessage>): ChatMessage {
+    return { id: "e1", role: "system", content: "hello", timestamp: 0, ...over };
+  }
+
+  it("renders an error as an alert, in the error colour", () => {
+    const { container } = render(
+      <MessageBubble message={sysMsg({ content: 'Codex protocol drift: unsupported incoming notification "x".', isError: true })} />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert.className).toContain("bg-cc-error");
+    expect(alert.className).toContain("border-cc-error");
+    expect(container.querySelector(".text-cc-error")).not.toBeNull();
+    expect(screen.getByText(/protocol drift/)).not.toBeNull();
+  });
+
+  it("leaves an ordinary system message as a plain separator", () => {
+    const { container } = render(<MessageBubble message={sysMsg({ content: "Session resumed" })} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(container.querySelector(".text-cc-error")).toBeNull();
+    expect(screen.getByText("Session resumed")).not.toBeNull();
+  });
+
+  it("keeps the refusal banner taking precedence over the error styling", () => {
+    // RefusalBanner has its own alert role, so assert on OUR plate specifically:
+    // the refusal path must win and the error plate must not be rendered.
+    const { container } = render(
+      <MessageBubble message={sysMsg({ content: "declined", isError: true, refusal: { category: "cyber" } })} />,
+    );
+    expect(container.querySelector(".bg-cc-error\\/10")).toBeNull();
+    expect(container.querySelector(".font-mono-code.text-cc-error")).toBeNull();
+  });
+});

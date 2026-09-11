@@ -11,6 +11,26 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     return <RefusalBanner refusal={message.refusal} />;
   }
 
+  // Backend errors (protocol drift, init failures) share role "system" with the
+  // decorative separators, so without their own treatment they read as ordinary
+  // chatter. Red on a dark plate, with an icon, so they stand out while
+  // scrolling.
+  if (message.role === "system" && message.isError) {
+    return (
+      <div className="flex justify-center py-1.5 min-w-0">
+        <div
+          role="alert"
+          className="flex items-start gap-2 max-w-[95%] px-3 py-2 rounded-[10px] bg-cc-error/10 border border-cc-error/40 shadow-sm"
+        >
+          <span aria-hidden className="shrink-0 text-cc-error text-[13px] leading-5">⚠</span>
+          <span className="text-[12px] text-cc-error font-mono-code min-w-0 break-words">
+            {message.content}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   if (message.role === "system") {
     return (
       <div className="flex items-center gap-3 py-1 min-w-0">
