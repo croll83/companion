@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SessionState } from "../../server/session-types.js";
+import { MAX_TOTAL_ATTACHMENT_BYTES } from "../utils/image.js";
 
 // Polyfill scrollIntoView for jsdom
 Element.prototype.scrollIntoView = vi.fn();
@@ -14,11 +15,17 @@ const mockCreatePrompt = vi.fn();
 // Build a controllable mock store state
 let mockStoreState: Record<string, unknown> = {};
 
-const mockReadFileAsBase64 = vi.fn();
+const mockPrepareImageForUpload = vi.fn();
 
-vi.mock("../utils/image.js", () => ({
-  readFileAsBase64: (...args: unknown[]) => mockReadFileAsBase64(...args),
-}));
+// Only the canvas-backed encoder is stubbed; the pure helpers and limits stay
+// real so the size guard is exercised against the value the app ships with.
+vi.mock("../utils/image.js", async () => {
+  const actual = await vi.importActual<typeof import("../utils/image.js")>("../utils/image.js");
+  return {
+    ...actual,
+    prepareImageForUpload: (...args: unknown[]) => mockPrepareImageForUpload(...args),
+  };
+});
 
 vi.mock("../ws.js", () => ({
   sendToSession: (...args: unknown[]) => mockSendToSession(...args),
@@ -864,7 +871,7 @@ describe("Composer toolbar interactions", () => {
 describe("Composer image attachment", () => {
   it("file input adds image thumbnails and remove button works", async () => {
     // Validates the file select handler processes images and renders thumbnails.
-    mockReadFileAsBase64.mockResolvedValue({ base64: "abc123", mediaType: "image/png" });
+    mockPrepareImageForUpload.mockResolvedValue({ base64: "abc123", mediaType: "image/png" });
     const { container } = render(<Composer sessionId="s1" />);
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
 
@@ -881,5 +888,25 @@ describe("Composer image attachment", () => {
     // Remove the image
     fireEvent.click(screen.getByLabelText("Remove image"));
     expect(screen.queryByAltText("test.png")).toBeFalsy();
+  });
+
+  it("refuses a batch that would exceed the frame limit instead of dropping it silently", async () => {
+    // base64 is ASCII, so one character is one byte on the wire.
+    mockPrepareImageForUpload.mockResolvedValue({
+      base64: "a".repeat(MAX_TOTAL_ATTACHMENT_BYTES + 1),
+      mediaType: "image/jpeg",
+    });
+    const { container } = render(<Composer sessionId="s1" />);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    const file = new File(["img"], "huge.jpg", { type: "image/jpeg" });
+    Object.defineProperty(fileInput, "files", { value: [file], writable: false });
+    fireEvent.change(fileInput);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("Attachments exceed");
+    });
+    // The attachment is rejected up front, so no oversized frame is ever sent.
+    expect(screen.queryByAltText("huge.jpg")).toBeFalsy();
   });
 });

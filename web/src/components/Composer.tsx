@@ -9,7 +9,12 @@ import { EffortSwitcher } from "./EffortSwitcher.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 
-import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
+import {
+  prepareImageForUpload,
+  totalAttachmentBytes,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+  type ImageAttachment,
+} from "../utils/image.js";
 
 /** Stable reference to avoid infinite re-renders in Zustand selectors. */
 const emptyStringArray: string[] = [];
@@ -19,9 +24,15 @@ interface CommandItem {
   type: "command" | "skill";
 }
 
+function oversizeMessage(): string {
+  const mb = Math.round(MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024));
+  return `Attachments exceed ${mb} MB. Remove one, or send them across separate messages.`;
+}
+
 export function Composer({ sessionId }: { sessionId: string }) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [savePromptOpen, setSavePromptOpen] = useState(false);
@@ -136,6 +147,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
   function handleSend() {
     const msg = text.trim();
     if (!msg || !isConnected) return;
+    if (totalAttachmentBytes(images) > MAX_TOTAL_ATTACHMENT_BYTES) {
+      setAttachError(oversizeMessage());
+      return;
+    }
     const clientMsgId = createClientMessageId();
 
     sendToSession(sessionId, {
@@ -156,6 +171,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
     setText("");
     setImages([]);
+    setAttachError(null);
     setSlashMenuOpen(false);
     mention.setMentionMenuOpen(false);
 
@@ -278,15 +294,28 @@ export function Composer({ sessionId }: { sessionId: string }) {
     const newImages: ImageAttachment[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue;
-      const { base64, mediaType } = await readFileAsBase64(file);
+      const { base64, mediaType } = await prepareImageForUpload(file);
       newImages.push({ name: file.name, base64, mediaType });
     }
-    setImages((prev) => [...prev, ...newImages]);
+    commitImages(newImages);
     e.target.value = "";
+  }
+
+  /** Append attachments only if the batch still fits in one WebSocket frame. */
+  function commitImages(newImages: ImageAttachment[]) {
+    if (newImages.length === 0) return;
+    const next = [...images, ...newImages];
+    if (totalAttachmentBytes(next) > MAX_TOTAL_ATTACHMENT_BYTES) {
+      setAttachError(oversizeMessage());
+      return;
+    }
+    setAttachError(null);
+    setImages(next);
   }
 
   function removeImage(index: number) {
     setImages((prev) => prev.filter((_, i) => i !== index));
+    setAttachError(null);
   }
 
   async function handlePaste(e: React.ClipboardEvent) {
@@ -297,12 +326,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
       if (!item.type.startsWith("image/")) continue;
       const file = item.getAsFile();
       if (!file) continue;
-      const { base64, mediaType } = await readFileAsBase64(file);
+      const { base64, mediaType } = await prepareImageForUpload(file);
       newImages.push({ name: `pasted-${Date.now()}.${file.type.split("/")[1]}`, base64, mediaType });
     }
     if (newImages.length > 0) {
       e.preventDefault();
-      setImages((prev) => [...prev, ...newImages]);
+      commitImages(newImages);
     }
   }
 
@@ -360,6 +389,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
       <div className="max-w-3xl mx-auto">
+        {attachError && (
+          <p className="px-3 pt-2 text-xs text-cc-error" role="alert">{attachError}</p>
+        )}
+
         {/* Image thumbnails */}
         {images.length > 0 && (
           <div className="flex items-center gap-2 mb-2 px-3 sm:px-0 flex-wrap">
