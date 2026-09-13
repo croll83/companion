@@ -240,6 +240,12 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
 const websocketHandlers = {
   idleTimeout: 0,
   sendPings: false, // Disable Bun ping timeout that kills CLI connections (code 1006)
+  // Image attachments ride inline (base64) in the user_message frame, so a
+  // couple of full-resolution camera photos blow past Bun's 16 MB default and
+  // the frame is dropped with no error surfaced to the client. The composer
+  // downscales and caps a batch at 32 MB (MAX_TOTAL_ATTACHMENT_BYTES); this
+  // leaves headroom above that.
+  maxPayloadLength: 64 * 1024 * 1024,
   open(ws: ServerWebSocket<SocketData>) {
     const data = ws.data;
     if (data.kind === "cli") {
