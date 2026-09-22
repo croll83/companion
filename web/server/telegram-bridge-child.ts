@@ -18,6 +18,7 @@ import { join, basename, extname } from "node:path";
 import { homedir } from "node:os";
 import type { TelegramBinding } from "./session-telegram-bindings.js";
 import { cliWorking, cpuTicks, type CpuSample } from "./cli-liveness.js";
+import { mdToTelegramHtml, stripMarkdown, splitTelegramHtml } from "./telegram-markdown.js";
 
 // ── Paths / config ───────────────────────────────────────────────────────────
 const COMPANION_HOME = process.env.COMPANION_HOME || join(homedir(), ".companion");
@@ -110,14 +111,37 @@ async function tg(method: string, body: Record<string, unknown>): Promise<any> {
     return { ok: false };
   }
 }
+/**
+ * Send the model's Markdown so Telegram actually renders it.
+ *
+ * Without a parse_mode Telegram prints the source verbatim (`**bold**`, `###`,
+ * fence backticks), which is what made long answers unreadable. We convert to
+ * Telegram HTML and, if Telegram still refuses the markup, resend the same
+ * content as plain text: a formatting problem must never cost the answer.
+ */
 async function sendText(chatId: number, topicId: number | null, text: string): Promise<void> {
-  for (let i = 0; i < text.length; i += TG_CHUNK) {
-    await tg("sendMessage", {
+  const chunks = splitTelegramHtml(mdToTelegramHtml(text), TG_CHUNK);
+  for (const chunk of chunks) {
+    const res = await tg("sendMessage", {
       chat_id: chatId,
       message_thread_id: topicId ?? undefined,
-      text: text.slice(i, i + TG_CHUNK),
+      text: chunk,
+      parse_mode: "HTML",
       disable_web_page_preview: true,
     });
+    if (res?.ok) continue;
+    // Telegram rejected the markup (bad entity, stray tag). Send the same piece
+    // as plain text rather than dropping it.
+    console.warn(`[tg] HTML rejected (${res?.description || "?"}), resending as plain text`);
+    const plain = stripMarkdown(chunk.replace(/<[^>]+>/g, ""));
+    for (let i = 0; i < plain.length; i += TG_CHUNK) {
+      await tg("sendMessage", {
+        chat_id: chatId,
+        message_thread_id: topicId ?? undefined,
+        text: plain.slice(i, i + TG_CHUNK),
+        disable_web_page_preview: true,
+      });
+    }
   }
 }
 async function react(chatId: number, messageId: number, emoji: string): Promise<void> {
