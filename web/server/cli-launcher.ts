@@ -33,6 +33,22 @@ import {
   authRefreshedAt,
 } from "./codex-home.js";
 
+/**
+ * Who asked for this kill/relaunch.
+ *
+ * Both paths SIGTERM a possibly-live CLI, and the log used to name only the
+ * session. When a session died mid-answer there was no way to tell a user
+ * Reconnect from an auto-relaunch from a model change, which left the
+ * "sessions die on refresh" bug unattributable for weeks.
+ */
+function callerOf(): string {
+  const lines = (new Error().stack ?? "").split("\n").slice(3, 7);
+  return lines
+    .map((l) => l.trim().replace(/^at\s+/, "").split(" ")[0])
+    .filter((f) => f && !f.startsWith("("))
+    .join(" < ") || "unknown";
+}
+
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
   const val = (process.env.COMPANION_CODEX_TRANSPORT || "ws").toLowerCase();
@@ -397,7 +413,7 @@ export class CliLauncher {
    * that connects back to the same session in the WsBridge.
    */
   async relaunch(sessionId: string): Promise<{ ok: boolean; error?: string }> {
-    console.log(`[cli-launcher] relaunch() requested for ${sessionId}`);
+    console.log(`[cli-launcher] relaunch() requested for ${sessionId} — by: ${callerOf()}`);
     const info = this.sessions.get(sessionId);
     if (!info) return { ok: false, error: "Session not found" };
 
@@ -1423,7 +1439,7 @@ export class CliLauncher {
   async kill(sessionId: string): Promise<boolean> {
     // Attribution: SIGTERMs used to be unlogged, making mid-turn kills
     // untraceable (see the 2026-09-02 lost-answer forensics).
-    console.log(`[cli-launcher] kill() requested for ${sessionId}`);
+    console.log(`[cli-launcher] kill() requested for ${sessionId} — by: ${callerOf()}`);
     const proxy = this.codexWsProxies.get(sessionId);
     if (proxy) {
       try { proxy.kill("SIGTERM"); } catch {}

@@ -204,6 +204,8 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.stdioReaderActive = true;
     const decoder = new TextDecoder();
     let buffer = "";
+    let bytesRead = 0;
+    let readerError: unknown = null;
     const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
     try {
       for (;;) {
@@ -213,6 +215,7 @@ export class ClaudeAdapter implements IBackendAdapter {
         // it emits unrelated output (control responses, diagnostics) too. The
         // self-heal is cleared in routeCLIMessage(), on a frame that can only
         // exist because our user message was taken up.
+        bytesRead += value.byteLength;
         buffer += decoder.decode(value, { stream: true });
         const lastNl = buffer.lastIndexOf("\n");
         if (lastNl === -1) continue;
@@ -223,11 +226,23 @@ export class ClaudeAdapter implements IBackendAdapter {
       const tail = (buffer + decoder.decode()).trim();
       if (tail) this.handleRawMessage(tail);
     } catch (err) {
+      readerError = err;
       console.error(`[claude-adapter] stdio reader error for session ${this.sessionId}:`, err);
     } finally {
       this.stdioReaderActive = false;
       this.clearInputAckTimer();
-      // stdout closed -> the CLI process is exiting -> transport is gone.
+      // Attribution for the "session died mid-answer" class of bug. A clean EOF
+      // on a process that is STILL ALIVE means something closed the stream on
+      // our side — not the CLI finishing — and the user loses the rest of the
+      // answer. Without this we cannot tell the two apart after the fact.
+      let alive: boolean | null = null;
+      try { alive = proc.pid ? (process.kill(proc.pid, 0), true) : null; } catch { alive = false; }
+      console.warn(
+        `[claude-adapter] stdio reader ENDED for session ${this.sessionId}: ` +
+        `cause=${readerError ? "error" : "eof"} processAlive=${alive} ` +
+        `exitCode=${proc.exitCode ?? "n/a"} killed=${(proc as { killed?: boolean }).killed ?? "n/a"} ` +
+        `bytesRead=${bytesRead} attachedForMs=${Date.now() - this.lastAttachTs}`,
+      );
       if (this.transportMode === "stdio" && this.stdioProc === proc) {
         this.stdioProc = null;
         this.disconnectCb?.();
