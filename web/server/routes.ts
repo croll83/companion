@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { loadCodexCache, pickerModels } from "./codex-models.js";
 import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
@@ -1188,35 +1189,13 @@ export function createRoutes(
     const backendId = c.req.param("id");
 
     if (backendId === "codex") {
-      // Read Codex model list from its local cache file
-      const cachePath = join(homedir(), ".codex", "models_cache.json");
-      if (!existsSync(cachePath)) {
+      // The freshest catalogue Codex has fetched anywhere — see codex-models.ts
+      // for why the host's ~/.codex alone goes stale.
+      const cache = loadCodexCache();
+      if (!cache) {
         return c.json({ error: "Codex models cache not found. Run codex once to populate it." }, 404);
       }
-      try {
-        const raw = readFileSync(cachePath, "utf-8");
-        const cache = JSON.parse(raw) as {
-          models: Array<{
-            slug: string;
-            display_name?: string;
-            description?: string;
-            visibility?: string;
-            priority?: number;
-          }>;
-        };
-        // Only return visible models, sorted by priority
-        const models = cache.models
-          .filter((m) => m.visibility === "list")
-          .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
-          .map((m) => ({
-            value: m.slug,
-            label: m.display_name || m.slug,
-            description: m.description || "",
-          }));
-        return c.json(models);
-      } catch (e) {
-        return c.json({ error: "Failed to parse Codex models cache" }, 500);
-      }
+      return c.json(pickerModels(cache));
     }
 
     // Claude models are hardcoded on the frontend

@@ -61,12 +61,17 @@ export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
 ];
 
+/**
+ * Offline fallback only — the picker normally comes from Codex's own catalogue
+ * via /backends/codex/models (see server/codex-models.ts). Mirrors that list as
+ * of 2026-09-23 so a failed fetch still offers models that exist.
+ */
 export const CODEX_MODELS: ModelOption[] = [
-  { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", icon: "\u2733" },
-  { value: "gpt-5.2-codex", label: "GPT-5.2 Codex", icon: "\u25C6" },
-  { value: "gpt-5.1-codex-max", label: "GPT-5.1 Max", icon: "\u25A0" },
-  { value: "gpt-5.2", label: "GPT-5.2", icon: "\u25CF" },
-  { value: "gpt-5.1-codex-mini", label: "GPT-5.1 Mini", icon: "\u26A1" },
+  { value: "gpt-6-astra", label: "GPT-6-Astra", icon: "\u25A0" },
+  { value: "gpt-6-sol", label: "GPT-6-Sol", icon: "\u25C6" },
+  { value: "gpt-6-luna", label: "GPT-6-Luna", icon: "\u25CF" },
+  { value: "gpt-5.6-terra", label: "GPT-5.6-Terra", icon: "\u25D5" },
+  { value: "gpt-5.5", label: "GPT-5.5", icon: "\u2726" },
 ];
 
 export const CLAUDE_MODES: ModeOption[] = [

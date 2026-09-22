@@ -145,9 +145,11 @@ describe("getDefaultAgentMode", () => {
 });
 
 describe("static model/mode lists", () => {
-  it("has codex models with GPT-5.x slugs", () => {
+  it("has codex models with gpt- slugs", () => {
+    // Pinned to the vendor prefix, not a generation: the list moves with each
+    // release (GPT-6 arrived 2026-09), and a generation check would fail on it.
     for (const m of CODEX_MODELS) {
-      expect(m.value).toMatch(/^gpt-5/);
+      expect(m.value).toMatch(/^gpt-/);
     }
   });
 

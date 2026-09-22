@@ -3626,15 +3626,18 @@ describe("GET /api/backends/:id/models", () => {
     expect(json.error).toContain("Codex models cache not found");
   });
 
-  it("returns 500 when cache file is malformed", async () => {
+  it("falls back to frontend defaults when no cache can be read", async () => {
+    // With a cache per Codex home, one corrupt file must not take the picker
+    // down — unreadable caches are skipped. Only when none parses does the
+    // menu fall back, and it does so the same way as when none exists.
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue("not valid json{{{");
 
     const res = await app.request("/api/backends/codex/models", { method: "GET" });
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(404);
     const json = await res.json();
-    expect(json.error).toContain("Failed to parse");
+    expect(json.error).toContain("not found");
   });
 
   it("returns 404 for claude backend (uses frontend defaults)", async () => {
