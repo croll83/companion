@@ -3,7 +3,7 @@ import { useStore } from "../store.js";
 import { api, type ArchiveInfo } from "../api.js";
 import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinearModal.js";
 import { TelegramBridgeModal } from "./TelegramBridgeModal.js";
-import { connectAllSessions, disconnectSession } from "../ws.js";
+import { disconnectSession, syncSessionSockets } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
 import { ProjectGroup } from "./ProjectGroup.js";
 import { SessionItem } from "./SessionItem.js";
@@ -165,8 +165,10 @@ export function Sidebar() {
               freshStore.removeSession(id);
             }
           }
-          // Connect all active sessions so we receive notifications for all of them
-          connectAllSessions(list);
+          // Re-evaluate which sockets to hold now that we know which CLIs are
+          // alive. Connecting to every session here made each refresh replay
+          // every history at once — the load that cost live answers.
+          syncSessionSockets(useStore.getState().currentSessionId);
           for (const s of list) {
             if (s.name && (!store.sessionNames.has(s.sessionId) || /^[A-Z][a-z]+ [A-Z][a-z]+$/.test(store.sessionNames.get(s.sessionId)!))) {
               const currentStoreName = store.sessionNames.get(s.sessionId);

@@ -65,6 +65,7 @@ vi.mock("./store.js", () => {
 vi.mock("./ws.js", () => ({
   connectSession: vi.fn(),
   setFocusedSession: vi.fn(),
+  syncSessionSockets: vi.fn(),
 }));
 
 vi.mock("./api.js", () => ({

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession, setFocusedSession } from "./ws.js";
+import { connectSession, setFocusedSession, syncSessionSockets } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
@@ -104,7 +104,9 @@ export default function App() {
       if (store.currentSessionId !== route.sessionId) {
         store.setCurrentSession(route.sessionId);
       }
-      connectSession(route.sessionId);
+      // Hold a socket for the session on screen and for any session whose CLI
+      // is still alive (so its notifications still arrive); park the rest.
+      syncSessionSockets(route.sessionId);
       // Tell the server this is the session on screen, so the idle-kill sweep
       // spares it while the user is still looking.
       setFocusedSession(route.sessionId);
@@ -113,6 +115,7 @@ export default function App() {
       if (store.currentSessionId !== null) {
         store.setCurrentSession(null);
       }
+      syncSessionSockets(null);
       setFocusedSession(null);
     }
     // For other pages (settings, etc.), preserve currentSessionId

@@ -28,15 +28,6 @@ function shouldReconnectSession(sessionId: string): boolean {
   return store.currentSessionId === sessionId;
 }
 
-function getReconnectCandidates(): string[] {
-  const store = useStore.getState();
-  const ids = new Set<string>();
-  for (const s of store.sdkSessions) {
-    if (!s.archived) ids.add(s.sessionId);
-  }
-  if (store.currentSessionId) ids.add(store.currentSessionId);
-  return Array.from(ids);
-}
 
 // ── Page visibility handling ─────────────────────────────────────────────────
 // Mobile browsers (Android Chrome, iOS Safari) aggressively kill WebSocket
@@ -59,19 +50,10 @@ if (typeof document !== "undefined") {
       }
     } else {
       pageHidden = false;
-      // Page is visible again — reconnect all known active sessions.
-      for (const sessionId of getReconnectCandidates()) {
-        // Re-check in case sdkSessions changed after candidate collection.
-        if (!shouldReconnectSession(sessionId)) continue;
-        const ws = sockets.get(sessionId);
-        if (!isSocketUsable(ws)) {
-          if (ws) {
-            try { ws.close(); } catch {}
-            sockets.delete(sessionId);
-          }
-          connectSession(sessionId);
-        }
-      }
+      // Page is visible again — reconnect ONLY the session on screen. Opening a
+      // socket per session made every refresh replay every history at once,
+      // which is what stalled the server and cost people live answers.
+      syncSessionSockets(focusedSessionId);
       // Re-assert focus immediately: coming back from another app must not wait
       // out the heartbeat, or a session can be reclaimed seconds after you look
       // at it again.
@@ -1274,6 +1256,7 @@ function handleParsedMessage(
 }
 
 export function connectSession(sessionId: string) {
+  parked.delete(sessionId);
   const existing = sockets.get(sessionId);
   if (isSocketUsable(existing)) return;
   if (existing) {
@@ -1317,6 +1300,7 @@ export function connectSession(sessionId: string) {
 }
 
 function scheduleReconnect(sessionId: string) {
+  if (parked.has(sessionId)) return; // closed on purpose — stay closed
   if (reconnectTimers.has(sessionId)) return;
   // Don't schedule reconnect when page is hidden — mobile browsers will just
   // kill the new connection too, creating a wasteful connect/disconnect cycle.
@@ -1354,22 +1338,77 @@ export function disconnectSession(sessionId: string) {
   pendingOutgoingBySession.delete(sessionId);
 }
 
+/**
+ * Close a session's socket but keep its place in the stream.
+ *
+ * Used when the user navigates away: the session stays live on the server
+ * (browser sockets are not what keeps a CLI alive), and on return
+ * `session_subscribe` replays only what was missed instead of re-sending the
+ * whole history. Deliberately does NOT clear lastSeq or the streaming
+ * reconstruction state — this is the same situation as a dropped socket that
+ * simply never auto-reconnects, which the resume path already handles.
+ *
+ * Contrast with disconnectSession(), which tears the session down for good.
+ */
+export function parkSession(sessionId: string) {
+  const timer = reconnectTimers.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(sessionId);
+  }
+  const ws = sockets.get(sessionId);
+  if (!ws) return;
+  parked.add(sessionId);
+  try { ws.close(); } finally { sockets.delete(sessionId); }
+  useStore.getState().setConnectionStatus(sessionId, "disconnected");
+}
+
+/** Sessions closed on purpose, so onclose does not schedule a reconnect. */
+const parked = new Set<string>();
+
+/**
+ * Open exactly the sockets that are worth holding, and park the rest.
+ *
+ * Two reasons to hold one: the session is on screen, or its CLI is still alive
+ * and can therefore still produce something worth notifying about. A dead
+ * session has nothing to say, so a socket for it only costs a full history
+ * replay on every refresh — which is what stalled the server and truncated
+ * live answers.
+ */
+export function syncSessionSockets(focusedSessionId: string | null): void {
+  // Mobile browsers kill backgrounded sockets, so connecting here would cycle.
+  if (pageHidden) return;
+  const store = useStore.getState();
+
+  const wanted = new Set<string>();
+  // Fall back to the store: a freshly created session may not be in sdkSessions
+  // yet, and losing its socket would strand it.
+  const focused = focusedSessionId ?? store.currentSessionId;
+  if (focused) wanted.add(focused);
+  for (const s of store.sdkSessions) {
+    if (!s.archived && s.state !== "exited") wanted.add(s.sessionId);
+  }
+
+  for (const [id] of sockets) {
+    if (!wanted.has(id)) parkSession(id);
+  }
+  for (const id of wanted) {
+    const ws = sockets.get(id);
+    if (isSocketUsable(ws)) continue;
+    if (ws) {
+      try { ws.close(); } catch { /* already closing */ }
+      sockets.delete(id);
+    }
+    connectSession(id);
+  }
+}
+
 export function disconnectAll() {
   for (const [id] of sockets) {
     disconnectSession(id);
   }
 }
 
-export function connectAllSessions(sessions: SdkSessionInfo[]) {
-  // Skip connection attempts when page is hidden — mobile browsers kill
-  // backgrounded WS connections, so connecting here would just cycle.
-  if (pageHidden) return;
-  for (const s of sessions) {
-    if (!s.archived) {
-      connectSession(s.sessionId);
-    }
-  }
-}
 
 export function waitForConnection(sessionId: string): Promise<void> {
   return new Promise((resolve, reject) => {
