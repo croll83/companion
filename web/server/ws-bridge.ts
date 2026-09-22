@@ -50,6 +50,7 @@ import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { isSessionWorking, noteWorkFromCliMessage, clearWorkTracking } from "./session-work.js";
+import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { log } from "./logger.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
@@ -472,6 +473,13 @@ export class WsBridge {
           ...cwdOverride,
           backend_type: session.backendType,
         };
+        // Codex effort levels are per-model and only readable server-side, so
+        // they travel with the session. This used to live in
+        // attachCodexAdapterHandlers, which nothing in production calls — its
+        // tests passed against code that never ran, and every Codex session
+        // reached the browser without levels, hiding the effort selector.
+        // Must happen before the broadcast below, or the UI gets them late.
+        if (session.backendType === "codex") this.applyCodexEffort(session);
         this.refreshGitInfo(session, { notifyPoller: true });
         this.broadcastToBrowsers(session, { type: "session_init", session: session.state });
         session.stateMachine.transition("ready", "system_init");
@@ -1317,6 +1325,29 @@ export class WsBridge {
     this.notifyCliConnection(session, false, "idle_kill");
   }
 
+  /**
+   * Put the Codex model's effort levels on the session state, and settle an
+   * effort the model can actually take.
+   *
+   * Levels differ per model (Astra reaches `ultra`, Luna stops at `max`), so a
+   * session carrying an effort its new model lacks — after a model switch —
+   * falls back to that model's own default instead of being relaunched with a
+   * level Codex would reject.
+   */
+  private applyCodexEffort(session: Session): void {
+    const model = session.state.model;
+    const levels = getCodexEffortLevels(model);
+    if (levels.length === 0) {
+      delete session.state.supportedEfforts;
+      return;
+    }
+    session.state.supportedEfforts = levels;
+    const current = session.state.effort;
+    if (!current || !levels.includes(current as (typeof levels)[number])) {
+      session.state.effort = getCodexDefaultEffort(model) ?? undefined;
+    }
+  }
+
   /** Append to messageHistory with cap. Delegates to ws-bridge-persist. */
   private appendHistory(session: Session, msg: BrowserIncomingMessage) {
     appendHistoryFn(session, msg);
@@ -1375,12 +1406,13 @@ export class WsBridge {
       return;
     }
 
-    // -- set_model (Claude): the CLI's set_model control_request silently
-    // no-ops, so handle this at the bridge level by emitting an event for
-    // the orchestrator to update the launcher's model and relaunch the CLI.
-    // Codex backend keeps the existing forward-to-adapter behavior since
-    // its set_model implementation works as expected.
-    if (msg.type === "set_model" && session.backendType === "claude") {
+    // -- set_model: neither CLI switches model in place. Claude's set_model
+    // control_request silently no-ops; the Codex adapter rejects it outright
+    // ("Runtime model switching not supported"). A comment here used to claim
+    // the Codex path worked, and the picker hid itself for Codex to match — so
+    // Codex sessions could never change model. Both go through the
+    // orchestrator, which relaunches on the resumed conversation.
+    if (msg.type === "set_model" && (session.backendType === "claude" || session.backendType === "codex")) {
       session.state.model = msg.model;
       this.persistSession(session);
       this.broadcastToBrowsers(session, {

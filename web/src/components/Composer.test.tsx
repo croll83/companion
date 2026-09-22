@@ -315,8 +315,8 @@ describe("Composer interrupt button", () => {
     render(<Composer sessionId="s1" />);
 
     expect(screen.getAllByTitle("Stop generation")[0]).toBeTruthy();
-    // Claude queues mid-turn input for the next turn; the title says so.
-    expect(screen.getAllByTitle("Queue for the next turn")[0]).toBeTruthy();
+    // Claude steers like Codex: the message joins the running turn.
+    expect(screen.getAllByTitle("Add to what it's doing now")[0]).toBeTruthy();
   });
 
   it("sends a message while running, which is how mobile steers", () => {
@@ -325,7 +325,7 @@ describe("Composer interrupt button", () => {
 
     const textarea = screen.getByLabelText("Message input");
     fireEvent.change(textarea, { target: { value: "also check the logs" } });
-    fireEvent.click(screen.getAllByTitle("Queue for the next turn")[0]);
+    fireEvent.click(screen.getAllByTitle("Add to what it's doing now")[0]);
 
     expect(mockSendToSession).toHaveBeenCalledWith(
       "s1",

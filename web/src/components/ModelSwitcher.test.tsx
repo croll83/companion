@@ -4,6 +4,11 @@ import "@testing-library/jest-dom";
 
 const mockSendToSession = vi.fn();
 
+const mockGetBackendModels = vi.fn();
+vi.mock("../api.js", () => ({
+  api: { getBackendModels: (...args: unknown[]) => mockGetBackendModels(...args) },
+}));
+
 vi.mock("../ws.js", () => ({
   sendToSession: (...args: unknown[]) => mockSendToSession(...args),
 }));
@@ -135,15 +140,38 @@ describe("ModelSwitcher", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
-  it("is hidden when backend is Codex", () => {
-    // Codex does not support runtime model switching
+  // Codex used to be hidden here on the claim that it could not switch model;
+  // it switches by relaunching on the resumed thread, like Claude.
+  it("offers Codex's own catalogue and switches model", async () => {
+    mockGetBackendModels.mockResolvedValue([
+      { value: "gpt-6-astra", label: "GPT-6-Astra" },
+      { value: "gpt-6-sol", label: "GPT-6-Sol" },
+      { value: "gpt-6-luna", label: "GPT-6-Luna" },
+    ]);
     resetStore({
       sdkSessions: [
-        { sessionId: "s1", model: "gpt-5.3-codex", backendType: "codex", cwd: "/repo" },
+        { sessionId: "s1", model: "gpt-6-astra", backendType: "codex", cwd: "/repo" },
       ],
     });
-    const { container } = render(<ModelSwitcher sessionId="s1" />);
-    expect(container.innerHTML).toBe("");
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+
+    fireEvent.click(await screen.findByRole("option", { name: /GPT-6-Luna/ }));
+
+    expect(mockGetBackendModels).toHaveBeenCalledWith("codex");
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "gpt-6-luna" });
+  });
+
+  it("falls back to the static Codex list when the catalogue cannot be fetched", () => {
+    mockGetBackendModels.mockRejectedValue(new Error("offline"));
+    resetStore({
+      sdkSessions: [
+        { sessionId: "s1", model: "gpt-6-astra", backendType: "codex", cwd: "/repo" },
+      ],
+    });
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    expect(screen.getByRole("option", { name: /GPT-6-Sol/ })).toBeInTheDocument();
   });
 
   it("is hidden when CLI is not connected", () => {

@@ -23,6 +23,7 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -227,7 +228,23 @@ export class SessionOrchestrator {
     companionBus.on("session:model-change", async ({ sessionId, model }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      if (info.backendType !== "claude") return;
+      // Neither CLI can switch model in place (Claude's set_model no-ops, Codex
+      // rejects it), so both relaunch — Claude with --resume, Codex with
+      // thread/resume — and the conversation carries over.
+      if (info.backendType !== "claude" && info.backendType !== "codex") return;
+      if (info.backendType === "codex") {
+        // The effort is passed at spawn (-c model_reasoning_effort), before the
+        // new model reports its levels. A level the new model lacks (Astra's
+        // `ultra` on Luna) must be settled now, not after Codex rejects it.
+        const levels = getCodexEffortLevels(model);
+        if (info.effort && levels.length > 0 && !levels.includes(info.effort as (typeof levels)[number])) {
+          const fallback = getCodexDefaultEffort(model);
+          log.info("orchestrator", "Effort not supported by new Codex model — using its default", {
+            sessionId, model, from: info.effort, to: fallback,
+          });
+          if (fallback) this.launcher.setEffort(sessionId, fallback);
+        }
+      }
       log.info("orchestrator", "Model change → relaunching CLI", {
         sessionId,
         from: info.model,

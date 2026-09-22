@@ -358,18 +358,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   const sessionStatus = useStore((s) => s.sessionStatus);
   const isRunning = sessionStatus.get(sessionId) === "running";
-  // Codex can fold new input into the turn already running (turn/steer); Claude
-  // queues it for the next one. The composer says which, because "send" means
-  // two different things and the user has to know before pressing enter.
-  const willSteer = isCodex && isRunning;
+  // Both backends fold new input into the turn already running: Codex through
+  // turn/steer, Claude because the adapter writes the message straight to the
+  // CLI's stdin and the CLI picks it up mid-turn. Nothing is queued on our side.
+  const willSteer = isRunning;
   const canSend = text.trim().length > 0 && isConnected;
   // While a turn runs the send button stays next to stop: on a phone Enter only
   // inserts a newline, so without it there is no way to steer mid-turn.
-  const sendTitle = willSteer
-    ? "Add to what it's doing now"
-    : isRunning
-      ? "Queue for the next turn"
-      : "Send message";
+  const sendTitle = willSteer ? "Add to what it's doing now" : "Send message";
 
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
@@ -667,9 +663,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
                 ? "Waiting for CLI connection..."
                 : willSteer
                   ? "Add to what it's doing now... (/ + @)"
-                  : isRunning
-                    ? "Queue a message for the next turn... (/ + @)"
-                    : "Type a message... (/ + @)"}
+                  : "Type a message... (/ + @)"}
               disabled={!isConnected}
               rows={1}
               className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
