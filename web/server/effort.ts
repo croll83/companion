@@ -28,13 +28,18 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 export const DEFAULT_EFFORT: EffortLevel = "high";
 
 /**
- * Effort levels each model accepts. A model absent from this map does not
+ * Effort levels each model accepts. Entries outlive the model picker on
+ * purpose: a session started on an older model keeps running on it, and
+ * dropping its row here would silently stop passing --effort mid-session.
+ *
+ * A model absent from this map does not
  * support effort at all (e.g. Sonnet/Haiku, Codex) and must never receive a
  * `--effort` flag — passing one to a non-supporting model is rejected.
  */
 const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
   "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
   "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],

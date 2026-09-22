@@ -53,9 +53,8 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
 
 export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-fable-5-1", label: "Fable 5.1", icon: "" },
+  { value: "claude-opus-5-5", label: "Opus 5.5", icon: "" },
   { value: "claude-opus-5", label: "Opus 5", icon: "" },
-  { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
-  { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
   { value: "claude-opus-4-6", label: "Opus 4.6", icon: "" },
   { value: "claude-sonnet-5", label: "Sonnet 5", icon: "" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
@@ -111,7 +110,7 @@ export function getAgentModesForBackend(backend: BackendType): ModeOption[] {
  * so the list can be reordered (e.g. Fable 5 shown first) without silently
  * changing the default to a pricier model.
  */
-export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-5-5";
 
 export function getDefaultModel(backend: BackendType): string {
   return backend === "codex" ? CODEX_MODELS[0].value : DEFAULT_CLAUDE_MODEL;

@@ -61,9 +61,10 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // Claude lineup: Opus 4.8, Fable 5.1, Opus 4.7, Opus 4.6, Sonnet 5, Haiku 4.5.
+    // Claude lineup: Fable 5.1, Opus 5.5, Opus 5, Opus 4.6, Sonnet 5, Haiku 4.5.
     // Match exact labels because /Opus/ alone now matches multiple entries.
-    expect(screen.getByRole("option", { name: /Opus 4\.7/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Opus 5\.5/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Opus 5(?!\.)/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Opus 4\.6/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Sonnet 5/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Haiku 4\.5/ })).toBeInTheDocument();
@@ -79,9 +80,9 @@ describe("ModelSwitcher", () => {
     const sonnetOption = screen.getByRole("option", { name: /Sonnet 5/ });
     expect(sonnetOption).toHaveAttribute("aria-selected", "false");
 
-    // The newly added Opus 4.7 is not the active one in this fixture.
-    const opus47 = screen.getByRole("option", { name: /Opus 4\.7/ });
-    expect(opus47).toHaveAttribute("aria-selected", "false");
+    // The newly added Opus 5.5 is not the active one in this fixture.
+    const opus55 = screen.getByRole("option", { name: /Opus 5\.5/ });
+    expect(opus55).toHaveAttribute("aria-selected", "false");
   });
 
   it("sends set_model via WebSocket on selection", () => {

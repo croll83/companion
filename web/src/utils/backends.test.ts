@@ -100,7 +100,13 @@ describe("getDefaultModel", () => {
     // The default is intentionally NOT CLAUDE_MODELS[0]: the list can be
     // reordered (e.g. Fable 5 shown first) without changing the default.
     expect(getDefaultModel("claude")).toBe(DEFAULT_CLAUDE_MODEL);
-    expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4-8");
+    expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-5-5");
+  });
+
+  it("keeps the default model selectable in the picker", () => {
+    // A default missing from CLAUDE_MODELS leaves the dropdown showing nothing
+    // for every new session.
+    expect(CLAUDE_MODELS.map((m) => m.value)).toContain(DEFAULT_CLAUDE_MODEL);
   });
 
   it("returns first codex model for codex backend", () => {
