@@ -961,6 +961,21 @@ export class CodexAdapter implements IBackendAdapter {
     return /thread-store conflict|already has an active writer/i.test(message);
   }
   private static readonly INIT_THREAD_RETRY_BASE_MS = 500;
+  /**
+   * How long to keep retrying a resume that is blocked by a thread lock.
+   *
+   * The lock is held by the *previous* app-server while it shuts down, so the
+   * wait is bounded by that process's exit, not by a fixed number of tries. The
+   * costs are wildly asymmetric: waiting costs seconds, while giving up starts a
+   * fresh thread and abandons the conversation for good. The old 3-attempt budget
+   * expired after ~1.5s and routinely lost contexts that were about to unlock.
+   */
+  private static get THREAD_LOCK_MAX_WAIT_MS(): number {
+    const raw = parseInt(process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS ?? "", 10);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 60_000;
+  }
+  /** Cap for the lock-conflict backoff, so long waits stay responsive. */
+  private static readonly THREAD_LOCK_RETRY_CAP_MS = 5_000;
 
   private async initialize(): Promise<void> {
     if (this.initInProgress) {
@@ -1006,7 +1021,10 @@ export class CodexAdapter implements IBackendAdapter {
       let threadStarted = false;
       let lastThreadError: unknown;
 
-      for (let attempt = 0; attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES; attempt++) {
+      const lockWaitStartedAt = Date.now();
+      const lockBudgetLeft = () =>
+        Date.now() - lockWaitStartedAt < CodexAdapter.THREAD_LOCK_MAX_WAIT_MS;
+      for (let attempt = 0; ; attempt++) {
         // Bail out early if superseded by a newer init cycle
         if (myEpoch !== this.initEpoch) {
           console.warn(`[codex-adapter] Session ${this.sessionId}: init epoch ${myEpoch} superseded during thread start, aborting`);
@@ -1042,7 +1060,7 @@ export class CodexAdapter implements IBackendAdapter {
               // throws away a perfectly good context. Treat it as transient —
               // let the outer loop retry with backoff — and only give up (with
               // the fallback below) once the retries are exhausted.
-              if (CodexAdapter.isThreadLockConflict(resumeErrMsg) && attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
+              if (CodexAdapter.isThreadLockConflict(resumeErrMsg) && lockBudgetLeft()) {
                 throw new CodexThreadLockConflict(resumeErrMsg);
               }
               console.warn(
@@ -1082,10 +1100,16 @@ export class CodexAdapter implements IBackendAdapter {
           lastThreadError = threadErr;
           const isTransportClosed = threadErr instanceof Error && threadErr.message === "Transport closed";
           const isLockConflict = threadErr instanceof CodexThreadLockConflict;
-          if ((!isTransportClosed && !isLockConflict) || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
-            break; // Non-transient error or last attempt — give up
+          const canRetry = isLockConflict
+            ? lockBudgetLeft()
+            : isTransportClosed && attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES - 1;
+          if (!canRetry) {
+            break; // Non-transient error, or the retry budget is spent — give up
           }
-          const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt);
+          const delay = Math.min(
+            CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt),
+            isLockConflict ? CodexAdapter.THREAD_LOCK_RETRY_CAP_MS : Infinity,
+          );
           console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (${isLockConflict ? "thread lock held by previous process" : "Transport closed"}), retrying in ${delay}ms`);
           await new Promise((r) => setTimeout(r, delay));
         }

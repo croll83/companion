@@ -70,6 +70,8 @@ describe("CodexAdapter", () => {
   let stdout: MockReadableStream;
 
   beforeEach(() => {
+    // Tests that shorten or lengthen the lock budget must not leak it to others.
+    delete process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS;
     const mock = createMockProcess();
     proc = mock.proc;
     stdin = mock.stdin;
@@ -845,7 +847,34 @@ describe("CodexAdapter", () => {
     expect(adapter.getThreadId()).toBe("thr_old");
   });
 
+  it("keeps waiting for the lock well past the old 1.5s budget", async () => {
+    // Regression (2026-09-22, session 991dbe91): the lock budget was 3 attempts
+    // with 500ms exponential backoff, so it expired ~1.5s after the first
+    // refusal. The dying app-server had not released the lock yet, the adapter
+    // started a fresh thread, and a 100-turn conversation was abandoned.
+    process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS = "30000";
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Refuse for longer than the whole old budget.
+    for (const wait of [700, 1300]) {
+      const rid = lastRequestId("thread/resume")!;
+      stdout.push(JSON.stringify({ id: rid, error: LOCK_ERR }) + "\n");
+      await new Promise((r) => setTimeout(r, wait));
+    }
+
+    // Still resuming, and it has NOT abandoned the context.
+    expect(stdin.chunks.join("")).not.toContain('"method":"thread/start"');
+    const rid = lastRequestId("thread/resume")!;
+    stdout.push(JSON.stringify({ id: rid, result: { thread: { id: "thr_old" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(adapter.getThreadId()).toBe("thr_old");
+  });
+
   it("gives up on the thread only after the retry budget, and says so", async () => {
+    process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS = "300";
     const errors: string[] = [];
     const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
     adapter.onBrowserMessage((m) => { if (m.type === "error") errors.push(String((m as { message: string }).message)); });
@@ -853,8 +882,8 @@ describe("CodexAdapter", () => {
     stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
     await new Promise((r) => setTimeout(r, 30));
 
-    // Refuse every resume attempt (3 = INIT_THREAD_MAX_RETRIES), waiting out each backoff.
-    for (const wait of [700, 1300, 100]) {
+    // Refuse until the (here: tiny) lock budget is spent.
+    for (const wait of [700, 100]) {
       const rid = lastRequestId("thread/resume")!;
       stdout.push(JSON.stringify({ id: rid, error: LOCK_ERR }) + "\n");
       await new Promise((r) => setTimeout(r, wait));
