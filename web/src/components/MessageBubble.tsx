@@ -5,6 +5,42 @@ import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { CopyButton } from "./CopyButton.js";
 import { RefusalBanner } from "./RefusalBanner.js";
+import { useStore } from "../store.js";
+import { parseLocalFileLink } from "../utils/local-file-link.js";
+
+/**
+ * A link in an assistant message.
+ *
+ * Models write files and then mention them by absolute path. Markdown turns
+ * `/home/u/report.md` into an href that the browser resolves against
+ * Companion's own origin, so clicking it hits a route that doesn't exist. When
+ * a link is really a local path, open it in the viewer instead; everything else
+ * behaves like a normal external link.
+ */
+function SmartLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const openFileViewer = useStore((s) => s.openFileViewer);
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const localPath = parseLocalFileLink(href, origin);
+
+  if (localPath) {
+    return (
+      <a
+        href={href}
+        title={localPath}
+        onClick={(e) => { e.preventDefault(); openFileViewer(localPath); }}
+        className="text-cc-primary hover:underline cursor-pointer"
+      >
+        {children}
+      </a>
+    );
+  }
+
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="text-cc-primary hover:underline">
+      {children}
+    </a>
+  );
+}
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.refusal) {
@@ -249,11 +285,7 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
           li: ({ children }) => (
             <li className="text-cc-fg">{children}</li>
           ),
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" className="text-cc-primary hover:underline">
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => <SmartLink href={href}>{children}</SmartLink>,
           blockquote: ({ children }) => (
             <blockquote className="border-l-2 border-cc-primary/30 pl-3 my-2 text-cc-muted italic">
               {children}

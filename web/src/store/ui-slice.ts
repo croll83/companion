@@ -66,6 +66,10 @@ export interface UiSlice {
   markChatTabReentry: (sessionId: string) => void;
   setDiffPanelSelectedFile: (sessionId: string, filePath: string | null) => void;
   setDiffBase: (base: DiffBase) => void;
+  /** Absolute path of the local file shown in the viewer, or null when closed. */
+  viewerFilePath: string | null;
+  openFileViewer: (path: string) => void;
+  closeFileViewer: () => void;
 }
 
 export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => ({
@@ -158,6 +162,9 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
     set((s) => ({ currentSessionId: null, homeResetKey: s.homeResetKey + 1 }));
   },
   setActiveTab: (tab) => set({ activeTab: tab }),
+  viewerFilePath: null,
+  openFileViewer: (path) => set({ viewerFilePath: path }),
+  closeFileViewer: () => set({ viewerFilePath: null }),
   markChatTabReentry: (sessionId) =>
     set((s) => {
       const chatTabReentryTickBySession = new Map(s.chatTabReentryTickBySession);

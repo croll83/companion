@@ -16,6 +16,7 @@ import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { UpdateOverlay } from "./components/UpdateOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
+import { FileViewerModal } from "./components/FileViewerModal.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -343,6 +344,7 @@ export default function App() {
       <UpdateOverlay active={updateOverlayActive} />
       <DockerUpdateDialog />
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
+      <FileViewerModal />
     </div>
   );
 }
