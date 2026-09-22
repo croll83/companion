@@ -252,7 +252,15 @@ function AssistantAvatar() {
   );
 }
 
-function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
+/**
+ * Markdown with the app's styling applied element by element.
+ *
+ * Tailwind's preflight strips the browser defaults for headings, lists and
+ * emphasis, so a bare <Markdown> renders as flat body text (tables survive
+ * because the browser lays them out natively). Every consumer must go through
+ * here, or it silently loses that formatting.
+ */
+export function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
   return (
     <div className="markdown-body text-[14px] sm:text-[15px] text-cc-fg leading-relaxed overflow-hidden">
       <Markdown

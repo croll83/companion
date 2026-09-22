@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { useStore } from "../store.js";
+import { MarkdownContent } from "./MessageBubble.js";
 import { api } from "../api.js";
 import { fileKind, type FileKind } from "../utils/local-file-link.js";
 
@@ -129,9 +128,7 @@ export function FileViewerModal() {
           )}
 
           {!loading && !error && kind === "markdown" && content !== null && (
-            <div className="text-[13px] text-cc-fg leading-relaxed break-words markdown-body">
-              <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
-            </div>
+            <MarkdownContent text={content} />
           )}
 
           {!loading && !error && kind === "text" && content !== null && (

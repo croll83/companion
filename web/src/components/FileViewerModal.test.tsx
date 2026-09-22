@@ -2,6 +2,8 @@
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { useStore } from "../store.js";
 
+// The viewer renders through the chat's MarkdownContent so both get the same
+// element styling; mock the library underneath it, not the component.
 vi.mock("react-markdown", () => ({
   default: ({ children }: { children: string }) => <div data-testid="md">{children}</div>,
 }));
@@ -85,5 +87,16 @@ describe("FileViewerModal", () => {
     await waitFor(() => expect(screen.getByRole("dialog")).not.toBeNull());
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(useStore.getState().viewerFilePath).toBeNull());
+  });
+
+  it("renders markdown through the shared, styled renderer", async () => {
+    // A bare <Markdown> loses headings/bold/lists to Tailwind's preflight, so
+    // the viewer must go through MarkdownContent like the chat does. Its
+    // wrapper is the only place that carries markdown-body.
+    readFile.mockResolvedValue({ path: "/h/a.md", content: "# T\n\n**b**\n\n- x" });
+    render(<FileViewerModal />);
+    open("/h/a.md");
+    await waitFor(() => expect(screen.getByTestId("md")).not.toBeNull());
+    expect(screen.getByTestId("md").closest(".markdown-body")).not.toBeNull();
   });
 });
