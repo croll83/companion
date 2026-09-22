@@ -1064,6 +1064,9 @@ export class WsBridge {
     trigger: string,
     delayMs: number = WsBridge.DISCONNECT_DEBOUNCE_MS,
   ): void {
+    // Capture this BEFORE the phase moves: at confirm time the session is
+    // "terminated", which reads as at-rest and would lose the distinction.
+    const wasWorking = isSessionWorking(session);
     session.stateMachine.transition("reconnecting", trigger);
 
     const existing = this.disconnectTimers.get(sessionId);
@@ -1080,8 +1083,15 @@ export class WsBridge {
       // Stop the idle-kill watchdog — the CLI is dead, nothing to reclaim.
       this.stopIdleKillWatchdog(sessionId);
 
-      // No auto-relaunch — user clicks "Reconnect" in the UI which calls
-      // POST /api/sessions/:id/relaunch explicitly.
+      // An idle session stays down on purpose: relaunching every one of them
+      // after a server restart is what used to fill RAM with 20+ dead CLIs.
+      // A session that was MID-TURN is different — the user is losing an answer
+      // in progress, and leaving it down means they must click Reconnect and
+      // then re-send the message to get it back. Bring that one back itself.
+      if (wasWorking) {
+        log.info("ws-bridge", "Disconnected mid-turn — relaunching", { sessionId, trigger });
+        companionBus.emit("session:relaunch-needed", { sessionId });
+      }
     }, delayMs));
   }
 

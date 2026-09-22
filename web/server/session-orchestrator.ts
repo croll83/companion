@@ -852,7 +852,24 @@ export class SessionOrchestrator {
     await new Promise((r) => setTimeout(r, RELAUNCH_GRACE_MS));
     if (this.wsBridge.isCliConnected(sessionId)) { this.relaunchingSet.delete(sessionId); return; }
     const freshInfo = this.launcher.getSession(sessionId);
-    if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
+
+    // A CONFIRMED disconnect outranks every liveness signal below.
+    //
+    // Those signals describe the *process*; this one describes the *transport*.
+    // When the CLI's stdout reaches EOF the process keeps running and its
+    // launcher record still says "connected", but we can never read another
+    // byte from it — the session is dead to us while looking perfectly healthy
+    // to every check here. The guards then declined to relaunch, the UI sat on
+    // "CLI disconnected", and the only way out was a manual Reconnect followed
+    // by re-sending the message. Observed on 2026-09-23 with
+    // `stdio reader ENDED cause=eof processAlive=true killed=false`.
+    //
+    // relaunch() SIGTERMs whatever is still running, so replacing a live but
+    // unreachable process is safe.
+    const phase = this.wsBridge.getSession(sessionId)?.stateMachine.phase;
+    const disconnectConfirmed = phase === "terminated";
+
+    if (!disconnectConfirmed && freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
       this.relaunchingSet.delete(sessionId); return;
     }
     // Only check PID liveness if the session is NOT already "exited".
@@ -862,7 +879,7 @@ export class SessionOrchestrator {
     // For containerized sessions, use container liveness instead of PID check
     // (the PID is the `docker exec` wrapper, which exits immediately for some
     // transports and is unreliable for container health).
-    if (freshInfo && freshInfo.state !== "exited") {
+    if (!disconnectConfirmed && freshInfo && freshInfo.state !== "exited") {
       if (freshInfo.containerId) {
         const containerState = containerManager.isContainerAlive(freshInfo.containerId);
         if (containerState === "running") {

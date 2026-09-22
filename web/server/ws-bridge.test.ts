@@ -4919,6 +4919,40 @@ describe("Idle kill watchdog", () => {
     return { cli, session };
   }
 
+  // ─── Regression: disconnected mid-turn must come back on its own ─────────
+  // The CLI stdout can reach EOF while the process is still alive and its
+  // launcher record still reads "connected" (observed 2026-09-23:
+  // `cause=eof processAlive=true killed=false`). The session was then dead to
+  // us but healthy to every liveness check, so nothing relaunched it and the
+  // user had to click Reconnect and re-send the message.
+  it("relaunches itself when the transport dies mid-turn", async () => {
+    const relaunchNeeded = vi.fn();
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+
+    const { cli, session } = await makeReadySession("s1");
+    session.stateMachine.transition("streaming", "user_message");
+
+    bridge.handleCLIClose(cli);
+    await vi.advanceTimersByTimeAsync(16_000); // past the 15s disconnect debounce
+
+    expect(session.stateMachine.phase).toBe("terminated");
+    expect(relaunchNeeded).toHaveBeenCalledWith("s1");
+    off();
+  });
+
+  it("leaves an idle session down so restarts do not respawn every CLI", async () => {
+    const relaunchNeeded = vi.fn();
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+
+    const { cli } = await makeReadySession("s1"); // at rest, nothing in flight
+
+    bridge.handleCLIClose(cli);
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    expect(relaunchNeeded).not.toHaveBeenCalled();
+    off();
+  });
+
   it("emits idle-kill + cli_disconnected after threshold while at rest (ready)", async () => {
     // No activity (user or CLI) for the threshold while in "ready" → the watchdog
     // emits session:idle-kill AND notifies browsers via cli_disconnected.

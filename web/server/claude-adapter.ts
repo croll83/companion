@@ -10,6 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { ServerWebSocket, Subprocess } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import type {
@@ -235,11 +236,19 @@ export class ClaudeAdapter implements IBackendAdapter {
       // on a process that is STILL ALIVE means something closed the stream on
       // our side — not the CLI finishing — and the user loses the rest of the
       // answer. Without this we cannot tell the two apart after the fact.
-      let alive: boolean | null = null;
-      try { alive = proc.pid ? (process.kill(proc.pid, 0), true) : null; } catch { alive = false; }
+      // kill(pid, 0) succeeds on a zombie too, so it cannot tell "still running"
+      // from "just exited, not yet reaped" — the exact distinction that matters
+      // here. Read the state letter from /proc instead (R/S/D running, Z zombie).
+      let procState = "unknown";
+      if (proc.pid) {
+        try {
+          const stat = readFileSync(`/proc/${proc.pid}/stat`, "utf8");
+          procState = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] ?? "unknown";
+        } catch { procState = "gone"; }
+      }
       console.warn(
         `[claude-adapter] stdio reader ENDED for session ${this.sessionId}: ` +
-        `cause=${readerError ? "error" : "eof"} processAlive=${alive} ` +
+        `cause=${readerError ? "error" : "eof"} procState=${procState} ` +
         `exitCode=${proc.exitCode ?? "n/a"} killed=${(proc as { killed?: boolean }).killed ?? "n/a"} ` +
         `bytesRead=${bytesRead} attachedForMs=${Date.now() - this.lastAttachTs}`,
       );
