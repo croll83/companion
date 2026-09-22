@@ -1049,6 +1049,10 @@ function handleParsedMessage(
     }
 
     case "message_history": {
+      const isOlderPage = data.prepend === true;
+      if (typeof data.startIndex === "number" && typeof data.total === "number") {
+        store.setHistoryWindow(sessionId, data.startIndex, data.total);
+      }
       const chatMessages: ChatMessage[] = [];
       const toolActivityById = new Map<string, ToolActivityEntry>();
       for (let i = 0; i < data.messages.length; i++) {
@@ -1161,7 +1165,7 @@ function handleParsedMessage(
       }
       if (chatMessages.length > 0) {
         const existing = store.messages.get(sessionId) || [];
-        if (existing.length === 0) {
+        if (existing.length === 0 && !isOlderPage) {
           // Initial connect: history is the full truth
           store.setMessages(sessionId, chatMessages);
         } else {
@@ -1184,12 +1188,18 @@ function handleParsedMessage(
           store.setMessages(sessionId, merged);
         }
       }
+      if (isOlderPage) {
+        // Keep the live activity on screen; an older page only adds to it.
+        for (const entry of store.toolActivity.get(sessionId) || []) {
+          if (!toolActivityById.has(entry.toolUseId)) toolActivityById.set(entry.toolUseId, entry);
+        }
+      }
       store.setToolActivity(sessionId, Array.from(toolActivityById.values()).sort((a, b) => a.startedAt - b.startedAt));
       // Fix: if the last history message is a `result`, the session's last turn
       // is complete. Clear any stale streaming state that event_replay might not
       // correct (e.g. when `result` was pruned from the 600-event buffer).
       const lastHistMsg = data.messages[data.messages.length - 1];
-      if (lastHistMsg?.type === "result") {
+      if (!isOlderPage && lastHistMsg?.type === "result") {
         clearStreamingDraftMessage(sessionId);
         store.setStreaming(sessionId, null);
         streamingPhaseBySession.delete(sessionId);
@@ -1493,6 +1503,11 @@ export function setFocusedSession(sessionId: string | null) {
   };
   beat();
   focusTimer = setInterval(beat, FOCUS_HEARTBEAT_MS);
+}
+
+/** Ask for the page of history immediately before the loaded window. */
+export function loadMoreHistory(sessionId: string, beforeIndex: number) {
+  sendToSession(sessionId, { type: "history_load_more", before_index: beforeIndex });
 }
 
 export function sendMcpGetStatus(sessionId: string) {

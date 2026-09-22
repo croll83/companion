@@ -318,6 +318,7 @@ export type BrowserOutgoingMessage =
   | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string; name?: string }[]; client_msg_id?: string }
   | { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown>; updated_permissions?: PermissionUpdate[]; message?: string; client_msg_id?: string }
   | { type: "session_focus" }
+  | { type: "history_load_more"; before_index: number }
   | { type: "session_subscribe"; last_seq: number }
   | { type: "session_ack"; last_seq: number }
   | { type: "interrupt"; client_msg_id?: string }
@@ -363,7 +364,16 @@ export type BrowserIncomingMessageBase =
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
   | { type: "user_message"; content: string; timestamp: number; id?: string }
-  | { type: "message_history"; messages: BrowserIncomingMessage[] }
+  | {
+    type: "message_history";
+    messages: BrowserIncomingMessage[];
+    /** Index of the first message in the full history (0 = from the beginning). */
+    startIndex?: number;
+    /** Size of the full history, so the client knows more exists. */
+    total?: number;
+    /** An older page: merge into what is on screen, do not treat as the truth. */
+    prepend?: boolean;
+  }
   | { type: "event_replay"; events: BufferedBrowserEvent[] }
   | { type: "session_name_update"; name: string }
   | { type: "pr_status_update"; pr: import("./github-pr.js").GitHubPRInfo | null; available: boolean }

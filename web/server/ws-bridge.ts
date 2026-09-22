@@ -31,8 +31,7 @@ import {
 } from "./ws-bridge-browser-ingest.js";
 import {
   appendHistory as appendHistoryFn,
-  persistSession as persistSessionFn,
-} from "./ws-bridge-persist.js";
+  persistSession as persistSessionFn, historyTail, historyPage } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
   sendToBrowser as sendToBrowserFn,
@@ -1110,10 +1109,7 @@ export class WsBridge {
 
     // Replay message history so the browser can reconstruct the conversation
     if (session.messageHistory.length > 0) {
-      this.sendToBrowser(ws, {
-        type: "message_history",
-        messages: session.messageHistory,
-      });
+      this.sendToBrowser(ws, { type: "message_history", ...historyTail(session.messageHistory) });
     }
 
     // Send any pending permission requests
@@ -1324,6 +1320,17 @@ export class WsBridge {
     ws?: ServerWebSocket<SocketData>,
   ) {
     // Bridge-level message types — never forwarded to backend
+    // Older history, pulled on demand by the "load more" control. Sent as a
+    // prepend so the client merges it above what is on screen instead of
+    // replacing the live conversation.
+    if (msg.type === "history_load_more") {
+      const page = historyPage(session.messageHistory, msg.before_index);
+      if (page.messages.length > 0 && ws) {
+        this.sendToBrowser(ws, { type: "message_history", ...page, prepend: true });
+      }
+      return;
+    }
+
     // Focus is reported explicitly by the client: an open socket says nothing,
     // because the frontend opens one to EVERY session on load.
     if (msg.type === "session_focus") {

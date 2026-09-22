@@ -10,6 +10,9 @@ export interface ChatSlice {
 
   appendMessage: (sessionId: string, msg: ChatMessage) => void;
   setMessages: (sessionId: string, msgs: ChatMessage[]) => void;
+  /** Where the loaded window starts in the session's full history, and its size. */
+  historyWindow: Map<string, { startIndex: number; total: number }>;
+  setHistoryWindow: (sessionId: string, startIndex: number, total: number) => void;
   updateLastAssistantMessage: (sessionId: string, updater: (msg: ChatMessage) => ChatMessage) => void;
   setStreaming: (sessionId: string, text: string | null) => void;
   setStreamingStats: (sessionId: string, stats: { startedAt?: number; outputTokens?: number } | null) => void;
@@ -35,6 +38,15 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set) 
       const messages = new Map(s.messages);
       messages.set(sessionId, [...existing, msg]);
       return { messages };
+    }),
+
+  historyWindow: new Map(),
+
+  setHistoryWindow: (sessionId, startIndex, total) =>
+    set((s) => {
+      const historyWindow = new Map(s.historyWindow);
+      historyWindow.set(sessionId, { startIndex, total });
+      return { historyWindow };
     }),
 
   setMessages: (sessionId, msgs) =>
