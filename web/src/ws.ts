@@ -974,8 +974,14 @@ function handleParsedMessage(
 
     case "refusal": {
       // The model declined to answer (stop_reason "refusal"): surface it as a
-      // dedicated banner with the reason and a one-click retry on Opus 4.8,
-      // rather than letting the empty turn render as nothing.
+      // dedicated banner with the reason and a one-click retry on the next model
+      // of the refusal chain, rather than letting the empty turn render as nothing.
+      //
+      // Freeze which model refused NOW. Retrying switches the session's model,
+      // and a banner that fell back to the live model would recompute its step
+      // from the model that replaced it.
+      const refusedModel =
+        data.model ?? store.sdkSessions.find((s) => s.sessionId === sessionId)?.model;
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
@@ -984,7 +990,7 @@ function handleParsedMessage(
         refusal: {
           category: data.category,
           explanation: data.explanation,
-          model: data.model,
+          model: refusedModel,
         },
       });
       break;

@@ -1,10 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../store.js";
 import { createClientMessageId, sendToSession } from "../ws.js";
-
-/** Fallback model offered when the active model refuses. */
-const FALLBACK_MODEL = "claude-opus-4-8";
-const FALLBACK_LABEL = "Opus 4.8";
+import { nextRefusalFallback, refusalFallbackLabel } from "../utils/refusal-fallback.js";
 
 /** Human-readable description for known refusal categories. */
 const CATEGORY_LABELS: Record<string, string> = {
@@ -20,9 +17,10 @@ interface RefusalBannerProps {
 
 /**
  * Shown when a model returns `stop_reason: "refusal"` (an HTTP 200 with empty
- * content). Surfaces the category/explanation and offers a manual fallback:
- * switch to Opus 4.8 and re-send the last user prompt. (Automatic server-side
- * fallback is handled upstream at the gateway; this is the in-UI escape hatch.)
+ * content). Surfaces the category/explanation and offers the next model in the
+ * refusal chain (Fable 5.1 → Opus 5.5 → Opus 5 → Opus 4.8), re-sending the last
+ * user prompt there. If that one refuses too, a new banner offers the step
+ * after it — see utils/refusal-fallback.ts.
  */
 export function RefusalBanner({ refusal }: RefusalBannerProps) {
   const [retried, setRetried] = useState(false);
@@ -34,10 +32,13 @@ export function RefusalBanner({ refusal }: RefusalBannerProps) {
   const categoryLabel = refusal.category
     ? CATEGORY_LABELS[refusal.category] || refusal.category
     : null;
-  const refusedByFallback = refusal.model === FALLBACK_MODEL;
+  // The model that refused, frozen when the refusal arrived (see ws.ts) so an
+  // older banner never recomputes its step from whatever the session runs now.
+  const fallbackModel = nextRefusalFallback(refusal.model);
+  const fallbackLabel = fallbackModel ? refusalFallbackLabel(fallbackModel) : null;
 
   function handleRetry() {
-    if (!currentSessionId) return;
+    if (!currentSessionId || !fallbackModel) return;
     // Find the most recent user prompt to re-run on the fallback model.
     const lastUser = [...(messages || [])].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
@@ -47,11 +48,11 @@ export function RefusalBanner({ refusal }: RefusalBannerProps) {
     // Switch model first — this relaunches the CLI with --resume. The
     // user_message below is queued by the bridge and delivered once the new
     // CLI reconnects, so the prompt re-runs on the fallback model in-context.
-    sendToSession(currentSessionId, { type: "set_model", model: FALLBACK_MODEL });
+    sendToSession(currentSessionId, { type: "set_model", model: fallbackModel });
     const { sdkSessions, setSdkSessions } = useStore.getState();
     setSdkSessions(
       sdkSessions.map((sdk) =>
-        sdk.sessionId === currentSessionId ? { ...sdk, model: FALLBACK_MODEL } : sdk,
+        sdk.sessionId === currentSessionId ? { ...sdk, model: fallbackModel } : sdk,
       ),
     );
 
@@ -94,7 +95,7 @@ export function RefusalBanner({ refusal }: RefusalBannerProps) {
               </p>
             )}
             <div className="flex items-center gap-2 mt-2.5 flex-wrap">
-              {!refusedByFallback && (
+              {fallbackModel && (
                 <button
                   onClick={handleRetry}
                   disabled={retried}
@@ -103,12 +104,12 @@ export function RefusalBanner({ refusal }: RefusalBannerProps) {
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
                     <path d="M2 8a6 6 0 1010-4.5M2 3v3h3" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  {retried ? `Retrying on ${FALLBACK_LABEL}…` : `Retry with ${FALLBACK_LABEL}`}
+                  {retried ? `Retrying on ${fallbackLabel}…` : `Retry with ${fallbackLabel}`}
                 </button>
               )}
-              {refusedByFallback && (
+              {!fallbackModel && (
                 <span className="text-[11px] text-cc-muted italic">
-                  {FALLBACK_LABEL} also declined — try rephrasing the request.
+                  Every model in the fallback chain declined — try rephrasing the request.
                 </span>
               )}
             </div>

@@ -67,12 +67,12 @@ describe("RefusalBanner", () => {
     expect(screen.getByText("Cybersecurity policy")).toBeInTheDocument();
   });
 
-  it("retries on Opus 4.8: switches model then re-sends the last user prompt", () => {
+  it("retries a Fable refusal on Opus 5.5: switches model then re-sends the last user prompt", () => {
     render(<RefusalBanner refusal={REFUSAL} />);
-    fireEvent.click(screen.getByRole("button", { name: /Retry with Opus 4\.8/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Retry with Opus 5\.5/ }));
 
     // 1) model switch to the fallback
-    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "claude-opus-4-8" });
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "claude-opus-5-5" });
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     // 2) the LAST user prompt is re-sent (not the earlier one)
     expect(mockSendToSession).toHaveBeenCalledWith("s1", expect.objectContaining({
@@ -89,15 +89,20 @@ describe("RefusalBanner", () => {
 
   it("disables the retry button after clicking", () => {
     render(<RefusalBanner refusal={REFUSAL} />);
-    const btn = screen.getByRole("button", { name: /Retry with Opus 4\.8/ });
+    const btn = screen.getByRole("button", { name: /Retry with Opus 5\.5/ });
     fireEvent.click(btn);
     expect(screen.getByRole("button")).toBeDisabled();
   });
 
-  it("hides the retry button when Opus 4.8 itself refused", () => {
+  it("walks the chain: a refusal on Opus 5.5 offers Opus 5", () => {
+    render(<RefusalBanner refusal={{ ...REFUSAL, model: "claude-opus-5-5" }} />);
+    expect(screen.getByRole("button", { name: /Retry with Opus 5(?!\.)/ })).toBeInTheDocument();
+  });
+
+  it("hides the retry button when the last resort itself refused", () => {
     render(<RefusalBanner refusal={{ ...REFUSAL, model: "claude-opus-4-8" }} />);
     expect(screen.queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/also declined/)).toBeInTheDocument();
+    expect(screen.getByText(/Every model in the fallback chain declined/)).toBeInTheDocument();
   });
 
   it("renders an unknown category verbatim", () => {
