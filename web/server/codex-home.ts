@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
@@ -23,4 +24,21 @@ export function resolveCompanionCodexSessionHome(
   explicitCodexHome?: string,
 ): string {
   return join(resolveCompanionCodexHome(explicitCodexHome), sessionId);
+}
+
+/**
+ * When the credentials in a Codex auth.json were last rotated, as epoch ms.
+ *
+ * Used to pick the surviving copy when a session home still holds a real
+ * auth.json instead of the shared symlink. Falls back to 0 so an unreadable or
+ * tokenless file never wins over one we can actually parse.
+ */
+export function authRefreshedAt(path: string): number {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { last_refresh?: unknown };
+    const ts = typeof parsed.last_refresh === "string" ? Date.parse(parsed.last_refresh) : NaN;
+    return Number.isNaN(ts) ? 0 : ts;
+  } catch {
+    return 0;
+  }
 }

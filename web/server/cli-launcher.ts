@@ -7,6 +7,9 @@ import {
   realpathSync,
   writeFileSync,
   unlinkSync,
+  lstatSync,
+  readlinkSync,
+  symlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -27,6 +30,7 @@ import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
+  authRefreshedAt,
 } from "./codex-home.js";
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
@@ -854,7 +858,8 @@ export class CliLauncher {
 
     // Bootstrap only the user-level artifacts Codex needs (auth/config/skills),
     // while intentionally skipping sessions/sqlite to avoid stale rollout indexes.
-    const fileSeeds = ["auth.json", "config.toml", "models_cache.json", "version.json"];
+    // NOTE: auth.json is deliberately NOT copied — see linkAuthJson().
+    const fileSeeds = ["config.toml", "models_cache.json", "version.json"];
     for (const name of fileSeeds) {
       try {
         const src = join(legacyHome, name);
@@ -878,6 +883,50 @@ export class CliLauncher {
       } catch (e) {
         console.warn(`[cli-launcher] Failed to bootstrap ${name}/ from legacy home:`, e);
       }
+    }
+
+    this.linkAuthJson(codexHome, legacyHome);
+  }
+
+  /**
+   * Point a session's auth.json at the user's global one instead of copying it.
+   *
+   * ChatGPT-plan OAuth rotates refresh tokens: every refresh mints a new one and
+   * revokes the previous one server-side. A per-session *copy* therefore dies the
+   * moment any other copy refreshes — permanently, because the dead token is on
+   * disk, so reconnecting or respawning re-reads the same revoked credentials and
+   * the user sees "your refresh token was revoked. Please log out and sign in
+   * again." Sharing one file is what Codex itself expects from concurrent
+   * processes (it re-reads auth.json before refreshing and skips the refresh when
+   * another process already rotated it), and Codex writes auth.json in place, so
+   * the symlink survives a rotation and every session sees the new token.
+   *
+   * Self-healing: a regular file left by an older Companion (or by a write that
+   * replaced the link) is folded back into the global home when it holds the
+   * newer rotation, then replaced by the symlink.
+   */
+  private linkAuthJson(codexHome: string, legacyHome: string): void {
+    const src = join(legacyHome, "auth.json");
+    const dest = join(codexHome, "auth.json");
+    try {
+      let destStat: ReturnType<typeof lstatSync> | null = null;
+      try { destStat = lstatSync(dest); } catch { /* absent */ }
+
+      if (destStat?.isSymbolicLink()) {
+        if (resolve(readlinkSync(dest)) === resolve(src)) return; // already correct
+        unlinkSync(dest);
+      } else if (destStat) {
+        // A real file: keep whichever credentials are newer before dropping it.
+        if (!existsSync(src) || authRefreshedAt(dest) > authRefreshedAt(src)) {
+          copyFileSync(dest, src);
+        }
+        unlinkSync(dest);
+      }
+
+      if (!existsSync(src)) return; // nothing to link to; Codex will prompt to log in
+      symlinkSync(src, dest);
+    } catch (e) {
+      console.warn(`[cli-launcher] Failed to link auth.json to the global Codex home:`, e);
     }
   }
 
