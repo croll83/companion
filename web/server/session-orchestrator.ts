@@ -237,7 +237,7 @@ export class SessionOrchestrator {
       this.clearAutoRelaunchCount(sessionId);
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "model_change_relaunch");
+        session.stateMachine.mustTransition("starting", "model_change_relaunch");
       }
       // Mark as relaunching so the session:exited handler (fired when the old
       // process dies) suppresses cli_disconnected — this is an intentional
@@ -268,7 +268,7 @@ export class SessionOrchestrator {
       this.clearAutoRelaunchCount(sessionId);
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "effort_change_relaunch");
+        session.stateMachine.mustTransition("starting", "effort_change_relaunch");
       }
       // See model-change above: suppress the spurious cli_disconnected from the
       // old process's exit during this intentional respawn.
@@ -719,7 +719,7 @@ export class SessionOrchestrator {
     this.clearAutoRelaunchCount(sessionId);
     const session = this.wsBridge.getSession(sessionId);
     if (session?.stateMachine) {
-      session.stateMachine.transition("starting", "relaunch_initiated");
+      session.stateMachine.mustTransition("starting", "relaunch_initiated");
     }
     return this.launcher.relaunch(sessionId);
   }
@@ -893,7 +893,7 @@ export class SessionOrchestrator {
       log.info("orchestrator", "Auto-relaunching CLI", { sessionId, attempt: count + 1, maxAttempts: MAX_AUTO_RELAUNCHES });
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "relaunch_initiated");
+        session.stateMachine.mustTransition("starting", "relaunch_initiated");
       }
       try {
         const result = await this.launcher.relaunch(sessionId);

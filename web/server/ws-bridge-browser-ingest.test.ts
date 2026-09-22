@@ -13,6 +13,8 @@ function makeDedupSession(): Session {
     backendType: "claude",
     backendAdapter: null,
     browserSockets: new Set(),
+  openToolCalls: new Set<string>(),
+  lastFocusTs: 0,
     state: {} as any,
     pendingPermissions: new Map(),
     messageHistory: [],

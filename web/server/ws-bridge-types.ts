@@ -56,6 +56,10 @@ export interface Session {
   processedClientMessageIds: string[];
   processedClientMessageIdSet: Set<string>;
   /** Timestamp of last non-keepalive CLI message (for idle detection) */
+  /** Tool calls issued but not yet resolved — see session-work.ts. */
+  openToolCalls: Set<string>;
+  /** When a client last reported this session as focused; 0 = never. */
+  lastFocusTs: number;
   lastCliActivityTs: number;
   /** Timestamp of last real user interaction (user_message / permission_response). */
   lastUserActivityTs: number;

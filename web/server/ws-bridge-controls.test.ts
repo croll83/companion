@@ -24,6 +24,8 @@ function makeMockSession(overrides: Partial<Session["state"]> = {}): Session {
     backendType: "claude",
     backendAdapter: null,
     browserSockets: new Set(),
+  openToolCalls: new Set<string>(),
+  lastFocusTs: 0,
     state,
     pendingPermissions: new Map(),
     messageHistory: [],

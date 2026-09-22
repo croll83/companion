@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession } from "./ws.js";
+import { connectSession, setFocusedSession } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
@@ -105,11 +105,15 @@ export default function App() {
         store.setCurrentSession(route.sessionId);
       }
       connectSession(route.sessionId);
+      // Tell the server this is the session on screen, so the idle-kill sweep
+      // spares it while the user is still looking.
+      setFocusedSession(route.sessionId);
     } else if (route.page === "home") {
       const store = useStore.getState();
       if (store.currentSessionId !== null) {
         store.setCurrentSession(null);
       }
+      setFocusedSession(null);
     }
     // For other pages (settings, etc.), preserve currentSessionId
   }, [route]);

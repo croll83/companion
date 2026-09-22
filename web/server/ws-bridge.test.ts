@@ -5040,6 +5040,78 @@ describe("Idle kill watchdog", () => {
     expect(idleKillHandler).not.toHaveBeenCalled();
   });
 
+  it("does NOT kill a session with an unfinished tool call", async () => {
+    // The gap the phase gate left open: a Bash/MCP/sub-agent call can run for
+    // far longer than the idle threshold while the phase sits at "ready", so
+    // the watchdog saw an idle session and SIGTERMed live work.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { session } = await makeReadySession("s1");
+    session.openToolCalls.add("toolu_long_running");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+
+    // Once the tool finishes, the session becomes reclaimable again.
+    session.openToolCalls.clear();
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("does NOT kill a session a client is still looking at", async () => {
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { session } = await makeReadySession("s1");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+
+    // The client heartbeats focus every 60s while the session is on screen;
+    // refresh well inside the 10min grace window and run past the threshold.
+    for (let i = 0; i < 290; i++) {
+      session.lastFocusTs = Date.now();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    }
+    expect(idleKillHandler).not.toHaveBeenCalled();
+  });
+
+  it("kills once focus has gone stale", async () => {
+    // Switching to another app for a while must not keep the session forever.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { session } = await makeReadySession("s1");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+    session.lastFocusTs = Date.now() - 11 * 60_000; // last looked at 11min ago
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("neither kills nor announces a disconnect for an archived session", async () => {
+    // The watchdog used to emit the kill (dropped later by the orchestrator)
+    // but announce the disconnect unconditionally, so an archived session was
+    // shown as disconnected while still alive.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    await makeReadySession("s1");
+    bridge.setArchivedCheck(() => true);
+    browser.send.mockClear();
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+
+    expect(idleKillHandler).not.toHaveBeenCalled();
+    const sent = browser.send.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(sent.some((m: string) => m.includes("cli_disconnected"))).toBe(false);
+  });
+
   it("does NOT kill before the threshold", async () => {
     const idleKillHandler = vi.fn();
     companionBus.on("session:idle-kill", idleKillHandler);

@@ -29,6 +29,8 @@ function createMockSession(overrides = {}): Session {
     backendType: "codex",
     backendAdapter: null,
     browserSockets: new Set(),
+  openToolCalls: new Set<string>(),
+  lastFocusTs: 0,
     state: {
       session_id: "test-session",
       backend_type: "codex",

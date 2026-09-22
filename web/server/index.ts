@@ -74,6 +74,7 @@ const orchestrator = new SessionOrchestrator({
 // ── Restore persisted sessions from disk ────────────────────────────────────
 wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
+wsBridge.setArchivedCheck((sessionId) => launcher.getSession(sessionId)?.archived === true);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
 launcher.restoreFromDisk();

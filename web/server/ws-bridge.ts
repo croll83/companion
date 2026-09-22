@@ -50,6 +50,7 @@ import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { isSessionWorking, noteWorkFromCliMessage, clearWorkTracking } from "./session-work.js";
 import { log } from "./logger.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
@@ -90,6 +91,8 @@ export class WsBridge {
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
   private autoNamingAttempted = new Set<string>();
+  /** Resolves whether a session is archived; see setArchivedCheck. */
+  private isArchived: (sessionId: string) => boolean = () => false;
   private userMsgCounter = 0;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
@@ -165,6 +168,19 @@ export class WsBridge {
   }
 
   /** Attach a recorder for raw message capture. */
+  /**
+   * Teach the bridge which sessions are archived.
+   *
+   * The watchdog used to emit session:idle-kill for archived sessions too and
+   * rely on the orchestrator to drop them — but it announced the disconnect
+   * itself, unconditionally. An archived session was therefore never killed yet
+   * still shown as disconnected in the UI. Owning the check here keeps the
+   * decision and the announcement in the same place.
+   */
+  setArchivedCheck(isArchived: (sessionId: string) => boolean): void {
+    this.isArchived = isArchived;
+  }
+
   setRecorder(recorder: RecorderManager): void {
     this.recorder = recorder;
   }
@@ -181,6 +197,8 @@ export class WsBridge {
         backendType: p.state.backend_type || "claude",
         backendAdapter: null,
         browserSockets: new Set(),
+        openToolCalls: new Set(),
+        lastFocusTs: 0,
         state: p.state,
         pendingPermissions: new Map(p.pendingPermissions || []),
         messageHistory: p.messageHistory || [],
@@ -273,6 +291,8 @@ export class WsBridge {
         backendType: type,
         backendAdapter: null,
         browserSockets: new Set(),
+        openToolCalls: new Set(),
+        lastFocusTs: 0,
         state: makeDefaultState(sessionId, type),
         pendingPermissions: new Map(),
         messageHistory: [],
@@ -350,6 +370,12 @@ export class WsBridge {
     // Unsubscribe any previous listener (e.g. from session restoration) to prevent leaks
     session.unsubscribeStateMachine?.();
     session.unsubscribeStateMachine = session.stateMachine.onTransition((event) => {
+      // Coming to rest ends any turn, so outstanding tool bookkeeping is stale.
+      // Without this a tool whose summary never arrived would keep the session
+      // "working" forever and the watchdog could never reclaim it.
+      if (event.to === "ready" || event.to === "terminated") {
+        clearWorkTracking(session);
+      }
       companionBus.emit("session:phase-changed", {
         sessionId: event.sessionId,
         from: event.from,
@@ -425,6 +451,7 @@ export class WsBridge {
     adapter.onBrowserMessage((msg) => {
       // Track activity for idle detection
       session.lastCliActivityTs = Date.now();
+      noteWorkFromCliMessage(session, msg);
       metricsCollector.recordMessageProcessed(msg.type);
 
       // -- session_init: merge into session state, broadcast, persist -----
@@ -1194,6 +1221,18 @@ export class WsBridge {
       : 24 * 60 * 60_000, // 24 hours default
   );
   private static readonly IDLE_CHECK_INTERVAL_MS = 60_000; // check every 60s
+  /**
+   * How recently a client must have had the session focused for it to be spared.
+   *
+   * Reverses the earlier browser-independent policy: a focused-but-idle session
+   * used to be killed anyway to free RAM. Clients refresh this while the session
+   * stays on screen, so the window is "still looking at it", not "opened it once".
+   */
+  private static readonly FOCUS_GRACE_MS = Number(
+    process.env.COMPANION_FOCUS_GRACE_MINUTES
+      ? Number(process.env.COMPANION_FOCUS_GRACE_MINUTES) * 60_000
+      : 10 * 60_000,
+  );
 
   /**
    * Start the activity-based idle-kill watchdog. Called when the CLI connects
@@ -1238,19 +1277,31 @@ export class WsBridge {
       return; // still active or not idle long enough
     }
 
-    // Phase gating: only kill an idle session that is genuinely at rest.
-    //  - "ready" is the only killable phase (idle, awaiting user input).
-    //  - streaming/compacting/initializing/starting → work in flight, never kill.
-    //  - awaiting_permission → PROTECTED: a permission is pending; killing would
-    //    lose the user's place, so we wait for them to resolve it.
-    //  - terminated → already dead; stop the watchdog.
     const phase = session.stateMachine.phase;
     if (phase === "terminated") {
       this.stopIdleKillWatchdog(sessionId);
       return;
     }
-    if (phase !== "ready") {
-      return; // not at rest (or protected) — defer the kill
+
+    // A session someone is actually looking at is not cleanup material, even if
+    // nothing has happened in it for a while.
+    const focusAgeMs = Date.now() - session.lastFocusTs;
+    if (session.lastFocusTs > 0 && focusAgeMs < WsBridge.FOCUS_GRACE_MS) {
+      return;
+    }
+
+    // Archived sessions are out of scope for cleanup entirely.
+    if (this.isArchived(sessionId)) {
+      this.stopIdleKillWatchdog(sessionId);
+      return;
+    }
+
+    // Is it actually working? Ask directly rather than inferring it from the
+    // phase: a Bash command, an MCP call or a delegated sub-agent can run for
+    // tens of minutes while the phase sits at "ready", and a rejected
+    // transition can strand it there too. See session-work.ts.
+    if (isSessionWorking(session)) {
+      return; // work in flight (or a permission pending) — defer the kill
     }
 
     // Truly idle and at rest — kill to reclaim RAM. No auto-reconnect.
@@ -1273,6 +1324,13 @@ export class WsBridge {
     ws?: ServerWebSocket<SocketData>,
   ) {
     // Bridge-level message types — never forwarded to backend
+    // Focus is reported explicitly by the client: an open socket says nothing,
+    // because the frontend opens one to EVERY session on load.
+    if (msg.type === "session_focus") {
+      session.lastFocusTs = Date.now();
+      return;
+    }
+
     if (msg.type === "session_subscribe") {
       handleSessionSubscribe(
         session,
@@ -1440,7 +1498,7 @@ export class WsBridge {
         // (the phase broadcast drives the "Reconnecting…" hint). The queued
         // message still flushes post-init via the session_init/meta hooks.
         if (phase === "terminated") {
-          session.stateMachine.transition("starting", "relaunch_on_send");
+          session.stateMachine.mustTransition("starting", "relaunch_on_send");
           session.stateMachine.transition("reconnecting", "relaunch_on_send");
         }
         companionBus.emit("session:relaunch-needed", { sessionId: session.id });

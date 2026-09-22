@@ -72,6 +72,10 @@ if (typeof document !== "undefined") {
           connectSession(sessionId);
         }
       }
+      // Re-assert focus immediately: coming back from another app must not wait
+      // out the heartbeat, or a session can be reclaimed seconds after you look
+      // at it again.
+      if (focusedSessionId) sendSessionFocus(focusedSessionId);
     }
   });
 }
@@ -1416,6 +1420,40 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
   if (isIdempotent) {
     enqueueOutgoing(sessionId, outgoing);
   }
+}
+
+/**
+ * Tell the server which session the user is actually looking at.
+ *
+ * The server spares a focused session from the idle-kill sweep, and it cannot
+ * infer focus from the sockets: we open one to EVERY session on load, so they
+ * all look equally "connected". Refreshed on a heartbeat because the server
+ * measures "focused recently", not "was opened once".
+ */
+export function sendSessionFocus(sessionId: string) {
+  sendToSession(sessionId, { type: "session_focus" });
+}
+
+const FOCUS_HEARTBEAT_MS = 60_000;
+let focusTimer: ReturnType<typeof setInterval> | null = null;
+let focusedSessionId: string | null = null;
+
+/** Start (or move) the focus heartbeat onto `sessionId`; null stops it. */
+export function setFocusedSession(sessionId: string | null) {
+  focusedSessionId = sessionId;
+  if (focusTimer) {
+    clearInterval(focusTimer);
+    focusTimer = null;
+  }
+  if (!sessionId) return;
+  const beat = () => {
+    if (!focusedSessionId) return;
+    // A hidden tab is not focus — let the window lapse so the server can reclaim.
+    if (typeof document !== "undefined" && document.hidden) return;
+    sendSessionFocus(focusedSessionId);
+  };
+  beat();
+  focusTimer = setInterval(beat, FOCUS_HEARTBEAT_MS);
 }
 
 export function sendMcpGetStatus(sessionId: string) {

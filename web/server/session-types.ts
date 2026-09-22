@@ -317,6 +317,7 @@ export type ContentBlock =
 export type BrowserOutgoingMessage =
   | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string; name?: string }[]; client_msg_id?: string }
   | { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown>; updated_permissions?: PermissionUpdate[]; message?: string; client_msg_id?: string }
+  | { type: "session_focus" }
   | { type: "session_subscribe"; last_seq: number }
   | { type: "session_ack"; last_seq: number }
   | { type: "interrupt"; client_msg_id?: string }
