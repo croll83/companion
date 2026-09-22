@@ -363,6 +363,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // two different things and the user has to know before pressing enter.
   const willSteer = isCodex && isRunning;
   const canSend = text.trim().length > 0 && isConnected;
+  // While a turn runs the send button stays next to stop: on a phone Enter only
+  // inserts a newline, so without it there is no way to steer mid-turn.
+  const sendTitle = willSteer
+    ? "Add to what it's doing now"
+    : isRunning
+      ? "Queue for the next turn"
+      : "Send message";
 
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
@@ -672,33 +679,34 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
           {/* Mobile action row (hidden on sm+) */}
           <div className="flex items-center justify-end gap-1 px-3 pb-1 sm:hidden">
-            {/* Send/stop */}
-            {isRunning ? (
+            {/* Stop while running, send always — see sendTitle */}
+            {isRunning && (
               <button
                 onClick={handleInterrupt}
                 className="flex items-center justify-center w-10 h-10 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
                 title="Stop generation"
+                aria-label="Stop generation"
               >
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                   <rect x="3" y="3" width="10" height="10" rx="1" />
                 </svg>
               </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className={`flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 ${
-                  canSend
-                    ? "bg-cc-primary hover:bg-cc-primary-hover active:scale-95 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
-                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                }`}
-                title="Send message"
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                  <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
-                </svg>
-              </button>
             )}
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className={`flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 ${
+                canSend
+                  ? "bg-cc-primary hover:bg-cc-primary-hover active:scale-95 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
+                  : "bg-cc-hover text-cc-muted cursor-not-allowed"
+              }`}
+              title={sendTitle}
+              aria-label={sendTitle}
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+              </svg>
+            </button>
           </div>
 
           {/* Desktop action bar: + bookmark mode spacer model send (hidden on mobile) */}
@@ -774,33 +782,34 @@ export function Composer({ sessionId }: { sessionId: string }) {
             <ModelSwitcher sessionId={sessionId} />
             <EffortSwitcher sessionId={sessionId} />
 
-            {/* Send/stop */}
-            {isRunning ? (
+            {/* Stop while running, send always — see sendTitle */}
+            {isRunning && (
               <button
                 onClick={handleInterrupt}
                 className="flex items-center justify-center w-9 h-9 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
                 title="Stop generation"
+                aria-label="Stop generation"
               >
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                   <rect x="3" y="3" width="10" height="10" rx="1" />
                 </svg>
               </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className={`flex items-center justify-center w-9 h-9 rounded-full transition-all duration-200 ${
-                  canSend
-                    ? "bg-cc-primary hover:bg-cc-primary-hover hover:scale-105 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
-                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                }`}
-                title="Send message"
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                  <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
-                </svg>
-              </button>
             )}
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className={`flex items-center justify-center w-9 h-9 rounded-full transition-all duration-200 ${
+                canSend
+                  ? "bg-cc-primary hover:bg-cc-primary-hover hover:scale-105 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
+                  : "bg-cc-hover text-cc-muted cursor-not-allowed"
+              }`}
+              title={sendTitle}
+              aria-label={sendTitle}
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+              </svg>
+            </button>
           </div>
 
         </div>

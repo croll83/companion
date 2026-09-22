@@ -308,14 +308,29 @@ describe("Composer plan mode toggle", () => {
 // ─── Interrupt button ────────────────────────────────────────────────────────
 
 describe("Composer interrupt button", () => {
-  it("interrupt button appears when session is running", () => {
+  it("keeps the send button next to stop while the session is running", () => {
+    // On a phone Enter only inserts a newline, so a send button that vanished
+    // behind stop left no way to steer mid-turn. Both must be there.
     setupMockStore({ sessionStatus: "running" });
     render(<Composer sessionId="s1" />);
 
-    const stopBtn = screen.getAllByTitle("Stop generation")[0];
-    expect(stopBtn).toBeTruthy();
-    // Send button should not be present (both mobile and desktop show stop)
-    expect(screen.queryAllByTitle("Send message")).toHaveLength(0);
+    expect(screen.getAllByTitle("Stop generation")[0]).toBeTruthy();
+    // Claude queues mid-turn input for the next turn; the title says so.
+    expect(screen.getAllByTitle("Queue for the next turn")[0]).toBeTruthy();
+  });
+
+  it("sends a message while running, which is how mobile steers", () => {
+    setupMockStore({ sessionStatus: "running" });
+    render(<Composer sessionId="s1" />);
+
+    const textarea = screen.getByLabelText("Message input");
+    fireEvent.change(textarea, { target: { value: "also check the logs" } });
+    fireEvent.click(screen.getAllByTitle("Queue for the next turn")[0]);
+
+    expect(mockSendToSession).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ type: "user_message", content: "also check the logs" }),
+    );
   });
 
   it("interrupt button sends interrupt message", () => {
