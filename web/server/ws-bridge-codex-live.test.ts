@@ -2,9 +2,9 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Codex selectors, tested on the path production actually runs.
 //
-// The effort levels used to be computed only in attachCodexAdapterHandlers,
-// which nothing in production calls; its tests passed while every Codex
-// session reached the browser without levels. These go through
+// The effort levels used to be computed only in a Codex handler module that
+// nothing in production called (since removed); its tests passed while every
+// Codex session reached the browser without levels. These go through
 // attachBackendAdapter + routeBrowserMessage instead.
 
 if (typeof globalThis.Bun === "undefined") {

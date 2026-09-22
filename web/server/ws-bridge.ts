@@ -474,11 +474,11 @@ export class WsBridge {
           backend_type: session.backendType,
         };
         // Codex effort levels are per-model and only readable server-side, so
-        // they travel with the session. This used to live in
-        // attachCodexAdapterHandlers, which nothing in production calls — its
-        // tests passed against code that never ran, and every Codex session
-        // reached the browser without levels, hiding the effort selector.
-        // Must happen before the broadcast below, or the UI gets them late.
+        // they travel with the session. This used to live only in a separate
+        // Codex handler module that nothing in production called (removed
+        // 2026-09-23) — its tests passed against code that never ran, and every
+        // Codex session reached the browser without levels, hiding the effort
+        // selector. Must happen before the broadcast below, or the UI gets them late.
         if (session.backendType === "codex") this.applyCodexEffort(session);
         this.refreshGitInfo(session, { notifyPoller: true });
         this.broadcastToBrowsers(session, { type: "session_init", session: session.state });
