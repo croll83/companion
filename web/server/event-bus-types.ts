@@ -23,6 +23,8 @@ export interface CompanionEventMap {
 
   /** Browser requested a reasoning-effort change — handled by killing & respawning the CLI with --effort. */
   "session:effort-change": { sessionId: string; effort: string };
+  /** Ultracode as the CLI confirmed it, so the launcher can re-apply it on relaunch. */
+  "session:ultracode-changed": { sessionId: string; enabled: boolean };
 
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };

@@ -390,6 +390,9 @@ export class ClaudeAdapter implements IBackendAdapter {
       case "set_model":
         return this.handleOutgoingSetModel(msg.model);
 
+      case "set_ultracode":
+        return this.handleOutgoingSetUltracode(msg.enabled);
+
       case "set_permission_mode":
         return this.handleOutgoingSetPermissionMode(msg.mode);
 
@@ -521,6 +524,32 @@ export class ClaudeAdapter implements IBackendAdapter {
       request: { subtype: "interrupt" },
     });
     this.sendToBackend(ndjson);
+    return true;
+  }
+
+  /**
+   * Toggle ultracode on the live CLI, without a relaunch.
+   *
+   * Unlike model and (for Claude) effort, ultracode is a runtime flag setting:
+   * apply_flag_settings changes it in place. The browser only learns the new
+   * state once the CLI confirms it — a refusal (model without xhigh, dynamic
+   * workflows off) reports the CLI's reason and keeps the previous state, so
+   * the toggle never shows "on" for something that is off.
+   */
+  private handleOutgoingSetUltracode(enabled: boolean): boolean {
+    this.sendControlRequest(
+      { subtype: "apply_flag_settings", settings: { ultracode: enabled } },
+      {
+        subtype: "apply_flag_settings",
+        resolve: () => {
+          this.browserMessageCb?.({ type: "session_update", session: { ultracode: enabled, ultracodeConfirmedAt: Date.now() } });
+        },
+        reject: (error) => {
+          this.browserMessageCb?.({ type: "error", message: `Ultracode not changed: ${error}` });
+          this.browserMessageCb?.({ type: "session_update", session: { ultracode: !enabled, ultracodeConfirmedAt: Date.now() } });
+        },
+      },
+    );
     return true;
   }
 
@@ -944,6 +973,7 @@ export class ClaudeAdapter implements IBackendAdapter {
       console.warn(
         `[claude-adapter] Control request ${pending.subtype} failed: ${msg.response.error}`,
       );
+      pending.reject?.(String(msg.response.error ?? "refused by the CLI"));
       return;
     }
     pending.resolve(msg.response.response ?? {});
@@ -999,7 +1029,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   private sendControlRequest(
     request: Record<string, unknown>,
-    onResponse?: { subtype: string; resolve: (response: unknown) => void },
+    onResponse?: PendingControlRequest,
   ): void {
     const requestId = randomUUID();
     if (onResponse) {

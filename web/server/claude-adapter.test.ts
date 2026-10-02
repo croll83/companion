@@ -649,6 +649,48 @@ describe("send() — outgoing message translation", () => {
     expect(sent.request.model).toBe("claude-opus-4-6");
   });
 
+  // Ultracode is a runtime flag (apply_flag_settings), so no relaunch — and the
+  // browser must only ever see the state the CLI confirmed.
+  it("set_ultracode → sends apply_flag_settings and reports the CLI's confirmation", () => {
+    adapter.send({ type: "set_ultracode", enabled: true });
+    const sent = getLastSent();
+    expect(sent.type).toBe("control_request");
+    expect(sent.request).toEqual({ subtype: "apply_flag_settings", settings: { ultracode: true } });
+
+    // Nothing reported before the CLI answers.
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_update" }));
+
+    adapter.handleRawMessage(`${JSON.stringify({
+      type: "control_response",
+      response: { subtype: "success", request_id: sent.request_id },
+    })}\n`);
+
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { ultracode: true, ultracodeConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_ultracode refused by the CLI → error, and the previous state stands", () => {
+    adapter.send({ type: "set_ultracode", enabled: true });
+    const sent = getLastSent();
+
+    adapter.handleRawMessage(`${JSON.stringify({
+      type: "control_response",
+      response: { subtype: "error", request_id: sent.request_id, error: "dynamic workflows are off" },
+    })}\n`);
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error",
+      message: expect.stringContaining("dynamic workflows are off"),
+    }));
+    // ultracodeConfirmedAt still moves, so the UI stops waiting.
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { ultracode: false, ultracodeConfirmedAt: expect.any(Number) },
+    });
+  });
+
   it("set_permission_mode → sends control_request with subtype 'set_permission_mode'", () => {
     // The permission mode change should be forwarded to the CLI backend.
     adapter.send({ type: "set_permission_mode", mode: "plan" });

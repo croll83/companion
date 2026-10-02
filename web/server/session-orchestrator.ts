@@ -270,6 +270,12 @@ export class SessionOrchestrator {
     // Effort change: like model change, the CLI only accepts `--effort` at
     // launch (no runtime control_request), so persist the new level and
     // relaunch with --resume to preserve conversation context.
+    // Ultracode is applied in place by the CLI (no relaunch), but the CLI never
+    // persists it — remember the confirmed state so the next relaunch re-passes it.
+    companionBus.on("session:ultracode-changed", ({ sessionId, enabled }) => {
+      this.launcher.setUltracode(sessionId, enabled);
+    });
+
     companionBus.on("session:effort-change", async ({ sessionId, effort }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;

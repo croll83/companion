@@ -498,6 +498,11 @@ export class WsBridge {
           ...(skills?.length ? { skills } : {}),
           backend_type: session.backendType,
         };
+        // The adapter only reports ultracode once the CLI has confirmed it, so
+        // this is the moment to make it survive relaunches.
+        if (typeof rest.ultracode === "boolean") {
+          companionBus.emit("session:ultracode-changed", { sessionId: session.id, enabled: rest.ultracode });
+        }
         this.refreshGitInfo(session, { notifyPoller: true });
         this.persistSession(session);
         if (session.pendingMessages.length > 0 && adapter.isConnected()) {

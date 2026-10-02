@@ -94,3 +94,14 @@ export function isValidEffort(model: string | undefined | null, effort: string |
   if (!effort) return false;
   return getEffortLevels(model).includes(effort as EffortLevel);
 }
+
+/**
+ * Whether the CLI can run ultracode on this model.
+ *
+ * Ultracode is xhigh effort plus standing dynamic-workflow orchestration; the
+ * CLI refuses it on a model without xhigh ("the model does not support xhigh
+ * effort"). Mirrors that gate so the toggle is only offered where it can work.
+ */
+export function supportsUltracode(model: string | undefined | null): boolean {
+  return getEffortLevels(model).includes("xhigh");
+}

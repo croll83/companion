@@ -323,6 +323,7 @@ export type BrowserOutgoingMessage =
   | { type: "session_ack"; last_seq: number }
   | { type: "interrupt"; client_msg_id?: string }
   | { type: "set_model"; model: string; client_msg_id?: string }
+  | { type: "set_ultracode"; enabled: boolean; client_msg_id?: string }
   | { type: "set_effort"; effort: string; client_msg_id?: string }
   | { type: "set_permission_mode"; mode: string; client_msg_id?: string }
   | { type: "mcp_get_status"; client_msg_id?: string }
@@ -408,6 +409,14 @@ export interface SessionState {
    * Claude UI resolves them from the static table in effort.ts.
    */
   supportedEfforts?: string[];
+  /** Claude: ultracode as confirmed by the CLI (not merely requested). */
+  ultracode?: boolean;
+  /**
+   * When the CLI last answered an ultracode change, accepted or refused. A
+   * refusal leaves `ultracode` unchanged, so the UI needs this to know the
+   * request is settled.
+   */
+  ultracodeConfirmedAt?: number;
   cwd: string;
   tools: string[];
   permissionMode: string;

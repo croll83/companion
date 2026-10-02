@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
-import { isValidEffort } from "./effort.js";
+import { isValidEffort, supportsUltracode } from "./effort.js";
 import { isValidCodexEffort } from "./codex-models.js";
 import { claudeTranscriptExists } from "./claude-session-history.js";
 import type { RecorderManager } from "./recorder.js";
@@ -111,6 +111,8 @@ export interface SdkSessionInfo {
   model?: string;
   /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
   effort?: string;
+  /** Claude only: standing dynamic-workflow orchestration (see buildUltracodeArgs). */
+  ultracode?: boolean;
   permissionMode?: string;
   cwd: string;
   createdAt: number;
@@ -182,6 +184,8 @@ export interface LaunchOptions {
   model?: string;
   /** Reasoning-effort level (Claude only); passed as `--effort` when the model supports it. */
   effort?: string;
+  /** Claude only: standing dynamic-workflow orchestration (see buildUltracodeArgs). */
+  ultracode?: boolean;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;
@@ -365,6 +369,7 @@ export class CliLauncher {
       state: "starting",
       model: options.model,
       effort: options.effort,
+      ultracode: options.ultracode,
       permissionMode: options.permissionMode,
       cwd,
       createdAt: Date.now(),
@@ -531,6 +536,7 @@ export class CliLauncher {
       this.spawnCLI(sessionId, info, {
         model: info.model,
         effort: info.effort,
+        ultracode: info.ultracode,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
         resumeSessionId: info.cliSessionId,
@@ -679,6 +685,12 @@ export class CliLauncher {
     // flag; passing it to a non-supporting model is rejected.
     if (options.effort && isValidEffort(options.model, options.effort)) {
       args.push("--effort", options.effort);
+    }
+    // Ultracode is a per-session setting the CLI never persists, and Companion
+    // relaunches the CLI often (model/effort change, mid-turn recovery). Without
+    // re-passing it here every relaunch would silently drop it.
+    if (options.ultracode && supportsUltracode(options.model)) {
+      args.push("--settings", JSON.stringify({ ultracode: true }));
     }
     if (effectivePermissionMode) {
       args.push("--permission-mode", effectivePermissionMode);
@@ -1525,6 +1537,14 @@ export class CliLauncher {
    * relaunch uses it. Like `setModel`, effort can only be applied at launch
    * (`--effort`), so the caller pairs this with `relaunch()`.
    */
+  setUltracode(sessionId: string, enabled: boolean): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.ultracode = enabled;
+    this.persistState();
+    return true;
+  }
+
   setEffort(sessionId: string, effort: string): boolean {
     const info = this.sessions.get(sessionId);
     if (!info) return false;

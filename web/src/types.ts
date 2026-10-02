@@ -114,6 +114,8 @@ export interface SdkSessionInfo {
   model?: string;
   /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
   effort?: string;
+  /** Claude: ultracode as last confirmed by the CLI, re-applied on relaunch. */
+  ultracode?: boolean;
   permissionMode?: string;
   cwd: string;
   createdAt: number;

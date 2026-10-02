@@ -6,6 +6,7 @@ import { api, type SavedPrompt } from "../api.js";
 import type { ModeOption } from "../utils/backends.js";
 import { ModelSwitcher } from "./ModelSwitcher.js";
 import { EffortSwitcher } from "./EffortSwitcher.js";
+import { UltracodeToggle } from "./UltracodeToggle.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 
@@ -607,6 +608,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
             <ModelSwitcher sessionId={sessionId} />
             <EffortSwitcher sessionId={sessionId} />
+            <UltracodeToggle sessionId={sessionId} />
 
             <div className="flex-1" />
 
@@ -775,6 +777,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             {/* Model switcher */}
             <ModelSwitcher sessionId={sessionId} />
             <EffortSwitcher sessionId={sessionId} />
+            <UltracodeToggle sessionId={sessionId} />
 
             {/* Stop while running, send always — see sendTitle */}
             {isRunning && (

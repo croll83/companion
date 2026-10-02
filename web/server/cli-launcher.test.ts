@@ -244,6 +244,26 @@ describe("launch", () => {
     expect(cmdAndArgs[idx + 1]).toBe("xhigh");
   });
 
+  // The CLI never persists ultracode, and Companion relaunches often; the
+  // flag has to be re-passed at every spawn or a relaunch silently drops it.
+  it("passes ultracode via --settings on a model that can run it", () => {
+    launcher.launch({ model: "claude-opus-5-5", ultracode: true, cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const idx = cmdAndArgs.indexOf("--settings");
+    expect(idx).toBeGreaterThan(-1);
+    expect(JSON.parse(cmdAndArgs[idx + 1])).toEqual({ ultracode: true });
+  });
+
+  it("omits ultracode on a model without xhigh, and when it is off", () => {
+    launcher.launch({ model: "claude-sonnet-4-6", ultracode: true, cwd: "/tmp" });
+    launcher.launch({ model: "claude-opus-5-5", ultracode: false, cwd: "/tmp" });
+
+    for (const [cmdAndArgs] of mockSpawn.mock.calls) {
+      expect(cmdAndArgs).not.toContain("--settings");
+    }
+  });
+
   it("omits --effort for a model that does not support it", () => {
     // Sonnet has no effort control — passing --effort would be rejected.
     launcher.launch({ model: "claude-sonnet-4-6", effort: "high", cwd: "/tmp" });
@@ -743,6 +763,32 @@ describe("kill", () => {
 // ─── relaunch ────────────────────────────────────────────────────────────────
 
 describe("relaunch", () => {
+  it("re-applies ultracode on relaunch, where the CLI alone would drop it", async () => {
+    // Ultracode is toggled at runtime (no relaunch), so its only record across a
+    // respawn is the launcher's. Model change / recovery relaunches must keep it.
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({ cwd: "/tmp/project", model: "claude-opus-5-5" });
+    launcher.setCLISessionId("test-session-id", "cli-resume-id");
+    expect(mockSpawn.mock.calls[0][0]).not.toContain("--settings");
+
+    launcher.setUltracode("test-session-id", true); // confirmed by the CLI at runtime
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+    await launcher.relaunch("test-session-id");
+
+    const relaunchArgs = mockSpawn.mock.calls[1][0];
+    const idx = relaunchArgs.indexOf("--settings");
+    expect(idx).toBeGreaterThan(-1);
+    expect(JSON.parse(relaunchArgs[idx + 1])).toEqual({ ultracode: true });
+  });
+
   it("kills old process and spawns new one with --resume", async () => {
     // Create first proc whose exit resolves immediately when killed
     let resolveFirst: (code: number) => void;

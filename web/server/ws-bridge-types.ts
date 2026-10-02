@@ -38,6 +38,8 @@ export type SocketData = CLISocketData | BrowserSocketData | TerminalSocketData 
 export interface PendingControlRequest {
   subtype: string;
   resolve: (response: unknown) => void;
+  /** Called with the CLI's error text when the request is refused. */
+  reject?: (error: string) => void;
 }
 
 export interface Session {

@@ -9,6 +9,7 @@ export {
   DEFAULT_EFFORT,
   getEffortLevels,
   modelSupportsEffort,
+  supportsUltracode,
   isValidEffort,
 } from "../../server/effort.js";
 export type { EffortLevel } from "../../server/effort.js";
