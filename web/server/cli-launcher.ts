@@ -681,8 +681,9 @@ export class CliLauncher {
       args.push("--model", options.model);
     }
     // Reasoning effort: only pass `--effort` when the chosen model actually
-    // supports it. The CLI has no runtime control for effort, so it's a launch
-    // flag; passing it to a non-supporting model is rejected.
+    // supports it; passing it to a non-supporting model is rejected. This seeds
+    // the launch — later changes are applied at runtime (apply_flag_settings)
+    // and recorded back here, so a relaunch resumes on the current level.
     if (options.effort && isValidEffort(options.model, options.effort)) {
       args.push("--effort", options.effort);
     }

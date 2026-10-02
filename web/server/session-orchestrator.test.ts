@@ -345,10 +345,11 @@ describe("SessionOrchestrator", () => {
       await Promise.resolve();
     });
 
-    it("effort-change suppresses the cli_disconnected from the old process exit", async () => {
+    it("effort-change (Codex) suppresses the cli_disconnected from the old process exit", async () => {
+      // Only Codex relaunches for effort; Claude changes it in place.
       deps.launcher.getSession.mockReturnValue({
         archived: false,
-        backendType: "claude",
+        backendType: "codex",
         effort: "low",
         state: "running",
       } as any);
@@ -367,6 +368,26 @@ describe("SessionOrchestrator", () => {
       resolveRelaunch();
       await Promise.resolve();
       await Promise.resolve();
+    });
+
+    it("effort-change does not relaunch a Claude session", async () => {
+      deps.launcher.getSession.mockReturnValue({
+        archived: false, backendType: "claude", effort: "low", state: "running",
+      } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:effort-change", { sessionId: "s1", effort: "high" });
+      await Promise.resolve();
+
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("effort-applied records the level for the next launch, without relaunching", () => {
+      orchestrator.initialize();
+      companionBus.emit("session:effort-applied", { sessionId: "s1", effort: "max" });
+
+      expect(deps.launcher.setEffort).toHaveBeenCalledWith("s1", "max");
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
     });
 
     it("git info ready callback starts PR polling", () => {

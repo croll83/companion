@@ -503,6 +503,11 @@ export class WsBridge {
         if (typeof rest.ultracode === "boolean") {
           companionBus.emit("session:ultracode-changed", { sessionId: session.id, enabled: rest.ultracode });
         }
+        // Claude effort applied at runtime: record it so --effort carries it
+        // into the next launch. No relaunch — the CLI already runs on it.
+        if (session.backendType === "claude" && typeof rest.effort === "string" && rest.effortConfirmedAt) {
+          companionBus.emit("session:effort-applied", { sessionId: session.id, effort: rest.effort });
+        }
         this.refreshGitInfo(session, { notifyPoller: true });
         this.persistSession(session);
         if (session.pendingMessages.length > 0 && adapter.isConnected()) {
@@ -1431,10 +1436,12 @@ export class WsBridge {
       return;
     }
 
-    // -- set_effort (Claude): reasoning effort can only be set via the
-    // `--effort` launch flag (no runtime control_request), so mirror the
-    // set_model flow — persist + relaunch with --resume.
-    if (msg.type === "set_effort" && (session.backendType === "claude" || session.backendType === "codex")) {
+    // -- set_effort (Codex): Codex takes effort only at launch
+    // (`-c model_reasoning_effort`), so persist + relaunch on thread/resume.
+    // Claude is NOT handled here: its CLI changes effort at runtime through
+    // apply_flag_settings, so the message falls through to the adapter and the
+    // session is never relaunched (see ClaudeAdapter.handleOutgoingSetEffort).
+    if (msg.type === "set_effort" && session.backendType === "codex") {
       session.state.effort = msg.effort;
       this.persistSession(session);
       this.broadcastToBrowsers(session, {

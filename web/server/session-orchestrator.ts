@@ -267,21 +267,25 @@ export class SessionOrchestrator {
       }
     });
 
-    // Effort change: like model change, the CLI only accepts `--effort` at
-    // launch (no runtime control_request), so persist the new level and
-    // relaunch with --resume to preserve conversation context.
     // Ultracode is applied in place by the CLI (no relaunch), but the CLI never
     // persists it — remember the confirmed state so the next relaunch re-passes it.
     companionBus.on("session:ultracode-changed", ({ sessionId, enabled }) => {
       this.launcher.setUltracode(sessionId, enabled);
     });
 
+    // Claude effort changes at runtime now; only remember it for the next launch.
+    companionBus.on("session:effort-applied", ({ sessionId, effort }) => {
+      this.launcher.setEffort(sessionId, effort);
+    });
+
+    // Codex effort change: Codex takes effort only at launch
+    // (`-c model_reasoning_effort`), so persist the new level and relaunch on
+    // thread/resume to keep the conversation. Claude never comes through here —
+    // its CLI changes effort at runtime (session:effort-applied above).
     companionBus.on("session:effort-change", async ({ sessionId, effort }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      // Both backends take effort at launch only (Claude `--effort`, Codex
-      // `-c model_reasoning_effort`), so both relaunch to apply it.
-      if (info.backendType !== "claude" && info.backendType !== "codex") return;
+      if (info.backendType !== "codex") return;
       log.info("orchestrator", "Effort change → relaunching CLI", {
         sessionId,
         from: info.effort,

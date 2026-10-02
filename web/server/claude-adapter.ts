@@ -393,6 +393,9 @@ export class ClaudeAdapter implements IBackendAdapter {
       case "set_ultracode":
         return this.handleOutgoingSetUltracode(msg.enabled);
 
+      case "set_effort":
+        return this.handleOutgoingSetEffort(msg.effort);
+
       case "set_permission_mode":
         return this.handleOutgoingSetPermissionMode(msg.mode);
 
@@ -528,28 +531,87 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   /**
-   * Toggle ultracode on the live CLI, without a relaunch.
+   * Change runtime flag settings and report what the CLI actually applied.
    *
-   * Unlike model and (for Claude) effort, ultracode is a runtime flag setting:
-   * apply_flag_settings changes it in place. The browser only learns the new
-   * state once the CLI confirms it — a refusal (model without xhigh, dynamic
-   * workflows off) reports the CLI's reason and keeps the previous state, so
-   * the toggle never shows "on" for something that is off.
+   * apply_flag_settings answers "success" even for values it ignores — probed
+   * on CLI 2.1.288: `effortLevel: "bogus"` returns success and leaves the
+   * effort untouched, and ultracode returns success on Haiku too. So the
+   * answer to apply is not a confirmation. The confirmation is a get_settings
+   * read-back of `applied`, which is what gets reported to the browser.
+   */
+  private applyFlagSettingsAndConfirm(
+    settings: Record<string, unknown>,
+    report: (applied: { effort?: string; ultracode?: boolean }, error?: string) => void,
+  ): void {
+    const readBack = (applyError?: string) => {
+      this.sendControlRequest(
+        { subtype: "get_settings" },
+        {
+          subtype: "get_settings",
+          resolve: (response) => {
+            const applied = (response as { applied?: { effort?: unknown; ultracode?: unknown } }).applied ?? {};
+            report(
+              {
+                effort: typeof applied.effort === "string" ? applied.effort : undefined,
+                ultracode: typeof applied.ultracode === "boolean" ? applied.ultracode : undefined,
+              },
+              applyError,
+            );
+          },
+          reject: (error) => report({}, applyError ?? `could not read the settings back (${error})`),
+        },
+      );
+    };
+    this.sendControlRequest(
+      { subtype: "apply_flag_settings", settings },
+      { subtype: "apply_flag_settings", resolve: () => readBack(), reject: (error) => readBack(error) },
+    );
+  }
+
+  /**
+   * Toggle ultracode on the live CLI, without a relaunch. The browser only
+   * learns the state the CLI reports as applied; `ultracodeConfirmedAt` moves
+   * on every answer so the UI stops waiting even when nothing changed.
    */
   private handleOutgoingSetUltracode(enabled: boolean): boolean {
-    this.sendControlRequest(
-      { subtype: "apply_flag_settings", settings: { ultracode: enabled } },
-      {
-        subtype: "apply_flag_settings",
-        resolve: () => {
-          this.browserMessageCb?.({ type: "session_update", session: { ultracode: enabled, ultracodeConfirmedAt: Date.now() } });
+    this.applyFlagSettingsAndConfirm({ ultracode: enabled }, (applied, error) => {
+      if (error || applied.ultracode !== enabled) {
+        const why = error ?? `the CLI kept it ${applied.ultracode ? "on" : "off"}`;
+        this.browserMessageCb?.({ type: "error", message: `Ultracode not changed: ${why}` });
+      }
+      this.browserMessageCb?.({
+        type: "session_update",
+        session: {
+          ...(applied.ultracode !== undefined ? { ultracode: applied.ultracode } : {}),
+          ultracodeConfirmedAt: Date.now(),
         },
-        reject: (error) => {
-          this.browserMessageCb?.({ type: "error", message: `Ultracode not changed: ${error}` });
-          this.browserMessageCb?.({ type: "session_update", session: { ultracode: !enabled, ultracodeConfirmedAt: Date.now() } });
+      });
+    });
+    return true;
+  }
+
+  /**
+   * Change reasoning effort on the live CLI, without a relaunch.
+   *
+   * This used to kill and respawn the CLI with a new --effort, reconnecting the
+   * session for every change. The CLI accepts effort at runtime through the same
+   * flag-settings channel as ultracode ("only effortLevel and ultracode can" be
+   * changed this way); --effort still seeds it at launch.
+   */
+  private handleOutgoingSetEffort(effort: string): boolean {
+    this.applyFlagSettingsAndConfirm({ effortLevel: effort }, (applied, error) => {
+      if (error || applied.effort !== effort) {
+        const why = error ?? `the CLI is still on ${applied.effort ?? "an unknown level"}`;
+        this.browserMessageCb?.({ type: "error", message: `Effort not changed: ${why}` });
+      }
+      this.browserMessageCb?.({
+        type: "session_update",
+        session: {
+          ...(applied.effort !== undefined ? { effort: applied.effort } : {}),
+          effortConfirmedAt: Date.now(),
         },
-      },
-    );
+      });
+    });
     return true;
   }
 

@@ -2559,21 +2559,40 @@ describe("Browser message routing", () => {
     off();
   });
 
-  it("set_effort (claude): emits session:effort-change and does NOT forward to CLI", () => {
-    // Effort has no runtime control_request — it's a launch flag — so the
-    // bridge mirrors set_model: persist + emit a bus event for the orchestrator
-    // to relaunch the CLI with --effort. Forwarding to the CLI would no-op.
-    const handler = vi.fn();
-    const off = companionBus.on("session:effort-change", handler);
+  it("set_effort (claude): changes effort in place on the CLI — no relaunch", () => {
+    // Claude's CLI accepts effort at runtime (apply_flag_settings). Relaunching
+    // for every effort change reconnected the session each time for nothing.
+    const relaunch = vi.fn();
+    const off = companionBus.on("session:effort-change", relaunch);
 
     bridge.handleBrowserMessage(browser, JSON.stringify({
       type: "set_effort",
       effort: "max",
     }));
 
-    expect(cli.send).not.toHaveBeenCalled();
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith({ sessionId: "s1", effort: "max" });
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(cli.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.request).toEqual({ subtype: "apply_flag_settings", settings: { effortLevel: "max" } });
+    off();
+  });
+
+  it("records a Claude effort the CLI confirmed, so the next launch keeps it", () => {
+    const applied = vi.fn();
+    const off = companionBus.on("session:effort-applied", applied);
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_effort", effort: "max" }));
+    const answer = (n: number, response: Record<string, unknown>) => {
+      const req = JSON.parse((cli.send.mock.calls[n][0] as string).trim());
+      bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "control_response",
+        response: { subtype: "success", request_id: req.request_id, response },
+      }));
+    };
+    answer(0, {});                                    // apply_flag_settings
+    answer(1, { applied: { effort: "max" } });        // get_settings read-back
+
+    expect(applied).toHaveBeenCalledWith({ sessionId: "s1", effort: "max" });
     expect(bridge.getSession("s1")?.state.effort).toBe("max");
     off();
   });

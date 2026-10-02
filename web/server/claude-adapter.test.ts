@@ -649,45 +649,91 @@ describe("send() — outgoing message translation", () => {
     expect(sent.request.model).toBe("claude-opus-4-6");
   });
 
-  // Ultracode is a runtime flag (apply_flag_settings), so no relaunch — and the
-  // browser must only ever see the state the CLI confirmed.
-  it("set_ultracode → sends apply_flag_settings and reports the CLI's confirmation", () => {
-    adapter.send({ type: "set_ultracode", enabled: true });
-    const sent = getLastSent();
-    expect(sent.type).toBe("control_request");
-    expect(sent.request).toEqual({ subtype: "apply_flag_settings", settings: { ultracode: true } });
-
-    // Nothing reported before the CLI answers.
-    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_update" }));
-
+  // Flag settings (ultracode, Claude effort) change at runtime with no relaunch.
+  // apply_flag_settings answers "success" even for values it ignores, so the
+  // browser is told what get_settings reports as `applied`, never the request.
+  function answer(request: any, response: Record<string, unknown> = {}, error?: string) {
     adapter.handleRawMessage(`${JSON.stringify({
       type: "control_response",
-      response: { subtype: "success", request_id: sent.request_id },
+      response: error
+        ? { subtype: "error", request_id: request.request_id, error }
+        : { subtype: "success", request_id: request.request_id, response },
     })}\n`);
+  }
 
+  it("set_ultracode → applies, reads back, and reports the applied state", () => {
+    adapter.send({ type: "set_ultracode", enabled: true });
+    const apply = getLastSent();
+    expect(apply.request).toEqual({ subtype: "apply_flag_settings", settings: { ultracode: true } });
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_update" }));
+
+    answer(apply);
+    const read = getLastSent();
+    expect(read.request).toEqual({ subtype: "get_settings" });
+
+    answer(read, { applied: { ultracode: true, effort: "high" } });
     expect(browserMessageCb).toHaveBeenCalledWith({
       type: "session_update",
       session: { ultracode: true, ultracodeConfirmedAt: expect.any(Number) },
     });
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
   });
 
-  it("set_ultracode refused by the CLI → error, and the previous state stands", () => {
+  it("set_ultracode answered 'success' but not applied → reports the truth", () => {
+    // The trap: success does not mean applied.
     adapter.send({ type: "set_ultracode", enabled: true });
-    const sent = getLastSent();
-
-    adapter.handleRawMessage(`${JSON.stringify({
-      type: "control_response",
-      response: { subtype: "error", request_id: sent.request_id, error: "dynamic workflows are off" },
-    })}\n`);
+    answer(getLastSent());
+    answer(getLastSent(), { applied: { ultracode: false } });
 
     expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
-      type: "error",
-      message: expect.stringContaining("dynamic workflows are off"),
+      type: "error", message: expect.stringContaining("kept it off"),
     }));
-    // ultracodeConfirmedAt still moves, so the UI stops waiting.
     expect(browserMessageCb).toHaveBeenCalledWith({
       type: "session_update",
       session: { ultracode: false, ultracodeConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_ultracode refused by the CLI → error, and the state read back stands", () => {
+    adapter.send({ type: "set_ultracode", enabled: true });
+    answer(getLastSent(), {}, "dynamic workflows are off");
+    answer(getLastSent(), { applied: { ultracode: false } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error", message: expect.stringContaining("dynamic workflows are off"),
+    }));
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { ultracode: false, ultracodeConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_effort → changes effort in place and reports the applied level", () => {
+    adapter.send({ type: "set_effort", effort: "max" });
+    const apply = getLastSent();
+    expect(apply.request).toEqual({ subtype: "apply_flag_settings", settings: { effortLevel: "max" } });
+
+    answer(apply);
+    answer(getLastSent(), { applied: { effort: "max" } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { effort: "max", effortConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_effort the CLI ignores → error, and the level stays where it is", () => {
+    // Probed on CLI 2.1.288: an unknown level returns success and changes nothing.
+    adapter.send({ type: "set_effort", effort: "max" });
+    answer(getLastSent());
+    answer(getLastSent(), { applied: { effort: "high" } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error", message: expect.stringContaining("still on high"),
+    }));
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { effort: "high", effortConfirmedAt: expect.any(Number) },
     });
   });
 

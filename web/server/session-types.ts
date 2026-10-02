@@ -417,6 +417,8 @@ export interface SessionState {
    * request is settled.
    */
   ultracodeConfirmedAt?: number;
+  /** Same as ultracodeConfirmedAt, for runtime effort changes (Claude). */
+  effortConfirmedAt?: number;
   cwd: string;
   tools: string[];
   permissionMode: string;

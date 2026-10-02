@@ -19,9 +19,10 @@ const EFFORT_LABELS: Record<string, string> = {
 
 /**
  * Reasoning-effort selector. Effort is the primary depth control on fable-5 and
- * Opus 4.6+, and on Codex models too. Neither CLI accepts it at runtime — Claude
- * takes `--effort`, Codex takes `-c model_reasoning_effort` — so changing it
- * relaunches the CLI (with `--resume` / `thread/resume`), same as a model switch.
+ * Opus 4.6+, and on Codex models too. Claude's CLI changes it in place
+ * (apply_flag_settings) — no relaunch; the level shown is the one the CLI
+ * reports as applied. Codex only takes it at launch (`-c model_reasoning_effort`),
+ * so there a change relaunches on `thread/resume`, same as a model switch.
  * Hidden when the model exposes no levels, or when disconnected.
  */
 export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
