@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -494,5 +494,146 @@ describe("computeAdaptiveTTL", () => {
       reviewDecision: "CHANGES_REQUESTED",
       checksSummary: { total: 3, success: 1, failure: 0, pending: 2 },
     }))).toBe(10_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchPRInfoAsync — the non-blocking path the PR poller uses (Bun.spawn).
+//
+// Bun.spawn is stubbed with fake processes. What matters here is HOW the gh
+// subprocesses are driven: stdout must be drained while the process runs and
+// stderr must not be left as an unread pipe. An unread subprocess pipe could
+// stall gh once the pipe buffer filled, and on Bun 1.3.x collecting it could
+// end an unrelated subprocess's stdout — the CLI protocol channel
+// (oven-sh/bun#32743).
+// ---------------------------------------------------------------------------
+
+describe("fetchPRInfoAsync", () => {
+  const mockSpawn = vi.fn();
+
+  /**
+   * A fake subprocess. By default stdout delivers `text`, then the stream
+   * closes and the process exits with `exitCode`. With `exitAfterDrain` the
+   * process only exits once stdout has been read to the end — a child blocked
+   * on a full pipe. With `hang` it never writes or exits until killed.
+   */
+  function fakeProc(text: string, exitCode = 0, opts: { exitAfterDrain?: boolean; hang?: boolean } = {}) {
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>((r) => { resolveExit = r; });
+    let closeStream = () => {};
+    const stdout = new ReadableStream<Uint8Array>({
+      start(controller) {
+        closeStream = () => { try { controller.close(); } catch { /* already closed */ } };
+        if (opts.hang) return;
+        controller.enqueue(new TextEncoder().encode(text));
+        if (!opts.exitAfterDrain) { controller.close(); resolveExit(exitCode); }
+      },
+      pull(controller) {
+        // Called only after the reader has taken the queued chunk.
+        if (opts.exitAfterDrain) { controller.close(); resolveExit(exitCode); }
+      },
+    });
+    const kill = vi.fn(() => { closeStream(); resolveExit(143); });
+    return { stdout, exited, kill };
+  }
+
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    vi.stubGlobal("Bun", { spawn: mockSpawn });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("resolves the repo slug, queries GraphQL and parses the PR", async () => {
+    mockSpawn
+      .mockReturnValueOnce(fakeProc("org/repo\n"))
+      .mockReturnValueOnce(fakeProc(JSON.stringify(makeGraphQLResponse())));
+
+    const pr = await mod.fetchPRInfoAsync("/repo", "feat/x");
+
+    expect(pr?.number).toBe(162);
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    const [repoArgv] = mockSpawn.mock.calls[0];
+    const [gqlArgv] = mockSpawn.mock.calls[1];
+    expect(repoArgv).toEqual(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+    expect(gqlArgv.slice(0, 3)).toEqual(["gh", "api", "graphql"]);
+    expect(gqlArgv).toContain("owner=org");
+    expect(gqlArgv).toContain("name=repo");
+    expect(gqlArgv).toContain("branch=feat/x");
+  });
+
+  it("never leaves stderr as an unread pipe and always pipes stdout", async () => {
+    // Regression guard for the Bun stream-teardown bug: stderr was piped and
+    // never read. It must be discarded at the source instead.
+    mockSpawn
+      .mockReturnValueOnce(fakeProc("org/repo"))
+      .mockReturnValueOnce(fakeProc(JSON.stringify(makeGraphQLResponse())));
+
+    await mod.fetchPRInfoAsync("/repo", "main");
+
+    for (const [, options] of mockSpawn.mock.calls) {
+      expect(options).toMatchObject({ cwd: "/repo", stdout: "pipe", stderr: "ignore" });
+    }
+  });
+
+  it("drains stdout while gh runs, so a child blocked on a full pipe still finishes", async () => {
+    // These children exit only after their stdout is read. Awaiting the exit
+    // before reading (the old order) would hang here forever.
+    mockSpawn
+      .mockReturnValueOnce(fakeProc("org/repo", 0, { exitAfterDrain: true }))
+      .mockReturnValueOnce(fakeProc(JSON.stringify(makeGraphQLResponse()), 0, { exitAfterDrain: true }));
+
+    const pr = await mod.fetchPRInfoAsync("/repo", "main");
+
+    expect(pr?.number).toBe(162);
+  }, 2_000);
+
+  it("returns null and skips GraphQL when the repo slug lookup fails", async () => {
+    mockSpawn.mockReturnValueOnce(fakeProc("", 1));
+
+    expect(await mod.fetchPRInfoAsync("/not-a-repo", "main")).toBeNull();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null when gh api graphql exits non-zero, and caches the miss", async () => {
+    mockSpawn
+      .mockReturnValueOnce(fakeProc("org/repo"))
+      .mockReturnValueOnce(fakeProc("rate limited", 1));
+
+    expect(await mod.fetchPRInfoAsync("/repo", "main")).toBeNull();
+    // Cached: a second call within the TTL spawns nothing.
+    expect(await mod.fetchPRInfoAsync("/repo", "main")).toBeNull();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null when GraphQL output is not JSON", async () => {
+    mockSpawn
+      .mockReturnValueOnce(fakeProc("org/repo"))
+      .mockReturnValueOnce(fakeProc("<html>oops</html>"));
+
+    expect(await mod.fetchPRInfoAsync("/repo", "main")).toBeNull();
+  });
+
+  it("kills a gh call that hangs past its timeout instead of waiting forever", async () => {
+    vi.useFakeTimers();
+    const hung = fakeProc("", 0, { hang: true });
+    mockSpawn.mockReturnValueOnce(hung);
+
+    const pending = mod.fetchPRInfoAsync("/repo", "main");
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(hung.kill).toHaveBeenCalledTimes(1);
+    // Killed (exit 143) → treated as a failed lookup.
+    expect(await pending).toBeNull();
+  });
+
+  it("returns null without spawning when gh is not installed", async () => {
+    mockExecSync.mockImplementation(() => { throw new Error("not found"); });
+
+    expect(await mod.fetchPRInfoAsync("/repo", "main")).toBeNull();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
