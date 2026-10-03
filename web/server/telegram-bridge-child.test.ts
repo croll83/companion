@@ -52,12 +52,12 @@ describe("safeName (attachment filename hardening)", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Booted-worker tests.
 //
-// Everything except safeName is module-private and only reachable through the
-// `if (import.meta.main)` boot block (reconcile → SessionBridge per binding →
-// Telegram long-poll loop). Vitest's module runner builds `import.meta` as a
-// plain object with no `main` key, so we boot the module by temporarily
-// exposing `main === true` *only* to this module's import.meta (matched by its
-// url) via an Object.prototype accessor, removed as soon as the import settles.
+// Everything except safeName is module-private and only reachable by running
+// the module's boot path (reconcile → SessionBridge per binding → Telegram
+// long-poll loop). The module runs that path on import only when it is the
+// entry point (import.meta.main); under the test runner it does not, so we call
+// the exported boot() directly. This is portable across Vitest/Vite versions,
+// unlike faking import.meta.main.
 //
 // Each test boots a fresh module instance (vi.resetModules) against:
 //   - a temp COMPANION_HOME holding settings.json / auth.json / bindings,
@@ -214,15 +214,14 @@ async function importBooted(): Promise<unknown> {
     if (ev === "SIGHUP" || ev === "SIGTERM") { handlers[ev] = fn; return process; }
     return origOn(ev, fn);
   }) as any);
-  Object.defineProperty(Object.prototype, "main", {
-    configurable: true,
-    get(this: any) { return typeof this?.url === "string" && this.url.includes("telegram-bridge-child") ? true : undefined; },
-    set(this: any, v: unknown) { Object.defineProperty(this, "main", { value: v, writable: true, enumerable: true, configurable: true }); },
-  });
   try {
-    return await import("./telegram-bridge-child.js");
+    // The module is side-effect free on import (its boot is guarded by
+    // import.meta.main). We call the exported boot() to run the same startup
+    // path the entry point runs — portable across Vitest/Vite versions.
+    const mod = await import("./telegram-bridge-child.js");
+    (mod as { boot: () => void }).boot();
+    return mod;
   } finally {
-    delete (Object.prototype as any).main;
     onSpy.mockRestore();
   }
 }

@@ -585,8 +585,11 @@ async function pollLoop(): Promise<void> {
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
-// Guarded so the module can be imported by tests without starting the bot.
-if (import.meta.main) {
+// Exported so tests can drive the bot explicitly; the module itself only runs
+// boot() when executed as the entry point (import.meta.main), so importing it is
+// side-effect free. This avoids depending on how the test runner builds
+// import.meta, which is not portable across Vitest/Vite versions.
+export function boot(): void {
   if (!BOT_TOKEN) {
     console.error("[bridge] no telegramBotToken in settings — exiting.");
     process.exit(0);
@@ -595,4 +598,8 @@ if (import.meta.main) {
   process.on("SIGTERM", () => { for (const br of bridges.values()) br.dispose(); process.exit(0); });
   reconcile();
   void pollLoop();
+}
+
+if (import.meta.main) {
+  boot();
 }
