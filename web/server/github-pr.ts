@@ -84,25 +84,34 @@ function getRepoSlug(cwd: string): string | null {
   }
 }
 
+/**
+ * Run a short `gh` command and return its stdout, or null on a non-zero exit.
+ *
+ * stdout is drained while the process runs and stderr is discarded. A piped
+ * stream that is never read can stall the child once the pipe buffer fills,
+ * and on Bun 1.3.x collecting such an unread subprocess stream could end an
+ * unrelated subprocess's stdout — which is how live CLI sessions lost their
+ * protocol channel (oven-sh/bun#32743).
+ */
+async function runGh(args: string[], cwd: string, timeoutMs: number): Promise<string | null> {
+  const proc = Bun.spawn(["gh", ...args], { cwd, stdout: "pipe", stderr: "ignore" });
+  const timeout = setTimeout(() => proc.kill(), timeoutMs);
+  try {
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    return exitCode === 0 ? stdout : null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function getRepoSlugAsync(cwd: string): Promise<string | null> {
   const cached = repoSlugCache.get(cwd);
   if (cached && Date.now() - cached.timestamp < REPO_SLUG_TTL) {
     return cached.slug;
   }
   try {
-    const proc = Bun.spawn(
-      ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-      { cwd, stdout: "pipe", stderr: "pipe" },
-    );
-    const timeout = setTimeout(() => proc.kill(), 10_000);
-    const exitCode = await proc.exited;
-    clearTimeout(timeout);
-    if (exitCode !== 0) {
-      repoSlugCache.set(cwd, { slug: null, timestamp: Date.now() });
-      return null;
-    }
-    const slug = (await new Response(proc.stdout).text()).trim();
-    const result = slug || null;
+    const stdout = await runGh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd, 10_000);
+    const result = stdout?.trim() || null;
     repoSlugCache.set(cwd, { slug: result, timestamp: Date.now() });
     return result;
   } catch {
@@ -353,21 +362,17 @@ export async function fetchPRInfoAsync(cwd: string, branch: string): Promise<Git
   if (!owner || !name) return null;
 
   try {
-    const proc = Bun.spawn(
-      ["gh", "api", "graphql", "-f", `query=${PR_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `branch=${branch}`],
-      { cwd, stdout: "pipe", stderr: "pipe" },
+    const stdout = await runGh(
+      ["api", "graphql", "-f", `query=${PR_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `branch=${branch}`],
+      cwd,
+      15_000,
     );
-    const timeout = setTimeout(() => proc.kill(), 15_000);
-    const exitCode = await proc.exited;
-    clearTimeout(timeout);
-
-    if (exitCode !== 0) {
+    if (stdout === null) {
       prCache.set(cacheKey, { data: null, timestamp: Date.now(), ttl: PR_CACHE_TTL });
       return null;
     }
 
-    const stdout = (await new Response(proc.stdout).text()).trim();
-    const parsed = JSON.parse(stdout);
+    const parsed = JSON.parse(stdout.trim());
     const prInfo = parseGraphQLResponse(parsed);
     const ttl = computeAdaptiveTTL(prInfo);
     prCache.set(cacheKey, { data: prInfo, timestamp: Date.now(), ttl });
