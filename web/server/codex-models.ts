@@ -17,7 +17,9 @@
  * Kept out of `effort.ts` on purpose: that module is re-exported into the
  * browser bundle and must not touch `node:fs`.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { join } from "node:path";
 import { getLegacyCodexHome, resolveCompanionCodexHome } from "./codex-home.js";
 import {
@@ -38,6 +40,8 @@ export interface CodexCacheModel extends CodexModelEntry {
 
 interface CodexModelsCache {
   fetched_at?: string;
+  /** Codex version that fetched this catalogue; OpenAI tailors it per client. */
+  client_version?: string;
   models: CodexCacheModel[];
 }
 
@@ -58,23 +62,74 @@ export function candidateCachePaths(legacyHome: string, companionCodexHome: stri
   return paths.filter((p) => existsSync(p));
 }
 
+/** "0.160.0" → [0,160,0]; non-versions sort lowest. */
+function versionParts(v: string | undefined | null): number[] {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(v ?? "");
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [-1, -1, -1];
+}
+
+export function compareVersions(a: string | undefined | null, b: string | undefined | null): number {
+  const x = versionParts(a), y = versionParts(b);
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return 0;
+}
+
 /**
- * The most recently fetched cache among `paths`.
+ * The catalogue to trust among `paths`, for the Codex binary Companion runs.
  *
- * Ordered by Codex's own `fetched_at`, not file mtime: a session home seeded by
- * copying the host cache gets a new mtime but carries the old catalogue.
+ * OpenAI tailors the catalogue to the client that fetches it: on 2026-10-03
+ * Codex 0.160 listed GPT-6.1-Sol and 0.157 did not. Several Codex versions
+ * refresh caches on this machine (the user's auto-updating install, and the one
+ * Companion spawns), so "most recently fetched" flipped the picker between
+ * catalogues — and could offer a model the client Companion runs was never
+ * offered. So: prefer caches fetched by exactly the running version; else the
+ * newest version not above it; only then fall back to recency. Within a
+ * version, ordered by Codex's own `fetched_at` (a seeded copy gets a new mtime
+ * but carries the old catalogue).
  */
-export function readFreshestCache(paths: string[]): CodexModelsCache | null {
-  let best: { cache: CodexModelsCache; at: number } | null = null;
+export function readFreshestCache(paths: string[], runningVersion?: string | null): CodexModelsCache | null {
+  const caches: { cache: CodexModelsCache; at: number }[] = [];
   for (const path of paths) {
     try {
       const cache = JSON.parse(readFileSync(path, "utf8")) as CodexModelsCache;
       if (!Array.isArray(cache.models)) continue;
-      const at = Date.parse(cache.fetched_at ?? "") || 0;
-      if (!best || at > best.at) best = { cache, at };
+      caches.push({ cache, at: Date.parse(cache.fetched_at ?? "") || 0 });
     } catch { /* unreadable or mid-write — skip it */ }
   }
-  return best?.cache ?? null;
+  if (caches.length === 0) return null;
+
+  let pool = caches;
+  if (runningVersion) {
+    const exact = caches.filter((c) => compareVersions(c.cache.client_version, runningVersion) === 0);
+    const notAbove = caches.filter((c) => compareVersions(c.cache.client_version, runningVersion) <= 0);
+    if (exact.length > 0) pool = exact;
+    else if (notAbove.length > 0) {
+      const top = notAbove.reduce((a, b) => (compareVersions(a.cache.client_version, b.cache.client_version) >= 0 ? a : b));
+      pool = notAbove.filter((c) => compareVersions(c.cache.client_version, top.cache.client_version) === 0);
+    }
+  }
+  return pool.reduce((a, b) => (b.at > a.at ? b : a)).cache;
+}
+
+/**
+ * Version of the codex binary Companion spawns (resolved from PATH like the
+ * launcher does), cached per binary file so `codex --version` runs only when the
+ * install changes — e.g. after `codex update`.
+ */
+let versionMemo: { key: string; version: string | null } | null = null;
+export function runningCodexVersion(): string | null {
+  const bin = resolveBinary("codex");
+  if (!bin) return null;
+  let key: string;
+  try { const real = realpathSync(bin); key = `${real}:${statSync(real).mtimeMs}`; } catch { return null; }
+  if (versionMemo?.key === key) return versionMemo.version;
+  let version: string | null = null;
+  try {
+    const out = execFileSync(bin, ["--version"], { encoding: "utf8", timeout: 5000, env: { ...process.env, PATH: getEnrichedPath() } });
+    version = /(\d+\.\d+\.\d+)/.exec(out)?.[1] ?? null;
+  } catch { version = null; }
+  versionMemo = { key, version };
+  return version;
 }
 
 function defaultPaths(): string[] {
@@ -93,9 +148,10 @@ let cached: { sig: string; cache: CodexModelsCache | null } | null = null;
 /** The freshest catalogue, re-read only when one of the cache files changes. */
 export function loadCodexCache(): CodexModelsCache | null {
   const paths = defaultPaths();
-  const sig = signature(paths);
+  const version = runningCodexVersion();
+  const sig = `${version}|${signature(paths)}`;
   if (cached && cached.sig === sig) return cached.cache;
-  const cache = readFreshestCache(paths);
+  const cache = readFreshestCache(paths, version);
   cached = { sig, cache };
   return cache;
 }
@@ -157,5 +213,5 @@ export function pickerModels(cache: CodexModelsCache): CodexPickerModel[] {
     .map((m) => ({ value: m.slug, label: m.display_name || m.slug, description: m.description || "" }));
 }
 
-/** Test seam: drop the memo. */
-export function resetCodexModelsCache(): void { cached = null; }
+/** Test seam: drop the memos. */
+export function resetCodexModelsCache(): void { cached = null; versionMemo = null; }

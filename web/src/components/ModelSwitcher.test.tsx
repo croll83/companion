@@ -172,7 +172,7 @@ describe("ModelSwitcher", () => {
     });
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    expect(screen.getByRole("option", { name: /GPT-6-Sol/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /GPT-6.1-Sol/ })).toBeInTheDocument();
   });
 
   it("is hidden when CLI is not connected", () => {

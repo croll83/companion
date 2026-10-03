@@ -70,7 +70,7 @@ export const CLAUDE_MODELS: ModelOption[] = [
  */
 export const CODEX_MODELS: ModelOption[] = [
   { value: "gpt-6-astra", label: "GPT-6-Astra", icon: "\u25A0" },
-  { value: "gpt-6-sol", label: "GPT-6-Sol", icon: "\u25C6" },
+  { value: "gpt-6.1-sol", label: "GPT-6.1-Sol", icon: "\u25C6" },
   { value: "gpt-6-luna", label: "GPT-6-Luna", icon: "\u25CF" },
   { value: "gpt-5.6-terra", label: "GPT-5.6-Terra", icon: "\u25D5" },
   { value: "gpt-5.5", label: "GPT-5.5", icon: "\u2726" },
