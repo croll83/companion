@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession, setFocusedSession, syncSessionSockets } from "./ws.js";
+import { setFocusedSession, syncSessionSockets } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
