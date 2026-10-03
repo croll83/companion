@@ -1,5 +1,70 @@
 # Changelog
 
+## [1.0.0](https://github.com/croll83/companion/compare/the-companion-v0.103.0...the-companion-v1.0.0) (2026-10-03)
+
+
+### Features
+
+* **attachments:** PDF upload in composer + files over Telegram bridge ([076cc09](https://github.com/croll83/companion/commit/076cc098b1025ac46222720f27fe6c48cc9ea225))
+* **codex:** derive known protocol methods from the schema, end the manual allowlist ([a3b8458](https://github.com/croll83/companion/commit/a3b84581ba483a40db36ec21dd1f5d59d79043e4))
+* **codex:** reasoning-effort selector + PDF attachments ([cfd1f36](https://github.com/croll83/companion/commit/cfd1f360260b88230204330e451bc28ebb7f6115))
+* **codex:** steer the in-flight turn instead of queueing behind it ([fa306c0](https://github.com/croll83/companion/commit/fa306c03b287f87b40439a0269de9d31752e6563))
+* **composer:** keep send next to stop while a turn is running ([9d20d0c](https://github.com/croll83/companion/commit/9d20d0c7ebf607a5220497a34c0d57b6bdb1e360))
+* **effort:** change Claude effort in place, confirm by reading it back ([b16ef59](https://github.com/croll83/companion/commit/b16ef590d031d8b9d0f1ca8c5ecffe733d9f64b0))
+* **models:** add Fable 5.1 (claude-fable-5-1) as the Fable option ([f050371](https://github.com/croll83/companion/commit/f050371ce86b3205acf3dfcb3a9072c9d1e32fab))
+* **models:** add Opus 5.5, drop 4.8 and 4.7 from the picker ([02d0547](https://github.com/croll83/companion/commit/02d0547b967618acc453a363f352a2ac6306f9c0))
+* **models:** add Sonnet 5.5 to the picker ([75282c2](https://github.com/croll83/companion/commit/75282c2bd24a10894a4759805fbe3a1e5087fa28))
+* **refusal:** walk a fallback chain instead of one fixed model ([3986789](https://github.com/croll83/companion/commit/398678943ae2f9d6ee2e4261b704d80cea73693d))
+* **telegram:** in-app Telegram bridge per session (group/topic binding) ([06cfe17](https://github.com/croll83/companion/commit/06cfe1784def8c8baf763c90b9b313a64fff78c1))
+* **ui:** open local file links in a viewer instead of 404ing ([f4c8ff2](https://github.com/croll83/companion/commit/f4c8ff29e31e3adb032c3d397d58e5753957b9d5))
+* **ultracode:** toggle Claude Code's ultracode from the composer ([bda546e](https://github.com/croll83/companion/commit/bda546ebe3106393eaa9a27c6d527e2951e589ff))
+
+
+### Bug Fixes
+
+* **claude-adapter:** only treat real intake frames as an input ack ([5cfa3d6](https://github.com/croll83/companion/commit/5cfa3d64d8aa1c226ed41291a4747db5c5b9b9fe))
+* **cli-launcher:** stop discarding cliSessionId on a single quick --resume exit ([c8201f5](https://github.com/croll83/companion/commit/c8201f5242d4c496aa22d1025cc4747595e75479))
+* **codex:** handle thread/settings/updated + remoteControl/status/changed ([b4565ca](https://github.com/croll83/companion/commit/b4565ca5276bc1ca1e0bd8bd1f414dbe607d168e))
+* **codex:** make model and effort switchable mid-session ([6b9843e](https://github.com/croll83/companion/commit/6b9843eaf0892d06957e62d27db43aa1274ab129))
+* **codex:** never lose a thread to a relaunch race with the old app-server ([5836631](https://github.com/croll83/companion/commit/5836631909b171553c95fa9b55adc2574bbf6503))
+* **codex:** pick the model catalogue of the Codex version Companion runs ([6a56c61](https://github.com/croll83/companion/commit/6a56c61c2c0509e89dbdd90d47ecedec2945a393))
+* **codex:** read the freshest model catalogue, supersede old generations ([142d6e5](https://github.com/croll83/companion/commit/142d6e51c359012bf14401d6d60a623e730e7516))
+* **codex:** share one auth.json across sessions instead of copying it ([dee81e7](https://github.com/croll83/companion/commit/dee81e7f61a345b0d468f720e530e24c3e6408f5))
+* **codex:** wait for the thread lock on a clock, not 3 tries ([6463e02](https://github.com/croll83/companion/commit/6463e02d786c4592c3d3283f279ddd51308f1e88))
+* **sessions:** bring back a session whose transport died mid-turn ([3c18b4a](https://github.com/croll83/companion/commit/3c18b4a036f96d0e4eef5cd9f9bac3f5b0c1d90e))
+* **sessions:** never idle-kill a CLI the CLI itself says has work in flight ([43aba62](https://github.com/croll83/companion/commit/43aba62b5a4a6a12f8fd57e7642789a312b3a92d))
+* **sessions:** stop closing sessions that are alive, focused, or archived ([d94b5ac](https://github.com/croll83/companion/commit/d94b5ac43cdf3efac7b741561a5602177cbd5858))
+* **telegram-bridge:** audit messages at queue time, not only at turn start ([86d3870](https://github.com/croll83/companion/commit/86d3870867690756c45123bb5af4fb39684381b1))
+* **telegram-bridge:** cooldown to stop relaunch storm wiping cliSessionId ([f018bcb](https://github.com/croll83/companion/commit/f018bcbe9456dbde9791859fcc5c42679c0a943d))
+* **telegram-bridge:** fail fast when a message is never picked up ([6e548cd](https://github.com/croll83/companion/commit/6e548cd711ebbae857773f69d922361e3e01b001))
+* **telegram-bridge:** liveness = CPU delta + tool child, not 'has a socket' ([a7857b5](https://github.com/croll83/companion/commit/a7857b52ae163044475a8734178b9012dc091f7e))
+* **telegram-bridge:** liveness via CPU RATE + recent socket traffic, not absolute CPU ([1d5ada8](https://github.com/croll83/companion/commit/1d5ada86bf93ee5d288f6102afca5f8132755583))
+* **telegram-bridge:** long-turn timeout + relaunch on wedged/dead CLI ([3a50b13](https://github.com/croll83/companion/commit/3a50b136e51b729692fd15e41bb3c42abe49ff36))
+* **telegram-bridge:** only relaunch a stalled turn when the CLI is provably idle ([cccaf1b](https://github.com/croll83/companion/commit/cccaf1b5155aabe9decdb9c42677bed4aff8fe7f))
+* **telegram-bridge:** rolling mid-turn stall watchdog ([f37ce8c](https://github.com/croll83/companion/commit/f37ce8c3f5ef994dd049f3562e2f47ec94cdd33e))
+* **telegram:** harden bridge — filename sanitization, queue cap, testable boot ([af39122](https://github.com/croll83/companion/commit/af39122ee4f02d47113350771a20e6fb4d269fb4))
+* **telegram:** render the model's Markdown instead of printing it verbatim ([1beea56](https://github.com/croll83/companion/commit/1beea56eed2acdb6ed8202787386fa197743c200))
+* **ui:** make backend errors visually distinct from system separators ([6b89358](https://github.com/croll83/companion/commit/6b89358fc279778d3255c0b241a75ae189caee96))
+* **viewer:** render file-viewer markdown through the shared styled MarkdownContent ([f65dbf1](https://github.com/croll83/companion/commit/f65dbf1f389401513224b0c0f8d9f40cddcd06f9))
+* **ws-bridge:** keep a live turn in 'streaming' — stop idle-kill SIGTERMing mid-turn CLIs ([dcf8ce8](https://github.com/croll83/companion/commit/dcf8ce889776cbf4483f47d685dcf2d784673ea3))
+
+
+### Performance Improvements
+
+* **history:** send the recent tail and page older messages on demand ([4295fcf](https://github.com/croll83/companion/commit/4295fcfcb84ad0ca0bd1cfcaf6f22374669cfc1d))
+* **ws:** open sockets on demand instead of one per session ([7fe7dea](https://github.com/croll83/companion/commit/7fe7dea3644fe7cba35c1108b18b46ec2d5044ac))
+
+
+### Code Refactoring
+
+* **codex:** remove the handler module nothing ever called ([47f60fc](https://github.com/croll83/companion/commit/47f60fc3f8b7dba79d97a6338fd85e4ab9925f51))
+* **telegram-bridge-child:** export boot() so tests drive startup portably ([c1f3d28](https://github.com/croll83/companion/commit/c1f3d2815ee26b62dd587fa185b983a7f9fde743))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([e944a85](https://github.com/croll83/companion/commit/e944a85d68674b72a4e454ed63fccb277ff03ed8))
+
 ## [0.103.0](https://github.com/croll83/companion/compare/the-companion-v0.102.0...the-companion-v0.103.0) (2026-08-14)
 
 
