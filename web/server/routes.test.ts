@@ -859,7 +859,19 @@ describe("POST /api/sessions/:id/relaunch", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ ok: true });
-    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1");
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { force: false });
+  });
+
+  it("passes ?force=1 through (deliberate restart of a working CLI)", async () => {
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true });
+    await app.request("/api/sessions/s1/relaunch?force=1", { method: "POST" });
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { force: true });
+  });
+
+  it("reports when the CLI was already running and was only resynced", async () => {
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true, alreadyRunning: true });
+    const res = await app.request("/api/sessions/s1/relaunch", { method: "POST" });
+    expect(await res.json()).toEqual({ ok: true, alreadyRunning: true });
   });
 
   it("returns 503 with error when container is missing", async () => {

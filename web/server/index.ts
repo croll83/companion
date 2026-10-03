@@ -1,3 +1,5 @@
+// Must stay first: timestamps every console line (see log-timestamps.ts).
+import "./log-timestamps.js";
 process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 
 // Enrich process PATH at startup so binary resolution and `which` calls can find

@@ -23,6 +23,7 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { isSessionWorking } from "./session-work.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -738,10 +739,24 @@ export class SessionOrchestrator {
 
   // ── Relaunch ───────────────────────────────────────────────────────────────
 
-  async relaunchSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+  async relaunchSession(
+    sessionId: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ ok: boolean; error?: string; alreadyRunning?: boolean }> {
     const info = this.launcher.getSession(sessionId);
     if (info?.archived) {
       return { ok: false, error: "Session is archived and cannot be relaunched" };
+    }
+    // Reconnect used to kill whatever was running, unconditionally. A browser
+    // showing stale "disconnected" state (a parked tab, a phone coming back)
+    // made that a way to SIGTERM a CLI in the middle of a terraform plan. If the
+    // CLI is connected and has work in flight, fix the browser instead.
+    // `force` keeps the old behaviour for a deliberate restart of a wedged CLI.
+    const live = this.wsBridge.getSession(sessionId);
+    if (!opts.force && live && this.wsBridge.isCliConnected(sessionId) && isSessionWorking(live)) {
+      log.info("orchestrator", "Reconnect on a connected, working CLI — resyncing instead of killing", { sessionId });
+      this.wsBridge.resyncCliConnected(sessionId);
+      return { ok: true, alreadyRunning: true };
     }
     this.clearAutoRelaunchCount(sessionId);
     const session = this.wsBridge.getSession(sessionId);

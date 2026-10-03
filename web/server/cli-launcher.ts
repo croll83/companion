@@ -757,6 +757,10 @@ export class CliLauncher {
       spawnEnv = {
         ...process.env,
         CLAUDECODE: undefined,
+        // Have the CLI report its own turn state (session_state_changed:
+        // idle | running | requires_action) instead of Companion inferring it.
+        // Off by default in the CLI; see session-work.ts for how it is used.
+        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
         ...options.env,
         PATH: getEnrichedPath(),
         ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),

@@ -60,6 +60,10 @@ export interface Session {
   /** Timestamp of last non-keepalive CLI message (for idle detection) */
   /** Tool calls issued but not yet resolved — see session-work.ts. */
   openToolCalls: Set<string>;
+  /** Live background tasks as last reported by the CLI — see session-work.ts. */
+  backgroundTasks: Map<string, { type: string; description: string; ambient: boolean }>;
+  /** The CLI's declared turn state, when it reports one. */
+  cliState?: "idle" | "running" | "requires_action";
   /** When a client last reported this session as focused; 0 = never. */
   lastFocusTs: number;
   lastCliActivityTs: number;

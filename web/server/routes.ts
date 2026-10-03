@@ -747,12 +747,13 @@ export function createRoutes(
 
   api.post("/sessions/:id/relaunch", async (c) => {
     const id = c.req.param("id");
-    const result = await orchestrator.relaunchSession(id);
+    const force = c.req.query("force") === "1";
+    const result = await orchestrator.relaunchSession(id, { force });
     if (!result.ok) {
       const status = result.error?.includes("not found") || result.error?.includes("Session not found") ? 404 : 503;
       return c.json({ error: result.error || "Relaunch failed" }, status);
     }
-    return c.json({ ok: true });
+    return c.json({ ok: true, ...(result.alreadyRunning ? { alreadyRunning: true } : {}) });
   });
 
   // Kill a background process spawned by a session

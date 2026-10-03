@@ -49,7 +49,7 @@ import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
-import { isSessionWorking, noteWorkFromCliMessage, clearWorkTracking } from "./session-work.js";
+import { isSessionWorking, isTurnInFlight, liveBackgroundWork, noteWorkFromCliMessage, clearWorkTracking } from "./session-work.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { log } from "./logger.js";
 
@@ -198,6 +198,7 @@ export class WsBridge {
         backendAdapter: null,
         browserSockets: new Set(),
         openToolCalls: new Set(),
+        backgroundTasks: new Map(),
         lastFocusTs: 0,
         state: p.state,
         pendingPermissions: new Map(p.pendingPermissions || []),
@@ -292,6 +293,7 @@ export class WsBridge {
         backendAdapter: null,
         browserSockets: new Set(),
         openToolCalls: new Set(),
+        backgroundTasks: new Map(),
         lastFocusTs: 0,
         state: makeDefaultState(sessionId, type),
         pendingPermissions: new Map(),
@@ -373,9 +375,8 @@ export class WsBridge {
       // Coming to rest ends any turn, so outstanding tool bookkeeping is stale.
       // Without this a tool whose summary never arrived would keep the session
       // "working" forever and the watchdog could never reclaim it.
-      if (event.to === "ready" || event.to === "terminated") {
-        clearWorkTracking(session);
-      }
+      if (event.to === "ready") clearWorkTracking(session, "turn");
+      if (event.to === "terminated") clearWorkTracking(session, "process");
       companionBus.emit("session:phase-changed", {
         sessionId: event.sessionId,
         from: event.from,
@@ -874,6 +875,27 @@ export class WsBridge {
   }
 
   /**
+   * Re-tell every browser that the CLI is alive, bypassing the dedupe.
+   *
+   * For a Reconnect pressed on a session whose CLI is in fact connected: the
+   * browser was showing stale state, and the fix is to correct the browser,
+   * not to kill a CLI that is working.
+   */
+  resyncCliConnected(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.lastConnectionBroadcast = "connected";
+    this.broadcastToBrowsers(session, { type: "cli_connected" });
+    // Only re-send a phase the browser reads as "connected". starting /
+    // initializing / reconnecting / terminated all map to cliConnected=false in
+    // the frontend and would undo the cli_connected just sent (caught in review).
+    const phase = session.stateMachine.phase;
+    if (phase === "ready" || phase === "streaming" || phase === "awaiting_permission" || phase === "compacting") {
+      this.broadcastToBrowsers(session, { type: "session_phase", phase, previousPhase: phase });
+    }
+  }
+
+  /**
    * Public wrapper for the orchestrator to announce a confirmed CLI death
    * (e.g. from the session:exited handler when no relaunch is in progress).
    * No-op for unknown sessions.
@@ -969,6 +991,9 @@ export class WsBridge {
   handleCLIStdioReady(sessionId: string, proc: Subprocess<"pipe", "pipe", "pipe">) {
     this.recorder?.recordEvent(sessionId, "ws_open", "cli");
     const session = this.getOrCreateSession(sessionId);
+    // A new CLI process: whatever the previous one was running in the
+    // background died with it. It will re-announce its own set.
+    clearWorkTracking(session, "process");
 
     // Create or retrieve ClaudeAdapter for this session
     let adapter: ClaudeAdapter;
@@ -1084,7 +1109,10 @@ export class WsBridge {
   ): void {
     // Capture this BEFORE the phase moves: at confirm time the session is
     // "terminated", which reads as at-rest and would lose the distinction.
-    const wasWorking = isSessionWorking(session);
+    // Turn-scoped on purpose — see isTurnInFlight: background work must NOT
+    // trigger this relaunch, because relaunching is what would kill it.
+    const wasWorking = isTurnInFlight(session);
+    const orphanedBackgroundWork = liveBackgroundWork(session).length;
     session.stateMachine.transition("reconnecting", trigger);
 
     const existing = this.disconnectTimers.get(sessionId);
@@ -1109,6 +1137,12 @@ export class WsBridge {
       if (wasWorking) {
         log.info("ws-bridge", "Disconnected mid-turn — relaunching", { sessionId, trigger });
         companionBus.emit("session:relaunch-needed", { sessionId });
+      } else if (orphanedBackgroundWork > 0) {
+        // Left alone on purpose: the CLI may still be running this work even
+        // though we can no longer read it. A relaunch would SIGTERM it.
+        log.warn("ws-bridge", "Lost contact with a CLI that has background work — not relaunching", {
+          sessionId, trigger, backgroundTasks: orphanedBackgroundWork,
+        });
       }
     }, delayMs));
   }
@@ -1246,6 +1280,15 @@ export class WsBridge {
   );
   private static readonly IDLE_CHECK_INTERVAL_MS = 60_000; // check every 60s
   /**
+   * How long a session kept alive ONLY by background tasks may stay silent
+   * before it is reclaimed anyway. Generous on purpose: a long terraform apply or
+   * Docker build must finish; this only catches tasks that never end.
+   */
+  private static get BG_WORK_MAX_IDLE_MS(): number {
+    const h = Number(process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS);
+    return (Number.isFinite(h) && h > 0 ? h : 6) * 3_600_000;
+  }
+  /**
    * How recently a client must have had the session focused for it to be spared.
    *
    * Reverses the earlier browser-independent policy: a focused-but-idle session
@@ -1325,7 +1368,20 @@ export class WsBridge {
     // tens of minutes while the phase sits at "ready", and a rejected
     // transition can strand it there too. See session-work.ts.
     if (isSessionWorking(session)) {
-      return; // work in flight (or a permission pending) — defer the kill
+      // Background work alone may not hold a CLI forever: a dev server or a
+      // Monitor left running would otherwise pin the session indefinitely and
+      // defeat the RAM policy. Real background work keeps the CLI talking (task
+      // progress, notifications, wake-ups), so only a long total silence ends it.
+      const onlyBackground = !isTurnInFlight(session)
+        && session.cliState !== "running" && session.cliState !== "requires_action";
+      if (!onlyBackground || idleMs < WsBridge.BG_WORK_MAX_IDLE_MS) {
+        return; // work in flight (or a permission pending) — defer the kill
+      }
+      log.warn("ws-bridge", "Background work silent past the cap — reclaiming", {
+        sessionId,
+        idleHours: Math.round(idleMs / 3_600_000),
+        tasks: liveBackgroundWork(session).map((t) => `${t.type}: ${t.description}`).join(" | "),
+      });
     }
 
     // Truly idle and at rest — kill to reclaim RAM. No auto-reconnect.

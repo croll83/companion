@@ -9,6 +9,7 @@ function makeSession(phase: "ready" | "streaming" | "terminated" = "ready"): Ses
   return {
     id: "s1",
     openToolCalls: new Set<string>(),
+    backgroundTasks: new Map(),
     pendingPermissions: new Map(),
     stateMachine: new SessionStateMachine("s1", phase),
   } as unknown as Session;
@@ -67,5 +68,58 @@ describe("session work detection", () => {
     noteWorkFromCliMessage(session, toolUse("t1"));
     clearWorkTracking(session);
     expect(isSessionWorking(session)).toBe(false);
+  });
+
+  // ─── The CLI's own word on in-flight work ────────────────────────────────
+  // Reproduced on CLI 2.1.288: a turn that launches `sleep 25` in the
+  // background emits result + session_state idle at ~4s, while the task runs
+  // until ~27s and the CLI wakes up again to handle it. Only
+  // background_tasks_changed reveals that window.
+  const bg = (...tasks: { task_id: string; ambient?: boolean }[]) =>
+    ({ type: "background_tasks", tasks: tasks.map((t) => ({ task_type: "local_bash", description: "x", ...t })) }) as BrowserIncomingMessage;
+
+  it("keeps a session working after its turn ended, while background work runs", () => {
+    const s = makeSession("streaming");
+    noteWorkFromCliMessage(s, bg({ task_id: "terraform-plan" }));
+    noteWorkFromCliMessage(s, { type: "result", data: {} } as unknown as BrowserIncomingMessage);
+    noteWorkFromCliMessage(s, { type: "cli_session_state", state: "idle" } as BrowserIncomingMessage);
+    s.stateMachine.transition("ready", "turn_completed");
+    clearWorkTracking(s, "turn"); // what the bridge does on reaching ready
+
+    expect(isSessionWorking(s)).toBe(true);
+  });
+
+  it("treats the payload as the whole set: an empty one means done", () => {
+    const s = makeSession();
+    noteWorkFromCliMessage(s, bg({ task_id: "a" }, { task_id: "b" }));
+    noteWorkFromCliMessage(s, bg({ task_id: "b" }));
+    expect([...s.backgroundTasks.keys()]).toEqual(["b"]);
+    noteWorkFromCliMessage(s, bg());
+    expect(isSessionWorking(s)).toBe(false);
+  });
+
+  it("does not count ambient (housekeeping) tasks as work", () => {
+    const s = makeSession();
+    noteWorkFromCliMessage(s, bg({ task_id: "housekeeping", ambient: true }));
+    expect(isSessionWorking(s)).toBe(false);
+  });
+
+  it("trusts the CLI's running / requires_action turn state", () => {
+    const s = makeSession();
+    noteWorkFromCliMessage(s, { type: "cli_session_state", state: "running" } as BrowserIncomingMessage);
+    expect(isSessionWorking(s)).toBe(true);
+    noteWorkFromCliMessage(s, { type: "cli_session_state", state: "requires_action" } as BrowserIncomingMessage);
+    expect(isSessionWorking(s)).toBe(true);
+    noteWorkFromCliMessage(s, { type: "cli_session_state", state: "idle" } as BrowserIncomingMessage);
+    expect(isSessionWorking(s)).toBe(false);
+  });
+
+  it("forgets background work only when the CLI process itself is gone", () => {
+    const s = makeSession();
+    noteWorkFromCliMessage(s, bg({ task_id: "a" }));
+    clearWorkTracking(s, "turn");
+    expect(isSessionWorking(s)).toBe(true);
+    clearWorkTracking(s, "process");
+    expect(isSessionWorking(s)).toBe(false);
   });
 });

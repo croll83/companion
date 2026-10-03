@@ -14,6 +14,7 @@ function makeDedupSession(): Session {
     backendAdapter: null,
     browserSockets: new Set(),
   openToolCalls: new Set<string>(),
+  backgroundTasks: new Map(),
   lastFocusTs: 0,
     state: {} as any,
     pendingPermissions: new Map(),

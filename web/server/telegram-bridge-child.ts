@@ -413,7 +413,9 @@ class SessionBridge {
     this.lastRelaunchAt = Date.now();
     try {
       const res = await fetch(
-        `http://127.0.0.1:${COMPANION_PORT}/api/sessions/${this.sessionId}/relaunch`,
+        // force: this is a deliberate wedge recovery with its own "is it working"
+        // check above, so it must not be turned into a resync by the Reconnect guard.
+        `http://127.0.0.1:${COMPANION_PORT}/api/sessions/${this.sessionId}/relaunch?force=1`,
         { method: "POST", headers: { authorization: `Bearer ${COMPANION_AUTH}` } },
       );
       console.log(`[relaunch] ${this.sessionId.slice(0, 8)} (${reason}) → ${res.status}`);

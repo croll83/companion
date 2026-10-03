@@ -246,6 +246,14 @@ describe("launch", () => {
 
   // The CLI never persists ultracode, and Companion relaunches often; the
   // flag has to be re-passed at every spawn or a relaunch silently drops it.
+  it("asks the CLI to report its own turn state", () => {
+    // session_state_changed is off by default in the CLI; Companion reads it to
+    // know whether a turn is really over (see session-work.ts).
+    launcher.launch({ model: "claude-opus-5-5", cwd: "/tmp" });
+    const [, opts] = mockSpawn.mock.calls[0];
+    expect(opts.env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBe("1");
+  });
+
   it("passes ultracode via --settings on a model that can run it", () => {
     launcher.launch({ model: "claude-opus-5-5", ultracode: true, cwd: "/tmp" });
 

@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readlinkSync, readdirSync } from "node:fs";
 import type { ServerWebSocket, Subprocess } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import type {
@@ -249,8 +249,9 @@ export class ClaudeAdapter implements IBackendAdapter {
       console.warn(
         `[claude-adapter] stdio reader ENDED for session ${this.sessionId}: ` +
         `cause=${readerError ? "error" : "eof"} procState=${procState} ` +
-        `exitCode=${proc.exitCode ?? "n/a"} killed=${(proc as { killed?: boolean }).killed ?? "n/a"} ` +
-        `bytesRead=${bytesRead} attachedForMs=${Date.now() - this.lastAttachTs}`,
+        `exitCode=${proc.exitCode ?? "n/a"} ` +
+        `bytesRead=${bytesRead} attachedForMs=${Date.now() - this.lastAttachTs} ` +
+        stdoutForensics(proc.pid),
       );
       if (this.transportMode === "stdio" && this.stdioProc === proc) {
         this.stdioProc = null;
@@ -816,6 +817,38 @@ export class ClaudeAdapter implements IBackendAdapter {
       return;
     }
 
+    // The CLI's own answer to "is there still work in flight?". Companion used
+    // to drop both, so a turn that ended with a terraform plan or a workflow
+    // running in the background looked idle, and the idle-kill took the CLI —
+    // and the background work with it — 30 minutes later.
+    if ((msg.subtype as string) === "background_tasks_changed") {
+      const tasks = (msg as unknown as { tasks?: unknown }).tasks;
+      if (Array.isArray(tasks)) {
+        this.browserMessageCb?.({
+          type: "background_tasks",
+          tasks: tasks
+            .filter((t): t is { task_id: string } => typeof (t as { task_id?: unknown })?.task_id === "string")
+            .map((t) => {
+              const r = t as { task_id: string; task_type?: unknown; description?: unknown; ambient?: unknown };
+              return {
+                task_id: r.task_id,
+                task_type: typeof r.task_type === "string" ? r.task_type : "unknown",
+                description: typeof r.description === "string" ? r.description : "",
+                ...(r.ambient === true ? { ambient: true } : {}),
+              };
+            }),
+        });
+      }
+      return;
+    }
+    if ((msg.subtype as string) === "session_state_changed") {
+      const state = (msg as unknown as { state?: unknown }).state;
+      if (state === "idle" || state === "running" || state === "requires_action") {
+        this.browserMessageCb?.({ type: "cli_session_state", state });
+      }
+      return;
+    }
+
     if (msg.subtype === "task_notification") {
       const m = msg as CLITaskNotificationMessage;
       this.emitSystemEvent({
@@ -1192,4 +1225,46 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.inputAckTimer = null;
     }
   }
+}
+
+/**
+ * Who closed the CLI's stdout? (Forensics for "stdout EOF on a live CLI".)
+ *
+ * Observed repeatedly: the read side reaches EOF while the CLI is still alive
+ * and nobody signalled it; Companion then relaunches and the SIGTERM kills its
+ * running tools (the "exit 137" an agent sees on resume). The CLI's stdout is a
+ * socket, and a socket can be shut down by ANY process holding it, not only the
+ * CLI. This records, at the moment of EOF: whether the CLI still holds its
+ * stdout, which other processes hold the same socket, and what the CLI is
+ * blocked on — enough to tell a CLI that closed its own stdout from one whose
+ * socket was shut down underneath it.
+ */
+function stdoutForensics(pid: number | undefined): string {
+  if (!pid) return "fd1=n/a";
+  const read = (path: string): string | null => {
+    try { return readFileSync(path, "utf8").trim(); } catch { return null; }
+  };
+  let fd1: string | null = null;
+  try { fd1 = readlinkSync(`/proc/${pid}/fd/1`); } catch { fd1 = null; }
+  const holders: string[] = [];
+  if (fd1?.startsWith("socket:")) {
+    try {
+      for (const entry of readdirSync("/proc")) {
+        if (!/^\d+$/.test(entry) || entry === String(pid)) continue;
+        let fds: string[];
+        try { fds = readdirSync(`/proc/${entry}/fd`); } catch { continue; }
+        for (const fd of fds) {
+          let link: string;
+          try { link = readlinkSync(`/proc/${entry}/fd/${fd}`); } catch { continue; }
+          if (link === fd1) {
+            const cmd = (read(`/proc/${entry}/cmdline`) ?? "").replace(/\0/g, " ").slice(0, 60);
+            holders.push(`${entry}:fd${fd}:${cmd}`);
+          }
+        }
+      }
+    } catch { /* best effort */ }
+  }
+  const wchan = read(`/proc/${pid}/wchan`) ?? "n/a";
+  const children = (read(`/proc/${pid}/task/${pid}/children`) ?? "").split(/\s+/).filter(Boolean).length;
+  return `fd1=${fd1 ?? "closed"} sharedWith=[${holders.join(" ; ")}] wchan=${wchan} children=${children}`;
 }

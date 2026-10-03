@@ -25,6 +25,7 @@ function makeMockSession(overrides: Partial<Session["state"]> = {}): Session {
     backendAdapter: null,
     browserSockets: new Set(),
   openToolCalls: new Set<string>(),
+  backgroundTasks: new Map(),
   lastFocusTs: 0,
     state,
     pendingPermissions: new Map(),

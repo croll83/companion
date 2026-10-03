@@ -25,6 +25,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     backendAdapter: null,
     browserSockets: new Set(),
   openToolCalls: new Set<string>(),
+  backgroundTasks: new Map(),
   lastFocusTs: 0,
     state: {
       session_id: "test-session",

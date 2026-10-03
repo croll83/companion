@@ -180,6 +180,7 @@ function createMockBridge() {
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
     notifyCliDisconnected: vi.fn(),
+    resyncCliConnected: vi.fn(),
   } as any;
 }
 
@@ -1142,6 +1143,46 @@ describe("SessionOrchestrator", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toContain("Container removed externally");
+    });
+
+    // Reconnect pressed on a browser showing stale "disconnected" state must
+    // not SIGTERM a CLI that is connected and in the middle of real work.
+    function workingSession() {
+      return {
+        pendingPermissions: new Map(),
+        openToolCalls: new Set<string>(),
+        backgroundTasks: new Map([["b1", { type: "local_bash", description: "terraform plan", ambient: false }]]),
+        stateMachine: { phase: "ready", mustTransition: vi.fn(() => true) },
+      };
+    }
+
+    it("does not kill a connected CLI with work in flight — resyncs the browser instead", async () => {
+      deps.wsBridge.isCliConnected.mockReturnValue(true);
+      deps.wsBridge.getSession.mockReturnValue(workingSession());
+
+      const result = await orchestrator.relaunchSession("s1");
+
+      expect(result).toEqual({ ok: true, alreadyRunning: true });
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+      expect(deps.wsBridge.resyncCliConnected).toHaveBeenCalledWith("s1");
+    });
+
+    it("still relaunches a working CLI when forced (deliberate wedge recovery)", async () => {
+      deps.wsBridge.isCliConnected.mockReturnValue(true);
+      deps.wsBridge.getSession.mockReturnValue(workingSession());
+
+      await orchestrator.relaunchSession("s1", { force: true });
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+    });
+
+    it("relaunches a connected CLI that is idle (the user asked for a restart)", async () => {
+      deps.wsBridge.isCliConnected.mockReturnValue(true);
+      deps.wsBridge.getSession.mockReturnValue({ ...workingSession(), backgroundTasks: new Map() });
+
+      await orchestrator.relaunchSession("s1");
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
     });
   });
 

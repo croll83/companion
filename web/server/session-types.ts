@@ -359,6 +359,14 @@ export type BrowserIncomingMessageBase =
   | { type: "tool_progress"; tool_use_id: string; tool_name: string; elapsed_time_seconds: number }
   | { type: "tool_use_summary"; summary: string; tool_use_ids: string[] }
   | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
+  /**
+   * The CLI's live background tasks (shells, Monitors, workflows, backgrounded
+   * agents) — the full set, re-sent whenever it changes. Level signal: replace,
+   * never pair edges (see session-work.ts).
+   */
+  | { type: "background_tasks"; tasks: { task_id: string; task_type: string; description: string; ambient?: boolean }[] }
+  /** The CLI's own turn state: authoritative where the phase is only inferred. */
+  | { type: "cli_session_state"; state: "idle" | "running" | "requires_action" }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
   | { type: "error"; message: string }
   | { type: "refusal"; category?: string; explanation?: string; model?: string }

@@ -85,6 +85,7 @@ let tempDir: string;
 let store: SessionStore;
 
 beforeEach(() => {
+  delete process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS;
   tempDir = mkdtempSync(join(tmpdir(), "bridge-test-"));
   store = new SessionStore(tempDir);
   bridge = new WsBridge();
@@ -5163,6 +5164,77 @@ describe("Idle kill watchdog", () => {
     expect(idleKillHandler).not.toHaveBeenCalled();
     const sent = browser.send.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(sent.some((m: string) => m.includes("cli_disconnected"))).toBe(false);
+  });
+
+  // The case from 2026-10-03: a turn ends after launching a terraform plan /
+  // Docker test in the background. Every turn signal says idle; only the CLI's
+  // background_tasks_changed says otherwise. The watchdog must listen to it.
+  it("does NOT kill a session whose turn ended while background work runs", async () => {
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { cli, session } = await makeReadySession("s1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed",
+      tasks: [{ task_id: "b1", task_type: "local_bash", description: "terraform plan" }],
+      uuid: "u-bg-1", session_id: "cli-1",
+    }));
+    expect(session.stateMachine.phase).toBe("ready"); // the turn really is over
+    // Past the idle threshold (24h in tests), still inside the background cap.
+    process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS = "48";
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+
+    // The task ends (the CLI re-sends the now-empty set): reclaimable again.
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed", tasks: [],
+      uuid: "u-bg-2", session_id: "cli-1",
+    }));
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("reclaims a session kept alive only by background work that went silent for hours", async () => {
+    // A dev server or a perpetual Monitor must not pin the CLI forever.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+    const { cli } = await makeReadySession("s1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed",
+      tasks: [{ task_id: "dev", task_type: "local_bash", description: "npm run dev" }],
+      uuid: "u-bg-dev", session_id: "cli-1",
+    }));
+
+    process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS = "25";
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled(); // idle, but inside the cap
+    await vi.advanceTimersByTimeAsync(60 * 60_000 + 2 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  // Caught by the pre-deploy review: losing contact with a CLI used to trigger
+  // a relaunch whenever isSessionWorking() — which now includes background
+  // tasks. A relaunch SIGTERMs the CLI, killing the terraform plan the tracking
+  // exists to protect. Only an in-flight TURN justifies it.
+  it("does not relaunch a CLI it lost contact with just because background work runs", async () => {
+    const relaunchNeeded = vi.fn();
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+    const { cli, session } = await makeReadySession("s1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed",
+      tasks: [{ task_id: "tf", task_type: "local_bash", description: "terraform plan" }],
+      uuid: "u-bg-tf", session_id: "cli-1",
+    }));
+    expect(session.stateMachine.phase).toBe("ready");
+
+    bridge.handleCLIClose(cli);
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    expect(session.stateMachine.phase).toBe("terminated");
+    expect(relaunchNeeded).not.toHaveBeenCalled();
+    off();
   });
 
   it("does NOT kill before the threshold", async () => {

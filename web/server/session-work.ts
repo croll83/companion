@@ -9,7 +9,11 @@
 // is SIGTERMed.
 //
 // So ask directly instead: is a tool call outstanding, is the user's approval
-// pending, is the phase anything other than at-rest?
+// pending, does the CLI report live background work or an unfinished turn, is
+// the phase anything other than at-rest? The CLI signals are the authoritative
+// ones — background_tasks_changed and session_state_changed — and they cover
+// the case the rest cannot see: a turn that has ENDED while a terraform plan,
+// a Docker test or a workflow it launched in the background is still running.
 
 import type { Session } from "./ws-bridge-types.js";
 import type { BrowserIncomingMessage } from "./session-types.js";
@@ -55,12 +59,60 @@ export function noteWorkFromCliMessage(session: Session, msg: BrowserIncomingMes
   }
   if (msg.type === "result") {
     session.openToolCalls.clear();
+    return;
+  }
+  // Level signal: the payload IS the live set. Replace, never pair edges — the
+  // CLI's own guidance, "so a missed bookend cannot wedge a stale running"
+  // task. A turn can end (result, phase ready) with these still running; that
+  // is exactly the "looks idle, still has work in flight" case.
+  if (msg.type === "background_tasks") {
+    session.backgroundTasks = new Map(
+      msg.tasks.map((t) => [t.task_id, { type: t.task_type, description: t.description, ambient: t.ambient === true }]),
+    );
+    return;
+  }
+  if (msg.type === "cli_session_state") {
+    session.cliState = msg.state;
   }
 }
 
-/** Drop stale tool bookkeeping when the session comes to rest. */
-export function clearWorkTracking(session: Session): void {
+/**
+ * Drop stale bookkeeping.
+ *
+ * A turn coming to rest only settles its own tool calls: background tasks
+ * outlive the turn by design, and clearing them here would reopen the very hole
+ * this tracks. When the CLI process itself is gone ("process"), everything it
+ * was running died with it.
+ */
+export function clearWorkTracking(session: Session, scope: "turn" | "process" = "turn"): void {
   session.openToolCalls.clear();
+  if (scope === "process") {
+    session.backgroundTasks.clear();
+    session.cliState = undefined;
+  }
+}
+
+/** Non-ambient background tasks still running: real work, not housekeeping. */
+export function liveBackgroundWork(session: Session): { type: string; description: string }[] {
+  return [...session.backgroundTasks.values()].filter((t) => !t.ambient);
+}
+
+/**
+ * Is a TURN in flight — as opposed to background work outliving its turn?
+ *
+ * The two answer different questions and must not be swapped. isSessionWorking
+ * asks "may the idle-kill reclaim this CLI?" and must count background tasks.
+ * This asks "should a CLI we lost contact with be relaunched right now?", where
+ * relaunching SIGTERMs the process — and background tasks survive only if the
+ * process is left alone. Counting them here made a stdout EOF on a live CLI
+ * kill the very terraform plan the background tracking exists to protect
+ * (caught in review, 2026-10-03). cliState is left out too: "running" can be a
+ * backgrounded agent waking the CLI, not the user's turn.
+ */
+export function isTurnInFlight(session: Session): boolean {
+  if (session.pendingPermissions.size > 0) return true;
+  if (session.openToolCalls.size > 0) return true;
+  return !AT_REST.has(session.stateMachine.phase);
 }
 
 /**
@@ -73,5 +125,9 @@ export function clearWorkTracking(session: Session): void {
 export function isSessionWorking(session: Session): boolean {
   if (session.pendingPermissions.size > 0) return true;
   if (session.openToolCalls.size > 0) return true;
+  // The CLI's own word, when it gives it: a background shell, Monitor, workflow
+  // or backgrounded agent is live, or its turn is not over.
+  if (liveBackgroundWork(session).length > 0) return true;
+  if (session.cliState === "running" || session.cliState === "requires_action") return true;
   return !AT_REST.has(session.stateMachine.phase);
 }
