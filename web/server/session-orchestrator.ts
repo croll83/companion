@@ -23,6 +23,8 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { isSessionWorking } from "./session-work.js";
+import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -227,7 +229,23 @@ export class SessionOrchestrator {
     companionBus.on("session:model-change", async ({ sessionId, model }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      if (info.backendType !== "claude") return;
+      // Neither CLI can switch model in place (Claude's set_model no-ops, Codex
+      // rejects it), so both relaunch — Claude with --resume, Codex with
+      // thread/resume — and the conversation carries over.
+      if (info.backendType !== "claude" && info.backendType !== "codex") return;
+      if (info.backendType === "codex") {
+        // The effort is passed at spawn (-c model_reasoning_effort), before the
+        // new model reports its levels. A level the new model lacks (Astra's
+        // `ultra` on Luna) must be settled now, not after Codex rejects it.
+        const levels = getCodexEffortLevels(model);
+        if (info.effort && levels.length > 0 && !levels.includes(info.effort as (typeof levels)[number])) {
+          const fallback = getCodexDefaultEffort(model);
+          log.info("orchestrator", "Effort not supported by new Codex model — using its default", {
+            sessionId, model, from: info.effort, to: fallback,
+          });
+          if (fallback) this.launcher.setEffort(sessionId, fallback);
+        }
+      }
       log.info("orchestrator", "Model change → relaunching CLI", {
         sessionId,
         from: info.model,
@@ -237,7 +255,7 @@ export class SessionOrchestrator {
       this.clearAutoRelaunchCount(sessionId);
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "model_change_relaunch");
+        session.stateMachine.mustTransition("starting", "model_change_relaunch");
       }
       // Mark as relaunching so the session:exited handler (fired when the old
       // process dies) suppresses cli_disconnected — this is an intentional
@@ -250,13 +268,25 @@ export class SessionOrchestrator {
       }
     });
 
-    // Effort change: like model change, the CLI only accepts `--effort` at
-    // launch (no runtime control_request), so persist the new level and
-    // relaunch with --resume to preserve conversation context.
+    // Ultracode is applied in place by the CLI (no relaunch), but the CLI never
+    // persists it — remember the confirmed state so the next relaunch re-passes it.
+    companionBus.on("session:ultracode-changed", ({ sessionId, enabled }) => {
+      this.launcher.setUltracode(sessionId, enabled);
+    });
+
+    // Claude effort changes at runtime now; only remember it for the next launch.
+    companionBus.on("session:effort-applied", ({ sessionId, effort }) => {
+      this.launcher.setEffort(sessionId, effort);
+    });
+
+    // Codex effort change: Codex takes effort only at launch
+    // (`-c model_reasoning_effort`), so persist the new level and relaunch on
+    // thread/resume to keep the conversation. Claude never comes through here —
+    // its CLI changes effort at runtime (session:effort-applied above).
     companionBus.on("session:effort-change", async ({ sessionId, effort }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      if (info.backendType !== "claude") return;
+      if (info.backendType !== "codex") return;
       log.info("orchestrator", "Effort change → relaunching CLI", {
         sessionId,
         from: info.effort,
@@ -266,7 +296,7 @@ export class SessionOrchestrator {
       this.clearAutoRelaunchCount(sessionId);
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "effort_change_relaunch");
+        session.stateMachine.mustTransition("starting", "effort_change_relaunch");
       }
       // See model-change above: suppress the spurious cli_disconnected from the
       // old process's exit during this intentional respawn.
@@ -709,15 +739,29 @@ export class SessionOrchestrator {
 
   // ── Relaunch ───────────────────────────────────────────────────────────────
 
-  async relaunchSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+  async relaunchSession(
+    sessionId: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ ok: boolean; error?: string; alreadyRunning?: boolean }> {
     const info = this.launcher.getSession(sessionId);
     if (info?.archived) {
       return { ok: false, error: "Session is archived and cannot be relaunched" };
     }
+    // Reconnect used to kill whatever was running, unconditionally. A browser
+    // showing stale "disconnected" state (a parked tab, a phone coming back)
+    // made that a way to SIGTERM a CLI in the middle of a terraform plan. If the
+    // CLI is connected and has work in flight, fix the browser instead.
+    // `force` keeps the old behaviour for a deliberate restart of a wedged CLI.
+    const live = this.wsBridge.getSession(sessionId);
+    if (!opts.force && live && this.wsBridge.isCliConnected(sessionId) && isSessionWorking(live)) {
+      log.info("orchestrator", "Reconnect on a connected, working CLI — resyncing instead of killing", { sessionId });
+      this.wsBridge.resyncCliConnected(sessionId);
+      return { ok: true, alreadyRunning: true };
+    }
     this.clearAutoRelaunchCount(sessionId);
     const session = this.wsBridge.getSession(sessionId);
     if (session?.stateMachine) {
-      session.stateMachine.transition("starting", "relaunch_initiated");
+      session.stateMachine.mustTransition("starting", "relaunch_initiated");
     }
     return this.launcher.relaunch(sessionId);
   }
@@ -850,7 +894,24 @@ export class SessionOrchestrator {
     await new Promise((r) => setTimeout(r, RELAUNCH_GRACE_MS));
     if (this.wsBridge.isCliConnected(sessionId)) { this.relaunchingSet.delete(sessionId); return; }
     const freshInfo = this.launcher.getSession(sessionId);
-    if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
+
+    // A CONFIRMED disconnect outranks every liveness signal below.
+    //
+    // Those signals describe the *process*; this one describes the *transport*.
+    // When the CLI's stdout reaches EOF the process keeps running and its
+    // launcher record still says "connected", but we can never read another
+    // byte from it — the session is dead to us while looking perfectly healthy
+    // to every check here. The guards then declined to relaunch, the UI sat on
+    // "CLI disconnected", and the only way out was a manual Reconnect followed
+    // by re-sending the message. Observed on 2026-09-23 with
+    // `stdio reader ENDED cause=eof processAlive=true killed=false`.
+    //
+    // relaunch() SIGTERMs whatever is still running, so replacing a live but
+    // unreachable process is safe.
+    const phase = this.wsBridge.getSession(sessionId)?.stateMachine.phase;
+    const disconnectConfirmed = phase === "terminated";
+
+    if (!disconnectConfirmed && freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
       this.relaunchingSet.delete(sessionId); return;
     }
     // Only check PID liveness if the session is NOT already "exited".
@@ -860,7 +921,7 @@ export class SessionOrchestrator {
     // For containerized sessions, use container liveness instead of PID check
     // (the PID is the `docker exec` wrapper, which exits immediately for some
     // transports and is unreliable for container health).
-    if (freshInfo && freshInfo.state !== "exited") {
+    if (!disconnectConfirmed && freshInfo && freshInfo.state !== "exited") {
       if (freshInfo.containerId) {
         const containerState = containerManager.isContainerAlive(freshInfo.containerId);
         if (containerState === "running") {
@@ -891,7 +952,7 @@ export class SessionOrchestrator {
       log.info("orchestrator", "Auto-relaunching CLI", { sessionId, attempt: count + 1, maxAttempts: MAX_AUTO_RELAUNCHES });
       const session = this.wsBridge.getSession(sessionId);
       if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "relaunch_initiated");
+        session.stateMachine.mustTransition("starting", "relaunch_initiated");
       }
       try {
         const result = await this.launcher.relaunch(sessionId);

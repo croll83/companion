@@ -7,6 +7,12 @@ vi.mock("./utils/names.js", () => ({
   generateUniqueSessionName: vi.fn(() => "Test Session"),
 }));
 
+// Observe the completion chime without touching the Web Audio API.
+const { playNotificationSoundMock } = vi.hoisted(() => ({ playNotificationSoundMock: vi.fn() }));
+vi.mock("./utils/notification-sound.js", () => ({
+  playNotificationSound: playNotificationSoundMock,
+}));
+
 let wsModule: typeof import("./ws.js");
 let useStore: typeof import("./store.js").useStore;
 
@@ -14,6 +20,8 @@ let useStore: typeof import("./store.js").useStore;
 // MockWebSocket
 // ---------------------------------------------------------------------------
 let lastWs: InstanceType<typeof MockWebSocket>;
+/** Every socket constructed since the last reset, in creation order. */
+let allWs: InstanceType<typeof MockWebSocket>[] = [];
 
 class MockWebSocket {
   static OPEN = 1;
@@ -37,6 +45,7 @@ class MockWebSocket {
     this.url = url;
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     lastWs = this;
+    allWs.push(this);
   }
 }
 
@@ -54,6 +63,7 @@ beforeEach(async () => {
   useStore = storeModule.useStore;
   useStore.getState().reset();
   localStorage.clear();
+  allWs = [];
 
   wsModule = await import("./ws.js");
 });
@@ -2004,5 +2014,690 @@ describe("handleMessage: assistant clears only completed tool progress", () => {
     expect(progress?.has("tu-a")).toBeFalsy();
     // tu-b should still be present (still running)
     expect(progress?.get("tu-b")).toEqual({ toolName: "Glob", elapsedSeconds: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helpers for the tests below
+// ---------------------------------------------------------------------------
+function sdk(sessionId: string, extra: Record<string, unknown> = {}) {
+  return { sessionId, state: "connected" as const, cwd: "/home/user", createdAt: 0, ...extra };
+}
+
+/** Socket messages sent so far on `ws`, parsed. */
+function sent(ws: InstanceType<typeof MockWebSocket>): Array<Record<string, unknown>> {
+  return ws.send.mock.calls.map(([raw]) => JSON.parse(raw as string));
+}
+
+function socketFor(sessionId: string) {
+  return allWs.filter((w) => w.url.includes(`/ws/browser/${sessionId}?`)).at(-1);
+}
+
+// ===========================================================================
+// Refusal banner
+// ===========================================================================
+describe("handleMessage: refusal", () => {
+  it("freezes the model reported by the server on the banner", () => {
+    // Retrying swaps the session model; the banner must keep the model that refused.
+    useStore.getState().setSdkSessions([sdk("s1", { model: "live-model" })]);
+    wsModule.connectSession("s1");
+    fireMessage({ type: "refusal", category: "cyber", explanation: "Not allowed", model: "refusing-model" });
+
+    const last = useStore.getState().messages.get("s1")!.at(-1)!;
+    expect(last.role).toBe("system");
+    expect(last.content).toBe("Not allowed");
+    expect(last.refusal).toEqual({ category: "cyber", explanation: "Not allowed", model: "refusing-model" });
+
+    // Changing the live model afterwards must not change what was frozen.
+    useStore.getState().setSdkSessions([sdk("s1", { model: "next-model" })]);
+    expect(useStore.getState().messages.get("s1")!.at(-1)!.refusal!.model).toBe("refusing-model");
+  });
+
+  it("falls back to the session model and a default text when the event omits them", () => {
+    useStore.getState().setSdkSessions([sdk("s1", { model: "live-model" })]);
+    wsModule.connectSession("s1");
+    fireMessage({ type: "refusal" });
+
+    const last = useStore.getState().messages.get("s1")!.at(-1)!;
+    expect(last.content).toBe("The model declined to respond.");
+    expect(last.refusal).toEqual({ category: undefined, explanation: undefined, model: "live-model" });
+  });
+});
+
+// ===========================================================================
+// Socket lifecycle: park / sync / reconnect
+// ===========================================================================
+describe("parkSession", () => {
+  it("closes the socket without scheduling a reconnect and keeps the stream position", () => {
+    // A parked session must stay closed, then resume from its last seq (not replay all).
+    useStore.getState().setSdkSessions([sdk("s1")]);
+    wsModule.connectSession("s1");
+    const first = lastWs;
+    fireMessage({ type: "cli_connected", seq: 7 });
+
+    wsModule.parkSession("s1");
+    expect(first.close).toHaveBeenCalled();
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("disconnected");
+
+    // The (late) close event must not trigger the auto-reconnect.
+    first.onclose?.();
+    vi.advanceTimersByTime(5000);
+    expect(allWs).toHaveLength(1);
+
+    wsModule.connectSession("s1");
+    lastWs.onopen!(new Event("open"));
+    expect(sent(lastWs)[0]).toEqual({ type: "session_subscribe", last_seq: 7 });
+  });
+
+  it("cancels a pending reconnect timer", () => {
+    useStore.getState().setSdkSessions([sdk("s1")]);
+    wsModule.connectSession("s1");
+    const first = lastWs;
+    first.onclose!(); // schedules a reconnect in 2s
+    // Nothing to close any more, but the pending timer must be cancelled.
+    wsModule.parkSession("s1");
+    vi.advanceTimersByTime(5000);
+    expect(allWs).toEqual([first]);
+  });
+
+  it("is a no-op for a session without a socket", () => {
+    wsModule.parkSession("ghost");
+    expect(useStore.getState().connectionStatus.get("ghost")).toBeUndefined();
+  });
+});
+
+describe("auto-reconnect", () => {
+  it("reconnects a live session 2s after its socket drops", () => {
+    useStore.getState().setSdkSessions([sdk("s1")]);
+    wsModule.connectSession("s1");
+    lastWs.onclose!();
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("disconnected");
+
+    vi.advanceTimersByTime(1999);
+    expect(allWs).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(allWs).toHaveLength(2);
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connecting");
+  });
+
+  it("does not reconnect an archived session", () => {
+    useStore.getState().setSdkSessions([sdk("s1", { archived: true })]);
+    wsModule.connectSession("s1");
+    lastWs.onclose!();
+    vi.advanceTimersByTime(5000);
+    expect(allWs).toHaveLength(1);
+  });
+
+  it("reconnects a fresh session not yet listed only when it is the current one", () => {
+    useStore.getState().setCurrentSession("fresh");
+    wsModule.connectSession("fresh");
+    wsModule.connectSession("other");
+    socketFor("fresh")!.onclose!();
+    socketFor("other")!.onclose!();
+    vi.advanceTimersByTime(2000);
+    expect(allWs.map((w) => w.url.split("/").pop()!.split("?")[0])).toEqual(["fresh", "other", "fresh"]);
+  });
+
+  it("schedules only one reconnect per session", () => {
+    useStore.getState().setSdkSessions([sdk("s1")]);
+    wsModule.connectSession("s1");
+    const ws = lastWs;
+    ws.onclose!();
+    // A second close of the same socket is stale (already removed) and must not double up.
+    ws.onclose!();
+    vi.advanceTimersByTime(2000);
+    expect(allWs).toHaveLength(2);
+  });
+
+  it("closes the socket on error so onclose drives the reconnect", () => {
+    wsModule.connectSession("s1");
+    lastWs.onerror!();
+    expect(lastWs.close).toHaveBeenCalled();
+  });
+
+  it("clears the reconnect timer once the socket opens", () => {
+    useStore.getState().setSdkSessions([sdk("s1")]);
+    wsModule.connectSession("s1");
+    lastWs.onclose!();
+    vi.advanceTimersByTime(2000); // reconnect fires, new socket
+    const second = lastWs;
+    second.onopen!(new Event("open"));
+    vi.advanceTimersByTime(5000);
+    expect(allWs).toHaveLength(2);
+  });
+
+  it("disconnectSession cancels a pending reconnect", () => {
+    useStore.getState().setSdkSessions([sdk("s1")]);
+    wsModule.connectSession("s1");
+    lastWs.onclose!();
+    wsModule.disconnectSession("s1");
+    vi.advanceTimersByTime(5000);
+    expect(allWs).toHaveLength(1);
+  });
+});
+
+describe("syncSessionSockets", () => {
+  it("opens the focused session and live sessions, skipping archived and exited ones", () => {
+    useStore.getState().setSdkSessions([
+      sdk("live"),
+      sdk("archived", { archived: true }),
+      sdk("dead", { state: "exited" }),
+    ]);
+
+    wsModule.syncSessionSockets("focused");
+
+    const ids = allWs.map((w) => w.url.split("/").pop()!.split("?")[0]).sort();
+    expect(ids).toEqual(["focused", "live"]);
+  });
+
+  it("falls back to the store's current session when no focus is given", () => {
+    useStore.getState().setCurrentSession("current");
+    wsModule.syncSessionSockets(null);
+    expect(socketFor("current")).toBeDefined();
+    expect(allWs).toHaveLength(1);
+  });
+
+  it("parks sockets that are no longer wanted", () => {
+    wsModule.connectSession("old");
+    const old = lastWs;
+    wsModule.syncSessionSockets("new");
+    expect(old.close).toHaveBeenCalled();
+    expect(useStore.getState().connectionStatus.get("old")).toBe("disconnected");
+    // Parked: no reconnect even after its close event arrives.
+    old.onclose?.();
+    vi.advanceTimersByTime(5000);
+    expect(allWs.filter((w) => w.url.includes("/old?"))).toHaveLength(1);
+  });
+
+  it("keeps usable sockets and replaces dead ones", () => {
+    wsModule.connectSession("a");
+    const a = lastWs;
+    wsModule.connectSession("b");
+    const b = lastWs;
+    b.readyState = MockWebSocket.CLOSED;
+    b.close.mockImplementation(() => { throw new Error("already closed"); });
+    useStore.getState().setSdkSessions([sdk("a"), sdk("b")]);
+
+    wsModule.syncSessionSockets(null);
+
+    expect(a.close).not.toHaveBeenCalled();
+    expect(b.close).toHaveBeenCalled();
+    expect(socketFor("a")).toBe(a);
+    expect(socketFor("b")).not.toBe(b);
+  });
+});
+
+describe("disconnectAll", () => {
+  it("closes every open session socket", () => {
+    wsModule.connectSession("a");
+    wsModule.connectSession("b");
+    wsModule.disconnectAll();
+    expect(allWs.every((w) => w.close.mock.calls.length === 1)).toBe(true);
+    expect(useStore.getState().connectionStatus.get("a")).toBe("disconnected");
+    expect(useStore.getState().connectionStatus.get("b")).toBe("disconnected");
+  });
+});
+
+describe("waitForConnection", () => {
+  it("resolves once the socket is open", async () => {
+    wsModule.connectSession("s1");
+    lastWs.readyState = MockWebSocket.CONNECTING;
+    const p = wsModule.waitForConnection("s1");
+    vi.advanceTimersByTime(100);
+    lastWs.readyState = MockWebSocket.OPEN;
+    vi.advanceTimersByTime(50);
+    await expect(p).resolves.toBeUndefined();
+  });
+
+  it("rejects after 10s without an open socket", async () => {
+    const p = wsModule.waitForConnection("never");
+    vi.advanceTimersByTime(10_000);
+    await expect(p).rejects.toThrow("Connection timeout");
+  });
+});
+
+// ===========================================================================
+// Focus heartbeat, history paging, misc outgoing helpers
+// ===========================================================================
+describe("setFocusedSession", () => {
+  afterEach(() => {
+    wsModule.setFocusedSession(null);
+  });
+
+  it("sends session_focus immediately and then on a 60s heartbeat", () => {
+    wsModule.connectSession("s1");
+    const ws = lastWs;
+    wsModule.setFocusedSession("s1");
+    expect(sent(ws).filter((m) => m.type === "session_focus")).toHaveLength(1);
+
+    vi.advanceTimersByTime(60_000);
+    expect(sent(ws).filter((m) => m.type === "session_focus")).toHaveLength(2);
+  });
+
+  it("moves the heartbeat to the newly focused session", () => {
+    wsModule.connectSession("a");
+    const a = lastWs;
+    wsModule.connectSession("b");
+    const b = lastWs;
+    wsModule.setFocusedSession("a");
+    wsModule.setFocusedSession("b");
+    vi.advanceTimersByTime(60_000);
+    expect(sent(a).filter((m) => m.type === "session_focus")).toHaveLength(1);
+    expect(sent(b).filter((m) => m.type === "session_focus")).toHaveLength(2);
+  });
+
+  it("stops the heartbeat when focus is cleared", () => {
+    wsModule.connectSession("s1");
+    const ws = lastWs;
+    wsModule.setFocusedSession("s1");
+    wsModule.setFocusedSession(null);
+    vi.advanceTimersByTime(180_000);
+    expect(sent(ws).filter((m) => m.type === "session_focus")).toHaveLength(1);
+  });
+
+  it("does not claim focus while the tab is hidden", () => {
+    // A hidden tab is not focus: the server must be free to reclaim the session.
+    wsModule.connectSession("s1");
+    const ws = lastWs;
+    Object.defineProperty(document, "hidden", { value: true, configurable: true });
+    try {
+      wsModule.setFocusedSession("s1");
+      vi.advanceTimersByTime(120_000);
+      expect(sent(ws).filter((m) => m.type === "session_focus")).toHaveLength(0);
+    } finally {
+      delete (document as unknown as Record<string, unknown>).hidden;
+    }
+  });
+});
+
+describe("page visibility", () => {
+  it("reconnects and re-asserts focus on the focused session when the page becomes visible", () => {
+    wsModule.setFocusedSession("s1"); // no socket yet → nothing sent
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+    } finally {
+      delete (document as unknown as Record<string, unknown>).hidden;
+    }
+    const ws = socketFor("s1")!;
+    expect(ws).toBeDefined();
+    expect(sent(ws)).toContainEqual(expect.objectContaining({ type: "session_focus" }));
+    wsModule.setFocusedSession(null);
+  });
+});
+
+describe("loadMoreHistory", () => {
+  it("asks the server for the page before the loaded window", () => {
+    wsModule.connectSession("s1");
+    wsModule.loadMoreHistory("s1", 40);
+    expect(sent(lastWs)).toContainEqual({ type: "history_load_more", before_index: 40 });
+  });
+
+  it("is dropped (not queued) while the socket is not open", () => {
+    // Paging is not idempotent: a reconnect resends the window anyway.
+    wsModule.connectSession("s1");
+    const ws = lastWs;
+    ws.readyState = MockWebSocket.CONNECTING;
+    wsModule.loadMoreHistory("s1", 40);
+    ws.readyState = MockWebSocket.OPEN;
+    ws.onopen!(new Event("open"));
+    expect(sent(ws).map((m) => m.type)).toEqual(["session_subscribe"]);
+  });
+});
+
+describe("misc outgoing helpers", () => {
+  it("sendSetAiValidation sends the settings with a client_msg_id", () => {
+    wsModule.connectSession("s1");
+    wsModule.sendSetAiValidation("s1", { aiValidationEnabled: true, aiValidationAutoDeny: null });
+    const msg = sent(lastWs)[0];
+    expect(msg).toMatchObject({ type: "set_ai_validation", aiValidationEnabled: true, aiValidationAutoDeny: null });
+    expect(msg.client_msg_id).toEqual(expect.stringMatching(/^cmsg-/));
+  });
+
+  it("createClientMessageId returns unique ids", () => {
+    expect(wsModule.createClientMessageId()).not.toBe(wsModule.createClientMessageId());
+  });
+
+  it("resumes from the seq persisted in localStorage", () => {
+    localStorage.setItem("companion:last-seq:s1", "41.7");
+    wsModule.connectSession("s1");
+    lastWs.onopen!(new Event("open"));
+    expect(sent(lastWs)[0]).toEqual({ type: "session_subscribe", last_seq: 41 });
+  });
+
+  it("treats a corrupt persisted seq as 0", () => {
+    localStorage.setItem("companion:last-seq:s1", "garbage");
+    wsModule.connectSession("s1");
+    lastWs.onopen!(new Event("open"));
+    expect(sent(lastWs)[0]).toEqual({ type: "session_subscribe", last_seq: 0 });
+  });
+
+  it("drops messages with a seq already processed", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "error", message: "first", seq: 5 });
+    fireMessage({ type: "error", message: "dup", seq: 5 });
+    const contents = useStore.getState().messages.get("s1")!.map((m) => m.content);
+    expect(contents).toEqual(["first"]);
+  });
+});
+
+// ===========================================================================
+// History paging
+// ===========================================================================
+describe("handleMessage: message_history paging", () => {
+  function assistant(id: string, ts: number, content: ContentBlock[]) {
+    return {
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "m", content, stop_reason: "end_turn", usage: {} },
+      parent_tool_use_id: null,
+      timestamp: ts,
+    };
+  }
+
+  it("records the history window and merges an older page before what is on screen", () => {
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "message_history",
+      startIndex: 50,
+      total: 60,
+      messages: [{ type: "user_message", id: "u-new", content: "recent", timestamp: 2000 }],
+    });
+    // Live tool activity on screen must survive loading an older page.
+    fireMessage(assistant("a-live", 2500, [{ type: "tool_use", id: "tu-live", name: "Bash", input: { command: "ls" } }]));
+
+    fireMessage({
+      type: "message_history",
+      prepend: true,
+      startIndex: 40,
+      total: 60,
+      messages: [
+        { type: "user_message", id: "u-old", content: "older", timestamp: 1000 },
+        assistant("a-old", 1100, [{ type: "tool_use", id: "tu-old", name: "Read", input: { file_path: "/x" } }]),
+        { type: "result", data: { is_error: false, total_cost_usd: 1, num_turns: 2, total_lines_added: 3, total_lines_removed: 4 } },
+      ],
+    });
+
+    const state = useStore.getState();
+    expect(state.historyWindow.get("s1")).toEqual({ startIndex: 40, total: 60 });
+    const ids = state.messages.get("s1")!.map((m) => m.id);
+    expect(ids).toEqual(["u-old", "a-old", "u-new", "a-live"]);
+    expect(state.toolActivity.get("s1")!.map((t) => t.toolUseId)).toEqual(["tu-old", "tu-live"]);
+    expect(state.sessions.get("s1")).toBeUndefined(); // no session yet: updateSession is a no-op
+  });
+
+  it("does not reset the live turn when an older page ends with a result", () => {
+    // Only the initial history may declare the turn finished.
+    wsModule.connectSession("s1");
+    useStore.getState().setSessionStatus("s1", "running");
+    fireMessage({
+      type: "message_history",
+      prepend: true,
+      messages: [{ type: "result", data: { is_error: false, total_cost_usd: 0, num_turns: 1 } }],
+    });
+    expect(useStore.getState().sessionStatus.get("s1")).toBe("running");
+  });
+
+  it("applies line counts and context usage from a history result", () => {
+    useStore.getState().addSession(makeSession("s1"));
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "message_history",
+      messages: [{
+        type: "result",
+        data: {
+          is_error: false, total_cost_usd: 2, num_turns: 3, total_lines_added: 10, total_lines_removed: 5,
+          modelUsage: { m: { inputTokens: 40, outputTokens: 10, contextWindow: 100 } },
+        },
+      }],
+    });
+    expect(useStore.getState().sessions.get("s1")).toMatchObject({
+      total_lines_added: 10, total_lines_removed: 5, context_used_percent: 50,
+    });
+    expect(useStore.getState().sessionStatus.get("s1")).toBe("idle");
+  });
+});
+
+// ===========================================================================
+// Background processes and agents
+// ===========================================================================
+describe("background Bash processes", () => {
+  it("registers a process when a background Bash result reports its task id", () => {
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "a1", type: "message", role: "assistant", model: "m", stop_reason: "tool_use", usage: {},
+        content: [{ type: "tool_use", id: "bash-1", name: "Bash", input: { command: "npm run dev", description: "dev server", run_in_background: true } }],
+      },
+      parent_tool_use_id: null,
+    });
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "a2", type: "message", role: "assistant", model: "m", stop_reason: null, usage: {},
+        content: [{
+          type: "tool_result", tool_use_id: "bash-1",
+          content: [{ type: "text", text: "Command running in background with ID: bg42. Output is being written to: /tmp/bg42.log" }],
+        }],
+      },
+      parent_tool_use_id: null,
+    });
+
+    const procs = useStore.getState().sessionProcesses.get("s1")!;
+    expect(procs).toHaveLength(1);
+    expect(procs[0]).toMatchObject({
+      taskId: "bg42", toolUseId: "bash-1", command: "npm run dev", description: "dev server",
+      outputFile: "/tmp/bg42.log", status: "running",
+    });
+
+    // task_notification completes the process and shows a system line.
+    fireMessage({ type: "system_event", event: { subtype: "task_notification", task_id: "bg42", status: "completed", summary: "done" } });
+    expect(useStore.getState().sessionProcesses.get("s1")![0]).toMatchObject({ status: "completed", summary: "done" });
+    expect(useStore.getState().messages.get("s1")!.at(-1)!.content).toBe("Task completed: bg42. done");
+  });
+
+  it("ignores a background result whose text does not match the expected format", () => {
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "permission_request",
+      request: { request_id: "r1", tool_name: "Bash", tool_use_id: "bash-2", input: { run_in_background: true }, timestamp: 0 },
+    });
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "a2", type: "message", role: "assistant", model: "m", stop_reason: null, usage: {},
+        content: [{ type: "tool_result", tool_use_id: "bash-2", content: "permission denied" }],
+      },
+      parent_tool_use_id: null,
+    });
+    expect(useStore.getState().sessionProcesses.get("s1")).toBeUndefined();
+  });
+});
+
+describe("background agents", () => {
+  function agentMsg(id: string, content: unknown[]) {
+    return {
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "m", stop_reason: null, usage: {}, content },
+      parent_tool_use_id: null,
+    };
+  }
+
+  it("tracks a background agent from launch to completion with a truncated summary", () => {
+    wsModule.connectSession("s1");
+    const launch = { type: "tool_use", id: "ag-1", name: "Agent", input: { description: "Scan repo", subagent_type: "explorer", run_in_background: true } };
+    fireMessage(agentMsg("a1", [launch]));
+    // The same tool_use replayed within the turn must not add a second agent.
+    fireMessage(agentMsg("a1b", [launch]));
+
+    let agents = useStore.getState().sessionBackgroundAgents.get("s1")!;
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({ toolUseId: "ag-1", name: "Scan repo", agentType: "explorer", status: "running" });
+
+    const long = "x".repeat(250);
+    fireMessage(agentMsg("a2", [{ type: "tool_result", tool_use_id: "ag-1", content: long }]));
+    agents = useStore.getState().sessionBackgroundAgents.get("s1")!;
+    expect(agents[0].status).toBe("completed");
+    expect(agents[0].summary).toBe("x".repeat(200) + "...");
+  });
+
+  it("marks an errored agent as failed and uses defaults for missing fields", () => {
+    wsModule.connectSession("s1");
+    fireMessage(agentMsg("a1", [{ type: "tool_use", id: "ag-2", name: "Agent", input: { run_in_background: true } }]));
+    fireMessage(agentMsg("a2", [{ type: "tool_result", tool_use_id: "ag-2", is_error: true, content: [{ type: "text", text: "boom" }] }]));
+
+    const agent = useStore.getState().sessionBackgroundAgents.get("s1")![0];
+    expect(agent).toMatchObject({ name: "Background agent", agentType: "general-purpose", status: "failed", summary: "boom" });
+  });
+});
+
+// ===========================================================================
+// Notifications and remaining message types
+// ===========================================================================
+describe("notifications when the tab is not focused", () => {
+  const created: Array<{ title: string; opts: NotificationOptions }> = [];
+  beforeEach(() => {
+    created.length = 0;
+    playNotificationSoundMock.mockReset();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    vi.stubGlobal("Notification", class {
+      static permission = "granted";
+      constructor(title: string, opts: NotificationOptions) { created.push({ title, opts }); }
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    vi.stubGlobal("location", { protocol: "http:", host: "localhost:3456" });
+  });
+
+  it("plays a sound and shows a desktop notification when a turn completes", () => {
+    useStore.getState().setNotificationSound(true);
+    useStore.getState().setNotificationDesktop(true);
+    wsModule.connectSession("s1");
+    fireMessage({ type: "result", data: { is_error: false, total_cost_usd: 0, num_turns: 1 } });
+    expect(playNotificationSoundMock).toHaveBeenCalledOnce();
+    expect(created).toEqual([{ title: "Session completed", opts: { body: "Claude finished the task", tag: "s1" } }]);
+  });
+
+  it("notifies when a permission is needed", () => {
+    useStore.getState().setNotificationDesktop(true);
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "permission_request",
+      request: { request_id: "r1", tool_name: "Bash", tool_use_id: "t1", input: { command: "rm" }, timestamp: 0 },
+    });
+    expect(created).toEqual([{ title: "Permission needed", opts: { body: "Bash: approve or deny", tag: "r1" } }]);
+  });
+
+  it("stays silent when desktop permission was not granted", () => {
+    (globalThis.Notification as unknown as { permission: string }).permission = "denied";
+    useStore.getState().setNotificationDesktop(true);
+    useStore.getState().setNotificationSound(false);
+    wsModule.connectSession("s1");
+    fireMessage({ type: "result", data: { is_error: false, total_cost_usd: 0, num_turns: 1 } });
+    expect(created).toHaveLength(0);
+    expect(playNotificationSoundMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleMessage: remaining message types", () => {
+  it("records AI auto-resolved permissions", () => {
+    wsModule.connectSession("s1");
+    const request = { request_id: "r1", tool_name: "Read", tool_use_id: "t1", input: {}, timestamp: 0 };
+    fireMessage({ type: "permission_auto_resolved", request, behavior: "allow", reason: "read-only" });
+    expect(useStore.getState().aiResolvedPermissions.get("s1")).toEqual([
+      expect.objectContaining({ request, behavior: "allow", reason: "read-only" }),
+    ]);
+  });
+
+  it("stores PR status updates", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "pr_status_update", available: true, pr: null });
+    expect(useStore.getState().prStatus.get("s1")).toEqual({ available: true, pr: null });
+  });
+
+  it("renders server errors as error system messages", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "error", message: "CLI crashed" });
+    expect(useStore.getState().messages.get("s1")!.at(-1)).toMatchObject({ role: "system", content: "CLI crashed", isError: true });
+  });
+
+  it("ignores unparsable frames and unknown types without throwing", () => {
+    wsModule.connectSession("s1");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    lastWs.onmessage!({ data: "not json" });
+    fireMessage({ type: "brand_new_type" });
+    expect(warn).toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith("[ws] Unhandled message type:", "brand_new_type");
+    // The bad frame must not promote the connection; the valid one does.
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+    warn.mockRestore();
+    debug.mockRestore();
+  });
+
+  it("summarizes hook and file persistence system events", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "system_event", event: { subtype: "hook_started", hook_name: "lint", hook_event: "PostToolUse" } });
+    fireMessage({ type: "system_event", event: { subtype: "hook_response", hook_name: "lint", hook_event: "PostToolUse", outcome: "success", exit_code: 0 } });
+    fireMessage({ type: "system_event", event: { subtype: "hook_response", hook_name: "fmt", hook_event: "Stop", outcome: "error" } });
+    fireMessage({ type: "system_event", event: { subtype: "files_persisted", files: [{}, {}], failed: [{}] } });
+    expect(useStore.getState().messages.get("s1")!.map((m) => m.content)).toEqual([
+      "Hook started: lint (PostToolUse).",
+      "Hook success: lint (PostToolUse) (exit 0).",
+      "Hook error: fmt (Stop).",
+      "Persisted 2 file(s), 1 failed.",
+    ]);
+  });
+
+  it("tracks output tokens from message_delta and line/context totals from result", () => {
+    useStore.getState().addSession(makeSession("s1"));
+    wsModule.connectSession("s1");
+    fireMessage({ type: "stream_event", event: { type: "message_start" }, parent_tool_use_id: null });
+    fireMessage({ type: "stream_event", event: { type: "message_delta", usage: { output_tokens: 99 } }, parent_tool_use_id: null });
+    expect(useStore.getState().streamingOutputTokens.get("s1")).toBe(99);
+
+    fireMessage({
+      type: "result",
+      data: {
+        is_error: false, total_cost_usd: 1, num_turns: 1, total_lines_added: 7, total_lines_removed: 2,
+        modelUsage: { m: { inputTokens: 300, outputTokens: 0, contextWindow: 200 } },
+      },
+    });
+    // Context % is clamped to 100.
+    expect(useStore.getState().sessions.get("s1")).toMatchObject({
+      total_lines_added: 7, total_lines_removed: 2, context_used_percent: 100,
+    });
+  });
+
+  it("records TaskUpdate owner and blockers", () => {
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "a1", type: "message", role: "assistant", model: "m", stop_reason: null, usage: {},
+        content: [
+          { type: "tool_use", id: "tc", name: "TaskCreate", input: { subject: "Build" } },
+          { type: "tool_use", id: "tu", name: "TaskUpdate", input: { taskId: "1", owner: "agent-a", addBlockedBy: ["2"] } },
+        ],
+      },
+      parent_tool_use_id: null,
+    });
+    expect(useStore.getState().sessionTasks.get("s1")![0]).toMatchObject({ owner: "agent-a", blockedBy: ["2"] });
+  });
+
+  it("treats Edit paths as in scope when the session cwd is unknown and normalizes '..'", () => {
+    wsModule.connectSession("s1");
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "a1", type: "message", role: "assistant", model: "m", stop_reason: null, usage: {},
+        content: [{ type: "tool_use", id: "e1", name: "Edit", input: { file_path: "src/../a.ts" } }],
+      },
+      parent_tool_use_id: null,
+    });
+    expect(useStore.getState().changedFilesTick.get("s1")).toBe(1);
   });
 });

@@ -315,12 +315,15 @@ export type ContentBlock =
 
 /** Messages the browser sends to the bridge */
 export type BrowserOutgoingMessage =
-  | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string }[]; client_msg_id?: string }
+  | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string; name?: string }[]; client_msg_id?: string }
   | { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown>; updated_permissions?: PermissionUpdate[]; message?: string; client_msg_id?: string }
+  | { type: "session_focus" }
+  | { type: "history_load_more"; before_index: number }
   | { type: "session_subscribe"; last_seq: number }
   | { type: "session_ack"; last_seq: number }
   | { type: "interrupt"; client_msg_id?: string }
   | { type: "set_model"; model: string; client_msg_id?: string }
+  | { type: "set_ultracode"; enabled: boolean; client_msg_id?: string }
   | { type: "set_effort"; effort: string; client_msg_id?: string }
   | { type: "set_permission_mode"; mode: string; client_msg_id?: string }
   | { type: "mcp_get_status"; client_msg_id?: string }
@@ -356,13 +359,30 @@ export type BrowserIncomingMessageBase =
   | { type: "tool_progress"; tool_use_id: string; tool_name: string; elapsed_time_seconds: number }
   | { type: "tool_use_summary"; summary: string; tool_use_ids: string[] }
   | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
+  /**
+   * The CLI's live background tasks (shells, Monitors, workflows, backgrounded
+   * agents) — the full set, re-sent whenever it changes. Level signal: replace,
+   * never pair edges (see session-work.ts).
+   */
+  | { type: "background_tasks"; tasks: { task_id: string; task_type: string; description: string; ambient?: boolean }[] }
+  /** The CLI's own turn state: authoritative where the phase is only inferred. */
+  | { type: "cli_session_state"; state: "idle" | "running" | "requires_action" }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
   | { type: "error"; message: string }
   | { type: "refusal"; category?: string; explanation?: string; model?: string }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
   | { type: "user_message"; content: string; timestamp: number; id?: string }
-  | { type: "message_history"; messages: BrowserIncomingMessage[] }
+  | {
+    type: "message_history";
+    messages: BrowserIncomingMessage[];
+    /** Index of the first message in the full history (0 = from the beginning). */
+    startIndex?: number;
+    /** Size of the full history, so the client knows more exists. */
+    total?: number;
+    /** An older page: merge into what is on screen, do not treat as the truth. */
+    prepend?: boolean;
+  }
   | { type: "event_replay"; events: BufferedBrowserEvent[] }
   | { type: "session_name_update"; name: string }
   | { type: "pr_status_update"; pr: import("./github-pr.js").GitHubPRInfo | null; available: boolean }
@@ -391,6 +411,22 @@ export interface SessionState {
   model: string;
   /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
   effort?: string;
+  /**
+   * Effort levels this session's model accepts. Only populated for Codex, whose
+   * levels vary per model and are only knowable server-side (models cache); the
+   * Claude UI resolves them from the static table in effort.ts.
+   */
+  supportedEfforts?: string[];
+  /** Claude: ultracode as confirmed by the CLI (not merely requested). */
+  ultracode?: boolean;
+  /**
+   * When the CLI last answered an ultracode change, accepted or refused. A
+   * refusal leaves `ultracode` unchanged, so the UI needs this to know the
+   * request is settled.
+   */
+  ultracodeConfirmedAt?: number;
+  /** Same as ultracodeConfirmedAt, for runtime effort changes (Claude). */
+  effortConfirmedAt?: number;
   cwd: string;
   tools: string[];
   permissionMode: string;

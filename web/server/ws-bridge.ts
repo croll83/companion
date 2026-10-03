@@ -31,8 +31,7 @@ import {
 } from "./ws-bridge-browser-ingest.js";
 import {
   appendHistory as appendHistoryFn,
-  persistSession as persistSessionFn,
-} from "./ws-bridge-persist.js";
+  persistSession as persistSessionFn, historyTail, historyPage } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
   sendToBrowser as sendToBrowserFn,
@@ -50,6 +49,8 @@ import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { isSessionWorking, isTurnInFlight, liveBackgroundWork, noteWorkFromCliMessage, clearWorkTracking } from "./session-work.js";
+import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { log } from "./logger.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
@@ -90,6 +91,8 @@ export class WsBridge {
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
   private autoNamingAttempted = new Set<string>();
+  /** Resolves whether a session is archived; see setArchivedCheck. */
+  private isArchived: (sessionId: string) => boolean = () => false;
   private userMsgCounter = 0;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
@@ -165,6 +168,19 @@ export class WsBridge {
   }
 
   /** Attach a recorder for raw message capture. */
+  /**
+   * Teach the bridge which sessions are archived.
+   *
+   * The watchdog used to emit session:idle-kill for archived sessions too and
+   * rely on the orchestrator to drop them — but it announced the disconnect
+   * itself, unconditionally. An archived session was therefore never killed yet
+   * still shown as disconnected in the UI. Owning the check here keeps the
+   * decision and the announcement in the same place.
+   */
+  setArchivedCheck(isArchived: (sessionId: string) => boolean): void {
+    this.isArchived = isArchived;
+  }
+
   setRecorder(recorder: RecorderManager): void {
     this.recorder = recorder;
   }
@@ -181,6 +197,9 @@ export class WsBridge {
         backendType: p.state.backend_type || "claude",
         backendAdapter: null,
         browserSockets: new Set(),
+        openToolCalls: new Set(),
+        backgroundTasks: new Map(),
+        lastFocusTs: 0,
         state: p.state,
         pendingPermissions: new Map(p.pendingPermissions || []),
         messageHistory: p.messageHistory || [],
@@ -273,6 +292,9 @@ export class WsBridge {
         backendType: type,
         backendAdapter: null,
         browserSockets: new Set(),
+        openToolCalls: new Set(),
+        backgroundTasks: new Map(),
+        lastFocusTs: 0,
         state: makeDefaultState(sessionId, type),
         pendingPermissions: new Map(),
         messageHistory: [],
@@ -350,6 +372,11 @@ export class WsBridge {
     // Unsubscribe any previous listener (e.g. from session restoration) to prevent leaks
     session.unsubscribeStateMachine?.();
     session.unsubscribeStateMachine = session.stateMachine.onTransition((event) => {
+      // Coming to rest ends any turn, so outstanding tool bookkeeping is stale.
+      // Without this a tool whose summary never arrived would keep the session
+      // "working" forever and the watchdog could never reclaim it.
+      if (event.to === "ready") clearWorkTracking(session, "turn");
+      if (event.to === "terminated") clearWorkTracking(session, "process");
       companionBus.emit("session:phase-changed", {
         sessionId: event.sessionId,
         from: event.from,
@@ -425,6 +452,7 @@ export class WsBridge {
     adapter.onBrowserMessage((msg) => {
       // Track activity for idle detection
       session.lastCliActivityTs = Date.now();
+      noteWorkFromCliMessage(session, msg);
       metricsCollector.recordMessageProcessed(msg.type);
 
       // -- session_init: merge into session state, broadcast, persist -----
@@ -446,6 +474,13 @@ export class WsBridge {
           ...cwdOverride,
           backend_type: session.backendType,
         };
+        // Codex effort levels are per-model and only readable server-side, so
+        // they travel with the session. This used to live only in a separate
+        // Codex handler module that nothing in production called (removed
+        // 2026-09-23) — its tests passed against code that never ran, and every
+        // Codex session reached the browser without levels, hiding the effort
+        // selector. Must happen before the broadcast below, or the UI gets them late.
+        if (session.backendType === "codex") this.applyCodexEffort(session);
         this.refreshGitInfo(session, { notifyPoller: true });
         this.broadcastToBrowsers(session, { type: "session_init", session: session.state });
         session.stateMachine.transition("ready", "system_init");
@@ -464,6 +499,16 @@ export class WsBridge {
           ...(skills?.length ? { skills } : {}),
           backend_type: session.backendType,
         };
+        // The adapter only reports ultracode once the CLI has confirmed it, so
+        // this is the moment to make it survive relaunches.
+        if (typeof rest.ultracode === "boolean") {
+          companionBus.emit("session:ultracode-changed", { sessionId: session.id, enabled: rest.ultracode });
+        }
+        // Claude effort applied at runtime: record it so --effort carries it
+        // into the next launch. No relaunch — the CLI already runs on it.
+        if (session.backendType === "claude" && typeof rest.effort === "string" && rest.effortConfirmedAt) {
+          companionBus.emit("session:effort-applied", { sessionId: session.id, effort: rest.effort });
+        }
         this.refreshGitInfo(session, { notifyPoller: true });
         this.persistSession(session);
         if (session.pendingMessages.length > 0 && adapter.isConnected()) {
@@ -473,12 +518,25 @@ export class WsBridge {
 
       // -- status_change: update compacting flag ---------------------------
       if (msg.type === "status_change") {
-        session.state.is_compacting = msg.status === "compacting";
-        if (msg.status === "compacting") {
+        const st = (msg as { status?: string | null }).status ?? null;
+        const ph = session.stateMachine.phase;
+        session.state.is_compacting = st === "compacting";
+        if (st === "compacting") {
           session.stateMachine.transition("compacting", "compaction_started");
-        } else {
+        } else if (ph === "compacting") {
+          // Compaction ended. Rest at ready; the next assistant/stream frame
+          // (see below) flips back to streaming if a turn is still in flight.
           session.stateMachine.transition("ready", "compaction_ended");
+        } else if (st === "requesting" && (ph === "ready" || ph === "initializing")) {
+          // The CLI is starting a model request: a turn is in flight even if
+          // nothing routed a user_message through here (post-relaunch flush).
+          session.stateMachine.transition("streaming", "cli_requesting");
         }
+        // NEVER force `ready` from `streaming` on an arbitrary status: the CLI
+        // emits status "requesting" before every API call, and doing so put a
+        // live turn in `ready`, where the idle-kill watchdog would SIGTERM it
+        // after 5 quiet minutes (long thinking / long tool). Root cause of the
+        // "hangs" and lost answers seen over 2026-08-31 → 09-02.
         // Claude status messages may include permissionMode (not in the typed interface).
         // When the CLI changes mode autonomously (e.g. after ExitPlanMode approval),
         // we must broadcast the update so browsers sync their UI (plan toggle, etc.).
@@ -505,6 +563,7 @@ export class WsBridge {
 
       // -- assistant: append to history, notify listeners ------------------
       if (msg.type === "assistant") {
+        this.markStreamingOnCliOutput(session, "assistant_frame");
         const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now() };
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
@@ -526,6 +585,7 @@ export class WsBridge {
       }
 
       if (msg.type === "stream_event") {
+        this.markStreamingOnCliOutput(session, "stream_event");
         companionBus.emit("message:stream_event", { sessionId: session.id, message: msg });
       }
 
@@ -815,6 +875,27 @@ export class WsBridge {
   }
 
   /**
+   * Re-tell every browser that the CLI is alive, bypassing the dedupe.
+   *
+   * For a Reconnect pressed on a session whose CLI is in fact connected: the
+   * browser was showing stale state, and the fix is to correct the browser,
+   * not to kill a CLI that is working.
+   */
+  resyncCliConnected(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.lastConnectionBroadcast = "connected";
+    this.broadcastToBrowsers(session, { type: "cli_connected" });
+    // Only re-send a phase the browser reads as "connected". starting /
+    // initializing / reconnecting / terminated all map to cliConnected=false in
+    // the frontend and would undo the cli_connected just sent (caught in review).
+    const phase = session.stateMachine.phase;
+    if (phase === "ready" || phase === "streaming" || phase === "awaiting_permission" || phase === "compacting") {
+      this.broadcastToBrowsers(session, { type: "session_phase", phase, previousPhase: phase });
+    }
+  }
+
+  /**
    * Public wrapper for the orchestrator to announce a confirmed CLI death
    * (e.g. from the session:exited handler when no relaunch is in progress).
    * No-op for unknown sessions.
@@ -894,7 +975,7 @@ export class WsBridge {
       for (const raw of queued) {
         try {
           const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
-          adapter.send(queued_msg);
+          if (adapter.send(queued_msg)) this.noteFlushedUserTurn(session, queued_msg);
         } catch {
           console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
         }
@@ -910,6 +991,9 @@ export class WsBridge {
   handleCLIStdioReady(sessionId: string, proc: Subprocess<"pipe", "pipe", "pipe">) {
     this.recorder?.recordEvent(sessionId, "ws_open", "cli");
     const session = this.getOrCreateSession(sessionId);
+    // A new CLI process: whatever the previous one was running in the
+    // background died with it. It will re-announce its own set.
+    clearWorkTracking(session, "process");
 
     // Create or retrieve ClaudeAdapter for this session
     let adapter: ClaudeAdapter;
@@ -964,7 +1048,7 @@ export class WsBridge {
       for (const raw of queued) {
         try {
           const queued_msg = JSON.parse(raw) as BrowserOutgoingMessage;
-          adapter.send(queued_msg);
+          if (adapter.send(queued_msg)) this.noteFlushedUserTurn(session, queued_msg);
         } catch {
           console.warn(`[ws-bridge] Failed to parse queued message: ${raw.substring(0, 100)}`);
         }
@@ -1023,6 +1107,12 @@ export class WsBridge {
     trigger: string,
     delayMs: number = WsBridge.DISCONNECT_DEBOUNCE_MS,
   ): void {
+    // Capture this BEFORE the phase moves: at confirm time the session is
+    // "terminated", which reads as at-rest and would lose the distinction.
+    // Turn-scoped on purpose — see isTurnInFlight: background work must NOT
+    // trigger this relaunch, because relaunching is what would kill it.
+    const wasWorking = isTurnInFlight(session);
+    const orphanedBackgroundWork = liveBackgroundWork(session).length;
     session.stateMachine.transition("reconnecting", trigger);
 
     const existing = this.disconnectTimers.get(sessionId);
@@ -1039,8 +1129,21 @@ export class WsBridge {
       // Stop the idle-kill watchdog — the CLI is dead, nothing to reclaim.
       this.stopIdleKillWatchdog(sessionId);
 
-      // No auto-relaunch — user clicks "Reconnect" in the UI which calls
-      // POST /api/sessions/:id/relaunch explicitly.
+      // An idle session stays down on purpose: relaunching every one of them
+      // after a server restart is what used to fill RAM with 20+ dead CLIs.
+      // A session that was MID-TURN is different — the user is losing an answer
+      // in progress, and leaving it down means they must click Reconnect and
+      // then re-send the message to get it back. Bring that one back itself.
+      if (wasWorking) {
+        log.info("ws-bridge", "Disconnected mid-turn — relaunching", { sessionId, trigger });
+        companionBus.emit("session:relaunch-needed", { sessionId });
+      } else if (orphanedBackgroundWork > 0) {
+        // Left alone on purpose: the CLI may still be running this work even
+        // though we can no longer read it. A relaunch would SIGTERM it.
+        log.warn("ws-bridge", "Lost contact with a CLI that has background work — not relaunching", {
+          sessionId, trigger, backgroundTasks: orphanedBackgroundWork,
+        });
+      }
     }, delayMs));
   }
 
@@ -1068,10 +1171,7 @@ export class WsBridge {
 
     // Replay message history so the browser can reconstruct the conversation
     if (session.messageHistory.length > 0) {
-      this.sendToBrowser(ws, {
-        type: "message_history",
-        messages: session.messageHistory,
-      });
+      this.sendToBrowser(ws, { type: "message_history", ...historyTail(session.messageHistory) });
     }
 
     // Send any pending permission requests
@@ -1179,6 +1279,27 @@ export class WsBridge {
       : 24 * 60 * 60_000, // 24 hours default
   );
   private static readonly IDLE_CHECK_INTERVAL_MS = 60_000; // check every 60s
+  /**
+   * How long a session kept alive ONLY by background tasks may stay silent
+   * before it is reclaimed anyway. Generous on purpose: a long terraform apply or
+   * Docker build must finish; this only catches tasks that never end.
+   */
+  private static get BG_WORK_MAX_IDLE_MS(): number {
+    const h = Number(process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS);
+    return (Number.isFinite(h) && h > 0 ? h : 6) * 3_600_000;
+  }
+  /**
+   * How recently a client must have had the session focused for it to be spared.
+   *
+   * Reverses the earlier browser-independent policy: a focused-but-idle session
+   * used to be killed anyway to free RAM. Clients refresh this while the session
+   * stays on screen, so the window is "still looking at it", not "opened it once".
+   */
+  private static readonly FOCUS_GRACE_MS = Number(
+    process.env.COMPANION_FOCUS_GRACE_MINUTES
+      ? Number(process.env.COMPANION_FOCUS_GRACE_MINUTES) * 60_000
+      : 10 * 60_000,
+  );
 
   /**
    * Start the activity-based idle-kill watchdog. Called when the CLI connects
@@ -1223,19 +1344,44 @@ export class WsBridge {
       return; // still active or not idle long enough
     }
 
-    // Phase gating: only kill an idle session that is genuinely at rest.
-    //  - "ready" is the only killable phase (idle, awaiting user input).
-    //  - streaming/compacting/initializing/starting → work in flight, never kill.
-    //  - awaiting_permission → PROTECTED: a permission is pending; killing would
-    //    lose the user's place, so we wait for them to resolve it.
-    //  - terminated → already dead; stop the watchdog.
     const phase = session.stateMachine.phase;
     if (phase === "terminated") {
       this.stopIdleKillWatchdog(sessionId);
       return;
     }
-    if (phase !== "ready") {
-      return; // not at rest (or protected) — defer the kill
+
+    // A session someone is actually looking at is not cleanup material, even if
+    // nothing has happened in it for a while.
+    const focusAgeMs = Date.now() - session.lastFocusTs;
+    if (session.lastFocusTs > 0 && focusAgeMs < WsBridge.FOCUS_GRACE_MS) {
+      return;
+    }
+
+    // Archived sessions are out of scope for cleanup entirely.
+    if (this.isArchived(sessionId)) {
+      this.stopIdleKillWatchdog(sessionId);
+      return;
+    }
+
+    // Is it actually working? Ask directly rather than inferring it from the
+    // phase: a Bash command, an MCP call or a delegated sub-agent can run for
+    // tens of minutes while the phase sits at "ready", and a rejected
+    // transition can strand it there too. See session-work.ts.
+    if (isSessionWorking(session)) {
+      // Background work alone may not hold a CLI forever: a dev server or a
+      // Monitor left running would otherwise pin the session indefinitely and
+      // defeat the RAM policy. Real background work keeps the CLI talking (task
+      // progress, notifications, wake-ups), so only a long total silence ends it.
+      const onlyBackground = !isTurnInFlight(session)
+        && session.cliState !== "running" && session.cliState !== "requires_action";
+      if (!onlyBackground || idleMs < WsBridge.BG_WORK_MAX_IDLE_MS) {
+        return; // work in flight (or a permission pending) — defer the kill
+      }
+      log.warn("ws-bridge", "Background work silent past the cap — reclaiming", {
+        sessionId,
+        idleHours: Math.round(idleMs / 3_600_000),
+        tasks: liveBackgroundWork(session).map((t) => `${t.type}: ${t.description}`).join(" | "),
+      });
     }
 
     // Truly idle and at rest — kill to reclaim RAM. No auto-reconnect.
@@ -1243,6 +1389,29 @@ export class WsBridge {
     this.stopIdleKillWatchdog(sessionId);
     companionBus.emit("session:idle-kill", { sessionId });
     this.notifyCliConnection(session, false, "idle_kill");
+  }
+
+  /**
+   * Put the Codex model's effort levels on the session state, and settle an
+   * effort the model can actually take.
+   *
+   * Levels differ per model (Astra reaches `ultra`, Luna stops at `max`), so a
+   * session carrying an effort its new model lacks — after a model switch —
+   * falls back to that model's own default instead of being relaunched with a
+   * level Codex would reject.
+   */
+  private applyCodexEffort(session: Session): void {
+    const model = session.state.model;
+    const levels = getCodexEffortLevels(model);
+    if (levels.length === 0) {
+      delete session.state.supportedEfforts;
+      return;
+    }
+    session.state.supportedEfforts = levels;
+    const current = session.state.effort;
+    if (!current || !levels.includes(current as (typeof levels)[number])) {
+      session.state.effort = getCodexDefaultEffort(model) ?? undefined;
+    }
   }
 
   /** Append to messageHistory with cap. Delegates to ws-bridge-persist. */
@@ -1258,6 +1427,24 @@ export class WsBridge {
     ws?: ServerWebSocket<SocketData>,
   ) {
     // Bridge-level message types — never forwarded to backend
+    // Older history, pulled on demand by the "load more" control. Sent as a
+    // prepend so the client merges it above what is on screen instead of
+    // replacing the live conversation.
+    if (msg.type === "history_load_more") {
+      const page = historyPage(session.messageHistory, msg.before_index);
+      if (page.messages.length > 0 && ws) {
+        this.sendToBrowser(ws, { type: "message_history", ...page, prepend: true });
+      }
+      return;
+    }
+
+    // Focus is reported explicitly by the client: an open socket says nothing,
+    // because the frontend opens one to EVERY session on load.
+    if (msg.type === "session_focus") {
+      session.lastFocusTs = Date.now();
+      return;
+    }
+
     if (msg.type === "session_subscribe") {
       handleSessionSubscribe(
         session,
@@ -1285,12 +1472,13 @@ export class WsBridge {
       return;
     }
 
-    // -- set_model (Claude): the CLI's set_model control_request silently
-    // no-ops, so handle this at the bridge level by emitting an event for
-    // the orchestrator to update the launcher's model and relaunch the CLI.
-    // Codex backend keeps the existing forward-to-adapter behavior since
-    // its set_model implementation works as expected.
-    if (msg.type === "set_model" && session.backendType === "claude") {
+    // -- set_model: neither CLI switches model in place. Claude's set_model
+    // control_request silently no-ops; the Codex adapter rejects it outright
+    // ("Runtime model switching not supported"). A comment here used to claim
+    // the Codex path worked, and the picker hid itself for Codex to match — so
+    // Codex sessions could never change model. Both go through the
+    // orchestrator, which relaunches on the resumed conversation.
+    if (msg.type === "set_model" && (session.backendType === "claude" || session.backendType === "codex")) {
       session.state.model = msg.model;
       this.persistSession(session);
       this.broadcastToBrowsers(session, {
@@ -1304,10 +1492,12 @@ export class WsBridge {
       return;
     }
 
-    // -- set_effort (Claude): reasoning effort can only be set via the
-    // `--effort` launch flag (no runtime control_request), so mirror the
-    // set_model flow — persist + relaunch with --resume.
-    if (msg.type === "set_effort" && session.backendType === "claude") {
+    // -- set_effort (Codex): Codex takes effort only at launch
+    // (`-c model_reasoning_effort`), so persist + relaunch on thread/resume.
+    // Claude is NOT handled here: its CLI changes effort at runtime through
+    // apply_flag_settings, so the message falls through to the adapter and the
+    // session is never relaunched (see ClaudeAdapter.handleOutgoingSetEffort).
+    if (msg.type === "set_effort" && session.backendType === "codex") {
       session.state.effort = msg.effort;
       this.persistSession(session);
       this.broadcastToBrowsers(session, {
@@ -1425,7 +1615,7 @@ export class WsBridge {
         // (the phase broadcast drives the "Reconnecting…" hint). The queued
         // message still flushes post-init via the session_init/meta hooks.
         if (phase === "terminated") {
-          session.stateMachine.transition("starting", "relaunch_on_send");
+          session.stateMachine.mustTransition("starting", "relaunch_on_send");
           session.stateMachine.transition("reconnecting", "relaunch_on_send");
         }
         companionBus.emit("session:relaunch-needed", { sessionId: session.id });
@@ -1475,6 +1665,29 @@ export class WsBridge {
     session.pendingMessages.push(raw);
   }
 
+  /**
+   * A queued user_message delivered by a post-(re)launch flush bypasses
+   * routeBrowserMessage, so it never bumped lastUserActivityTs nor moved the
+   * phase to streaming — leaving the whole turn in `ready`, where the idle-kill
+   * watchdog could SIGTERM it mid-work. Mirror that bookkeeping here.
+   */
+  private noteFlushedUserTurn(session: Session, msg: BrowserOutgoingMessage): void {
+    if (msg.type !== "user_message") return;
+    session.lastUserActivityTs = Date.now();
+    const ph = session.stateMachine.phase;
+    if (ph === "ready" || ph === "initializing" || ph === "starting" || ph === "reconnecting") {
+      session.stateMachine.transition("streaming", "user_message_flushed");
+    }
+  }
+
+  /** CLI is visibly producing output: a turn is in flight, whatever started it. */
+  private markStreamingOnCliOutput(session: Session, trigger: string): void {
+    const ph = session.stateMachine.phase;
+    if (ph === "ready" || ph === "initializing") {
+      session.stateMachine.transition("streaming", trigger);
+    }
+  }
+
   private flushQueuedBrowserMessages(session: Session, adapter: IBackendAdapter, reason: string): void {
     if (session.pendingMessages.length === 0) return;
 
@@ -1501,6 +1714,7 @@ export class WsBridge {
       }
 
       const sent = adapter.send(queuedMsg);
+      if (sent) this.noteFlushedUserTurn(session, queuedMsg);
       if (!sent && RETRYABLE_BACKEND_MESSAGE_TYPES.has(queuedMsg.type)) {
         const remaining = queued.slice(i);
         session.pendingMessages = remaining.concat(session.pendingMessages);

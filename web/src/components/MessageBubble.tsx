@@ -5,10 +5,66 @@ import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { CopyButton } from "./CopyButton.js";
 import { RefusalBanner } from "./RefusalBanner.js";
+import { useStore } from "../store.js";
+import { parseLocalFileLink } from "../utils/local-file-link.js";
+
+/**
+ * A link in an assistant message.
+ *
+ * Models write files and then mention them by absolute path. Markdown turns
+ * `/home/u/report.md` into an href that the browser resolves against
+ * Companion's own origin, so clicking it hits a route that doesn't exist. When
+ * a link is really a local path, open it in the viewer instead; everything else
+ * behaves like a normal external link.
+ */
+function SmartLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const openFileViewer = useStore((s) => s.openFileViewer);
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const localPath = parseLocalFileLink(href, origin);
+
+  if (localPath) {
+    return (
+      <a
+        href={href}
+        title={localPath}
+        onClick={(e) => { e.preventDefault(); openFileViewer(localPath); }}
+        className="text-cc-primary hover:underline cursor-pointer"
+      >
+        {children}
+      </a>
+    );
+  }
+
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="text-cc-primary hover:underline">
+      {children}
+    </a>
+  );
+}
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.refusal) {
     return <RefusalBanner refusal={message.refusal} />;
+  }
+
+  // Backend errors (protocol drift, init failures) share role "system" with the
+  // decorative separators, so without their own treatment they read as ordinary
+  // chatter. Red on a dark plate, with an icon, so they stand out while
+  // scrolling.
+  if (message.role === "system" && message.isError) {
+    return (
+      <div className="flex justify-center py-1.5 min-w-0">
+        <div
+          role="alert"
+          className="flex items-start gap-2 max-w-[95%] px-3 py-2 rounded-[10px] bg-cc-error/10 border border-cc-error/40 shadow-sm"
+        >
+          <span aria-hidden className="shrink-0 text-cc-error text-[13px] leading-5">⚠</span>
+          <span className="text-[12px] text-cc-error font-mono-code min-w-0 break-words">
+            {message.content}
+          </span>
+        </div>
+      </div>
+    );
   }
 
   if (message.role === "system") {
@@ -196,7 +252,15 @@ function AssistantAvatar() {
   );
 }
 
-function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
+/**
+ * Markdown with the app's styling applied element by element.
+ *
+ * Tailwind's preflight strips the browser defaults for headings, lists and
+ * emphasis, so a bare <Markdown> renders as flat body text (tables survive
+ * because the browser lays them out natively). Every consumer must go through
+ * here, or it silently loses that formatting.
+ */
+export function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
   return (
     <div className="markdown-body text-[14px] sm:text-[15px] text-cc-fg leading-relaxed overflow-hidden">
       <Markdown
@@ -229,11 +293,7 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
           li: ({ children }) => (
             <li className="text-cc-fg">{children}</li>
           ),
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" className="text-cc-primary hover:underline">
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => <SmartLink href={href}>{children}</SmartLink>,
           blockquote: ({ children }) => (
             <blockquote className="border-l-2 border-cc-primary/30 pl-3 my-2 text-cc-muted italic">
               {children}

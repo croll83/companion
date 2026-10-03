@@ -604,3 +604,43 @@ describe("SessionStateMachine", () => {
     });
   });
 });
+
+// ─── Regression: transitions the table used to reject ───────────────────────
+// Production log 2026-09-22 showed 104 blocked relaunches and 35 blocked
+// permission entries. Each one left the phase lying about the session.
+describe("transitions that must never be rejected", () => {
+  const LIVE_PHASES = ["initializing", "ready", "streaming", "awaiting_permission", "compacting", "reconnecting"] as const;
+
+  it("allows a relaunch (→ starting) from every live phase", () => {
+    // A relaunch can be requested at any moment: model change, effort change,
+    // Reconnect, relaunch-on-send.
+    for (const phase of LIVE_PHASES) {
+      const sm = new SessionStateMachine("s1", phase);
+      expect(sm.transition("starting", "relaunch_initiated"), `from ${phase}`).toBe(true);
+      expect(sm.phase).toBe("starting");
+    }
+  });
+
+  it("allows entering awaiting_permission from ready", () => {
+    // Otherwise the session stays in `ready` — the only phase the idle-kill
+    // watchdog will reclaim — while it waits for the user to approve a tool.
+    const sm = new SessionStateMachine("s1", "ready");
+    expect(sm.transition("awaiting_permission", "permission_requested")).toBe(true);
+    expect(sm.phase).toBe("awaiting_permission");
+  });
+
+  it("still refuses a genuinely nonsensical transition", () => {
+    // The table must not become permissive everywhere: a dead session cannot
+    // start streaming without being relaunched first.
+    const sm = new SessionStateMachine("s1", "terminated");
+    expect(sm.transition("streaming", "user_message")).toBe(false);
+    expect(sm.phase).toBe("terminated");
+  });
+
+  it("mustTransition reports a blocked required transition instead of swallowing it", () => {
+    const sm = new SessionStateMachine("s1", "terminated");
+    expect(sm.mustTransition("streaming", "user_message")).toBe(false);
+    // And it succeeds (quietly) when the transition is legal.
+    expect(sm.mustTransition("starting", "relaunch_initiated")).toBe(true);
+  });
+});

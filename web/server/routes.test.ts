@@ -100,6 +100,7 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: "",
     updateChannel: "stable",
     dockerAutoUpdate: false,
+    telegramBotToken: "",
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -123,6 +124,7 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: patch.publicUrl ?? "",
     updateChannel: patch.updateChannel ?? "stable",
     dockerAutoUpdate: patch.dockerAutoUpdate ?? false,
+    telegramBotToken: "",
     updatedAt: Date.now(),
   })),
 }));
@@ -857,7 +859,19 @@ describe("POST /api/sessions/:id/relaunch", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ ok: true });
-    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1");
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { force: false });
+  });
+
+  it("passes ?force=1 through (deliberate restart of a working CLI)", async () => {
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true });
+    await app.request("/api/sessions/s1/relaunch?force=1", { method: "POST" });
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { force: true });
+  });
+
+  it("reports when the CLI was already running and was only resynced", async () => {
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true, alreadyRunning: true });
+    const res = await app.request("/api/sessions/s1/relaunch", { method: "POST" });
+    expect(await res.json()).toEqual({ ok: true, alreadyRunning: true });
   });
 
   it("returns 503 with error when container is missing", async () => {
@@ -1144,6 +1158,7 @@ describe("GET /api/sessions/:id/archive-info", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -1514,6 +1529,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 123,
     });
 
@@ -1542,6 +1558,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotTokenConfigured: false,
     });
   });
 
@@ -1570,6 +1587,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 123,
     });
 
@@ -1598,6 +1616,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotTokenConfigured: false,
     });
   });
 
@@ -1627,6 +1646,7 @@ describe("GET /api/settings", () => {
       publicUrl: "https://example.com",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 100,
     });
 
@@ -1664,6 +1684,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 456,
     });
 
@@ -1714,6 +1735,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotTokenConfigured: false,
     });
   });
 
@@ -1742,6 +1764,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 789,
     });
 
@@ -1787,6 +1810,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 999,
     });
 
@@ -1883,6 +1907,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "https://my-server.com",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 500,
     });
 
@@ -2109,6 +2134,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2144,6 +2170,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2232,6 +2259,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2327,6 +2355,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2387,6 +2416,7 @@ describe("GET /api/linear/connection", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2422,6 +2452,7 @@ describe("GET /api/linear/connection", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2479,6 +2510,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2518,6 +2550,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2556,6 +2589,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2596,6 +2630,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2670,6 +2705,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2723,6 +2759,7 @@ describe("GET /api/linear/projects", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2758,6 +2795,7 @@ describe("GET /api/linear/projects", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2823,6 +2861,7 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2858,6 +2897,7 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -2938,6 +2978,7 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telegramBotToken: "",
       updatedAt: 0,
     });
 
@@ -3597,15 +3638,18 @@ describe("GET /api/backends/:id/models", () => {
     expect(json.error).toContain("Codex models cache not found");
   });
 
-  it("returns 500 when cache file is malformed", async () => {
+  it("falls back to frontend defaults when no cache can be read", async () => {
+    // With a cache per Codex home, one corrupt file must not take the picker
+    // down — unreadable caches are skipped. Only when none parses does the
+    // menu fall back, and it does so the same way as when none exists.
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue("not valid json{{{");
 
     const res = await app.request("/api/backends/codex/models", { method: "GET" });
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(404);
     const json = await res.json();
-    expect(json.error).toContain("Failed to parse");
+    expect(json.error).toContain("not found");
   });
 
   it("returns 404 for claude backend (uses frontend defaults)", async () => {

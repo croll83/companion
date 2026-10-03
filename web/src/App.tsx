@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession } from "./ws.js";
+import { setFocusedSession, syncSessionSockets } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
@@ -16,6 +16,7 @@ import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { UpdateOverlay } from "./components/UpdateOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
+import { FileViewerModal } from "./components/FileViewerModal.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -103,12 +104,19 @@ export default function App() {
       if (store.currentSessionId !== route.sessionId) {
         store.setCurrentSession(route.sessionId);
       }
-      connectSession(route.sessionId);
+      // Hold a socket for the session on screen and for any session whose CLI
+      // is still alive (so its notifications still arrive); park the rest.
+      syncSessionSockets(route.sessionId);
+      // Tell the server this is the session on screen, so the idle-kill sweep
+      // spares it while the user is still looking.
+      setFocusedSession(route.sessionId);
     } else if (route.page === "home") {
       const store = useStore.getState();
       if (store.currentSessionId !== null) {
         store.setCurrentSession(null);
       }
+      syncSessionSockets(null);
+      setFocusedSession(null);
     }
     // For other pages (settings, etc.), preserve currentSessionId
   }, [route]);
@@ -343,6 +351,7 @@ export default function App() {
       <UpdateOverlay active={updateOverlayActive} />
       <DockerUpdateDialog />
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
+      <FileViewerModal />
     </div>
   );
 }

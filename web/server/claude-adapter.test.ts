@@ -552,6 +552,25 @@ describe("send() — outgoing message translation", () => {
     expect(sent.message.content[1].text).toBe("Describe this");
   });
 
+  it("user_message with a PDF attachment → emits a document block (not image)", () => {
+    // PDFs are carried in the same `images` field but must become `document`
+    // blocks so Claude reads them natively (the composer attaches PDFs too).
+    adapter.send({
+      type: "user_message",
+      content: "Summarize this",
+      images: [{ media_type: "application/pdf", data: "pdfbase64" }],
+    });
+    const sent = getLastSent();
+    expect(Array.isArray(sent.message.content)).toBe(true);
+    expect(sent.message.content[0].type).toBe("document");
+    expect(sent.message.content[0].source).toEqual({
+      type: "base64",
+      media_type: "application/pdf",
+      data: "pdfbase64",
+    });
+    expect(sent.message.content[1]).toEqual({ type: "text", text: "Summarize this" });
+  });
+
   it("permission_response allow → sends correct control_response NDJSON", () => {
     // An "allow" permission response should be translated into a
     // control_response with behavior: "allow" and updatedInput.
@@ -628,6 +647,94 @@ describe("send() — outgoing message translation", () => {
     expect(sent.type).toBe("control_request");
     expect(sent.request.subtype).toBe("set_model");
     expect(sent.request.model).toBe("claude-opus-4-6");
+  });
+
+  // Flag settings (ultracode, Claude effort) change at runtime with no relaunch.
+  // apply_flag_settings answers "success" even for values it ignores, so the
+  // browser is told what get_settings reports as `applied`, never the request.
+  function answer(request: any, response: Record<string, unknown> = {}, error?: string) {
+    adapter.handleRawMessage(`${JSON.stringify({
+      type: "control_response",
+      response: error
+        ? { subtype: "error", request_id: request.request_id, error }
+        : { subtype: "success", request_id: request.request_id, response },
+    })}\n`);
+  }
+
+  it("set_ultracode → applies, reads back, and reports the applied state", () => {
+    adapter.send({ type: "set_ultracode", enabled: true });
+    const apply = getLastSent();
+    expect(apply.request).toEqual({ subtype: "apply_flag_settings", settings: { ultracode: true } });
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_update" }));
+
+    answer(apply);
+    const read = getLastSent();
+    expect(read.request).toEqual({ subtype: "get_settings" });
+
+    answer(read, { applied: { ultracode: true, effort: "high" } });
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { ultracode: true, ultracodeConfirmedAt: expect.any(Number) },
+    });
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+  });
+
+  it("set_ultracode answered 'success' but not applied → reports the truth", () => {
+    // The trap: success does not mean applied.
+    adapter.send({ type: "set_ultracode", enabled: true });
+    answer(getLastSent());
+    answer(getLastSent(), { applied: { ultracode: false } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error", message: expect.stringContaining("kept it off"),
+    }));
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { ultracode: false, ultracodeConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_ultracode refused by the CLI → error, and the state read back stands", () => {
+    adapter.send({ type: "set_ultracode", enabled: true });
+    answer(getLastSent(), {}, "dynamic workflows are off");
+    answer(getLastSent(), { applied: { ultracode: false } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error", message: expect.stringContaining("dynamic workflows are off"),
+    }));
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { ultracode: false, ultracodeConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_effort → changes effort in place and reports the applied level", () => {
+    adapter.send({ type: "set_effort", effort: "max" });
+    const apply = getLastSent();
+    expect(apply.request).toEqual({ subtype: "apply_flag_settings", settings: { effortLevel: "max" } });
+
+    answer(apply);
+    answer(getLastSent(), { applied: { effort: "max" } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { effort: "max", effortConfirmedAt: expect.any(Number) },
+    });
+  });
+
+  it("set_effort the CLI ignores → error, and the level stays where it is", () => {
+    // Probed on CLI 2.1.288: an unknown level returns success and changes nothing.
+    adapter.send({ type: "set_effort", effort: "max" });
+    answer(getLastSent());
+    answer(getLastSent(), { applied: { effort: "high" } });
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error", message: expect.stringContaining("still on high"),
+    }));
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "session_update",
+      session: { effort: "high", effortConfirmedAt: expect.any(Number) },
+    });
   });
 
   it("set_permission_mode → sends control_request with subtype 'set_permission_mode'", () => {
@@ -1368,8 +1475,10 @@ describe("prompt_suggestion", () => {
 // send a second message to deliver the first" bug. The CLI emits output only
 // AFTER receiving the first user message, so total silence after the write
 // means it was lost; we then re-send once. Armed only on re-attaches (not the
-// first/cold start) and cleared on the first inbound byte, so it never fires
-// when the CLI is actually alive.
+// first/cold start) and cleared by a frame that PROVES intake (system/assistant/
+// stream_event/result), so it never fires when the CLI actually took the turn.
+// Unrelated stdout must NOT count as an ack — that was the bug: the CLI's own
+// chatter cancelled the self-heal while our message had in fact been lost.
 describe("ClaudeAdapter stdio attach-input self-heal", () => {
   function makeStdioProc() {
     let ctrl!: ReadableStreamDefaultController<Uint8Array>;
@@ -1395,18 +1504,18 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
     expect(p2.stdin.write).toHaveBeenCalledTimes(1);
     const firstWrite = p2.stdin.write.mock.calls[0][0];
 
-    // No inbound bytes within the ack window → the write was lost → re-send once.
-    await vi.advanceTimersByTimeAsync(6500);
+    // No intake frame within the ack window → the write was lost → re-send once.
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p2.stdin.write).toHaveBeenCalledTimes(2);
     expect(p2.stdin.write.mock.calls[1][0]).toBe(firstWrite);
 
     // Only re-sends ONCE, never loops.
-    await vi.advanceTimersByTimeAsync(6500);
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p2.stdin.write).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 
-  it("does NOT re-send when the CLI produces output (alive)", async () => {
+  it("does NOT re-send once a frame proves the CLI took the turn", async () => {
     vi.useFakeTimers();
     const adapter = new ClaudeAdapter("sess-alive");
     const p1 = makeStdioProc();
@@ -1417,11 +1526,32 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
     adapter.send(userMsg);
     expect(p2.stdin.write).toHaveBeenCalledTimes(1);
 
-    // Any inbound byte on the active reader cancels the self-heal.
-    p1.pushStdout("k");
+    // system/init is emitted only AFTER the CLI consumes a user message → ack.
+    p1.pushStdout(JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }) + "\n");
     await vi.advanceTimersByTimeAsync(10);
-    await vi.advanceTimersByTimeAsync(6500);
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p2.stdin.write).toHaveBeenCalledTimes(1); // no re-send
+    vi.useRealTimers();
+  });
+
+  it("still re-sends when stdout carries only non-intake output", async () => {
+    // Regression: unrelated CLI chatter used to cancel the self-heal, so a
+    // message lost to the stdin race was never retried and the turn hung for
+    // the caller's whole timeout budget.
+    vi.useFakeTimers();
+    const adapter = new ClaudeAdapter("sess-noise");
+    const p1 = makeStdioProc();
+    adapter.attachStdio(p1.proc);
+    const p2 = makeStdioProc();
+    adapter.attachStdio(p2.proc); // attachCount 2
+
+    adapter.send(userMsg);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(1);
+
+    p1.pushStdout(JSON.stringify({ type: "control_response", response: { subtype: "success" } }) + "\n");
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(12500);
+    expect(p2.stdin.write).toHaveBeenCalledTimes(2); // lost message retried
     vi.useRealTimers();
   });
 
@@ -1433,7 +1563,7 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
 
     adapter.send(userMsg);
     expect(p1.stdin.write).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(6500);
+    await vi.advanceTimersByTimeAsync(12500);
     expect(p1.stdin.write).toHaveBeenCalledTimes(1); // cold start never re-sends
     vi.useRealTimers();
   });

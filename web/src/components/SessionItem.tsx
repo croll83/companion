@@ -13,6 +13,12 @@ interface SessionItemProps {
   onArchive: (e: React.MouseEvent, id: string) => void;
   onUnarchive: (e: React.MouseEvent, id: string) => void;
   onDelete: (e: React.MouseEvent, id: string) => void;
+  /** Open the Telegram bridge config for this session. */
+  onConnectTelegram: (id: string) => void;
+  /** Whether a global Telegram bot token is configured (gates the menu item). */
+  telegramConfigured: boolean;
+  /** Session ids that already have a Telegram binding (for the label/indicator). */
+  telegramBoundIds?: Set<string>;
   onClearRecentlyRenamed: (id: string) => void;
   editingSessionId: string | null;
   editingName: string;
@@ -87,6 +93,9 @@ export function SessionItem({
   onArchive,
   onUnarchive,
   onDelete,
+  onConnectTelegram,
+  telegramConfigured,
+  telegramBoundIds,
   onClearRecentlyRenamed,
   editingSessionId,
   editingName,
@@ -97,6 +106,7 @@ export function SessionItem({
 }: SessionItemProps) {
   const shortId = s.id.slice(0, 8);
   const label = sessionName || s.model || shortId;
+  const telegramBound = telegramBoundIds?.has(s.id) ?? false;
   const isEditing = editingSessionId === s.id;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -320,6 +330,37 @@ export function SessionItem({
               </svg>
               Rename
             </button>
+          )}
+          {!archived && (
+            telegramConfigured ? (
+              <button
+                role="menuitem"
+                tabIndex={-1}
+                onClick={() => handleMenuAction(() => onConnectTelegram(s.id))}
+                className="w-full px-3 py-1.5 text-[12px] text-left text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2"
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-cc-muted">
+                  <path d="M14.5 1.6 12.3 13a.8.8 0 0 1-1.25.47l-3.1-2.3-1.5 1.44a.5.5 0 0 1-.84-.32l-.28-2.87 5.6-5.06c.16-.15-.04-.24-.25-.1L5.9 8.3 3 7.4c-.6-.18-.6-.6.13-.9l10.4-4.02c.5-.18.94.12.78.72Z" />
+                </svg>
+                {telegramBound ? "Telegram: connesso" : "Connect to Telegram"}
+                {telegramBound && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-cc-success" aria-hidden />}
+              </button>
+            ) : (
+              <div
+                role="menuitem"
+                aria-disabled="true"
+                title="Configura un Telegram bot token in Impostazioni per abilitare il bridge"
+                className="w-full px-3 py-1.5 text-left text-cc-muted/60 cursor-not-allowed select-none"
+              >
+                <div className="flex items-center gap-2 text-[12px]">
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+                    <path d="M14.5 1.6 12.3 13a.8.8 0 0 1-1.25.47l-3.1-2.3-1.5 1.44a.5.5 0 0 1-.84-.32l-.28-2.87 5.6-5.06c.16-.15-.04-.24-.25-.1L5.9 8.3 3 7.4c-.6-.18-.6-.6.13-.9l10.4-4.02c.5-.18.94.12.78.72Z" />
+                  </svg>
+                  Connect to Telegram
+                </div>
+                <div className="pl-5 text-[10px] leading-tight text-cc-muted/60">Serve un bot token in Impostazioni</div>
+              </div>
+            )
           )}
           {archived ? (
             <>

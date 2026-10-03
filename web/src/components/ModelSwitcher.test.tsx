@@ -4,6 +4,11 @@ import "@testing-library/jest-dom";
 
 const mockSendToSession = vi.fn();
 
+const mockGetBackendModels = vi.fn();
+vi.mock("../api.js", () => ({
+  api: { getBackendModels: (...args: unknown[]) => mockGetBackendModels(...args) },
+}));
+
 vi.mock("../ws.js", () => ({
   sendToSession: (...args: unknown[]) => mockSendToSession(...args),
 }));
@@ -61,11 +66,13 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // Claude lineup: Opus 4.8, Fable 5, Opus 4.7, Opus 4.6, Sonnet 5, Haiku 4.5.
+    // Claude lineup: Fable 5.1, Opus 5.5, Opus 5, Opus 4.8, Opus 4.6, Sonnet 5.5, Sonnet 5, Haiku 4.5.
     // Match exact labels because /Opus/ alone now matches multiple entries.
-    expect(screen.getByRole("option", { name: /Opus 4\.7/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Opus 5\.5/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Opus 5(?!\.)/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Opus 4\.6/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Sonnet 5/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Sonnet 5\.5/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Sonnet 5(?!\.)/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Haiku 4\.5/ })).toBeInTheDocument();
   });
 
@@ -76,18 +83,18 @@ describe("ModelSwitcher", () => {
     const opusOption = screen.getByRole("option", { name: /Opus 4\.6/ });
     expect(opusOption).toHaveAttribute("aria-selected", "true");
 
-    const sonnetOption = screen.getByRole("option", { name: /Sonnet 5/ });
+    const sonnetOption = screen.getByRole("option", { name: /Sonnet 5(?!\.)/ });
     expect(sonnetOption).toHaveAttribute("aria-selected", "false");
 
-    // The newly added Opus 4.7 is not the active one in this fixture.
-    const opus47 = screen.getByRole("option", { name: /Opus 4\.7/ });
-    expect(opus47).toHaveAttribute("aria-selected", "false");
+    // The newly added Opus 5.5 is not the active one in this fixture.
+    const opus55 = screen.getByRole("option", { name: /Opus 5\.5/ });
+    expect(opus55).toHaveAttribute("aria-selected", "false");
   });
 
   it("sends set_model via WebSocket on selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5(?!\.)/ }));
 
     expect(mockSendToSession).toHaveBeenCalledWith("s1", {
       type: "set_model",
@@ -98,7 +105,7 @@ describe("ModelSwitcher", () => {
   it("optimistically updates the store after selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5(?!\.)/ }));
 
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     const updatedSessions = mockSetSdkSessions.mock.calls[0][0];
@@ -134,15 +141,38 @@ describe("ModelSwitcher", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
-  it("is hidden when backend is Codex", () => {
-    // Codex does not support runtime model switching
+  // Codex used to be hidden here on the claim that it could not switch model;
+  // it switches by relaunching on the resumed thread, like Claude.
+  it("offers Codex's own catalogue and switches model", async () => {
+    mockGetBackendModels.mockResolvedValue([
+      { value: "gpt-6-astra", label: "GPT-6-Astra" },
+      { value: "gpt-6-sol", label: "GPT-6-Sol" },
+      { value: "gpt-6-luna", label: "GPT-6-Luna" },
+    ]);
     resetStore({
       sdkSessions: [
-        { sessionId: "s1", model: "gpt-5.3-codex", backendType: "codex", cwd: "/repo" },
+        { sessionId: "s1", model: "gpt-6-astra", backendType: "codex", cwd: "/repo" },
       ],
     });
-    const { container } = render(<ModelSwitcher sessionId="s1" />);
-    expect(container.innerHTML).toBe("");
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+
+    fireEvent.click(await screen.findByRole("option", { name: /GPT-6-Luna/ }));
+
+    expect(mockGetBackendModels).toHaveBeenCalledWith("codex");
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "gpt-6-luna" });
+  });
+
+  it("falls back to the static Codex list when the catalogue cannot be fetched", () => {
+    mockGetBackendModels.mockRejectedValue(new Error("offline"));
+    resetStore({
+      sdkSessions: [
+        { sessionId: "s1", model: "gpt-6-astra", backendType: "codex", cwd: "/repo" },
+      ],
+    });
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    expect(screen.getByRole("option", { name: /GPT-6.1-Sol/ })).toBeInTheDocument();
   });
 
   it("is hidden when CLI is not connected", () => {

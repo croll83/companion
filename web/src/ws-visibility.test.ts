@@ -15,7 +15,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 // Mock WebSocket globally before ws.ts is imported
 const mockWsSend = vi.fn();
 const mockWsClose = vi.fn();
-let wsInstances: Array<{ onopen?: (() => void) | null; onclose?: (() => void) | null; onerror?: (() => void) | null; onmessage?: ((e: any) => void) | null }> = [];
+let wsInstances: Array<{ url?: string; onopen?: (() => void) | null; onclose?: (() => void) | null; onerror?: (() => void) | null; onmessage?: ((e: any) => void) | null }> = [];
 
 class MockWebSocket {
   static OPEN = 1;
@@ -33,7 +33,9 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((e: any) => void) | null = null;
   readyState = MockWebSocket.OPEN;
-  constructor() {
+  url: string;
+  constructor(url?: string) {
+    this.url = url ?? "";
     wsInstances.push(this);
   }
 }
@@ -47,6 +49,7 @@ vi.mock("./utils/notification-sound.js", () => ({
 // We need dynamic import to control document.hidden at import time
 let connectSession: typeof import("./ws.js")["connectSession"];
 let disconnectSession: typeof import("./ws.js")["disconnectSession"];
+let syncSessionSockets: typeof import("./ws.js")["syncSessionSockets"];
 let disconnectAll: typeof import("./ws.js")["disconnectAll"];
 
 // Track visibilitychange listeners
@@ -76,6 +79,7 @@ describe("RC9: visibility-aware reconnection", () => {
     vi.resetModules();
     const ws = await import("./ws.js");
     connectSession = ws.connectSession;
+    syncSessionSockets = ws.syncSessionSockets;
     disconnectSession = ws.disconnectSession;
     disconnectAll = ws.disconnectAll;
 
@@ -132,8 +136,11 @@ describe("RC9: visibility-aware reconnection", () => {
     expect(wsInstances).toHaveLength(1); // no reconnect
   });
 
-  it("visibilitychange → visible reconnects disconnected active sessions", () => {
-    // Connect and disconnect
+  it("visibilitychange → visible reconnects a session whose CLI is alive", async () => {
+    const { useStore } = await import("./store.js");
+    useStore.setState({
+      sdkSessions: [{ sessionId: "test-1", state: "running", cwd: "/tmp", createdAt: 0 }] as never,
+    });
     connectSession("test-1");
     expect(wsInstances).toHaveLength(1);
 
@@ -203,5 +210,40 @@ describe("RC9: visibility-aware reconnection", () => {
     Object.defineProperty(document, "hidden", { value: false, configurable: true });
     for (const fn of visibilityListeners) fn();
     expect(wsInstances).toHaveLength(2);
+  });
+
+  // ─── On-demand sockets ────────────────────────────────────────────────────
+  // Opening one per non-archived session made every refresh replay every
+  // history at once, stalling the server and truncating live answers.
+  it("holds a socket for the focused session and for every live CLI, not the dead ones", async () => {
+    const { useStore } = await import("./store.js");
+    useStore.setState({
+      sdkSessions: [
+        { sessionId: "alive", state: "running", cwd: "/tmp", createdAt: 0 },
+        { sessionId: "dead", state: "exited", cwd: "/tmp", createdAt: 0 },
+        { sessionId: "archived-alive", state: "running", archived: true, cwd: "/tmp", createdAt: 0 },
+      ] as never,
+    });
+
+    syncSessionSockets("focused");
+
+    const opened = wsInstances.map((w) => String(w.url));
+    expect(opened.some((u) => u.includes("focused"))).toBe(true);
+    expect(opened.some((u) => u.includes("alive"))).toBe(true);
+    expect(opened.some((u) => u.includes("dead"))).toBe(false);
+    expect(opened.some((u) => u.includes("archived-alive"))).toBe(false);
+  });
+
+  it("parks a socket when its session is no longer wanted", async () => {
+    const { useStore } = await import("./store.js");
+    useStore.setState({ sdkSessions: [] as never });
+
+    connectSession("going-away");
+    expect(wsInstances).toHaveLength(1);
+    mockWsClose.mockClear();
+
+    syncSessionSockets(null);
+
+    expect(mockWsClose).toHaveBeenCalled();
   });
 });

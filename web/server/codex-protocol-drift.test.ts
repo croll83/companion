@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { CODEX_SERVER_NOTIFICATIONS, CODEX_SERVER_REQUESTS } from "./protocol/codex-known-methods.generated.js";
 
 function readFile(relativePath: string): string {
   return readFileSync(resolve(process.cwd(), relativePath), "utf-8");
@@ -42,14 +43,20 @@ describe("Codex adapter method drift vs upstream protocol snapshot", () => {
     const upstreamClientRequests = extractMethods(readFile("server/protocol/codex-upstream/ClientRequest.ts.txt"));
     const upstreamClientNotifications = extractMethods(readFile("server/protocol/codex-upstream/ClientNotification.ts.txt"));
 
+    // What remains here is genuinely NOT in the current protocol:
+    //  - the pre-v2 `codex/event/*` taxonomy, still handled for back-compat;
+    //  - two v1 aliases the newer schema renamed;
+    //  - one notification Companion itself injects.
+    // Everything else that used to live here (thread/settings/updated,
+    // remoteControl/status/changed, thread/goal/*, configWarning, …) is covered
+    // by the generated list now, so this set stops growing every time Codex
+    // adds a notification.
     const legacyNotifications = new Set([
+      // v1 aliases: the current schema models these as item/reasoning/textDelta
+      // and item/updated respectively.
       "item/updated",
-      // Legacy alias still observed in recordings; upstream snapshot currently
-      // models the same payload under item/reasoning/textDelta.
       "item/reasoning/delta",
-      // Status notification observed in production logs but not yet present in
-      // the pinned upstream snapshot files.
-      "thread/status/changed",
+      // Pre-v2 event taxonomy, still accepted so older CLIs keep working.
       "codex/event/stream_error",
       "codex/event/error",
       "codex/event/token_count",
@@ -74,24 +81,13 @@ describe("Codex adapter method drift vs upstream protocol snapshot", () => {
       "codex/event/agent_reasoning",
       "codex/event/agent_reasoning_delta",
       "codex/event/agent_reasoning_section_break",
-      // Bare "error" notification for transient stream disconnections.
-      "error",
-      // Per-server MCP startup progress updates.
-      "mcpServer/startupStatus/updated",
-      // Context compaction event (v2 form of codex/event/context_compacted).
-      "thread/compacted",
-      // Informational warnings from Codex runtime.
-      "configWarning",
-      "deprecationNotice",
       "codex/event/deprecation_notice",
-      // Legacy event variants for MCP startup, turn abort, image viewing, web search.
       "codex/event/mcp_startup_update",
       "codex/event/turn_aborted",
       "codex/event/view_image_tool_call",
       "codex/event/web_search_begin",
       "codex/event/web_search_end",
-      // Companion-internal notification emitted by codex-ws-proxy.cjs on
-      // WebSocket reconnection — not part of the upstream Codex protocol.
+      // Emitted by codex-ws-proxy.cjs on WebSocket reconnect — ours, not Codex's.
       "companion/wsReconnected",
     ]);
 
@@ -99,17 +95,24 @@ describe("Codex adapter method drift vs upstream protocol snapshot", () => {
       "item/mcpToolCall/requestApproval",
     ]);
 
+    const knownNotifications = new Set(CODEX_SERVER_NOTIFICATIONS);
+    const knownRequests = new Set(CODEX_SERVER_REQUESTS);
+
     for (const method of handledNotifications) {
       expect(
-        upstreamServerNotifications.has(method) || legacyNotifications.has(method),
-        `Unhandled by upstream snapshot (notification): ${method}`,
+        upstreamServerNotifications.has(method)
+          || knownNotifications.has(method)
+          || legacyNotifications.has(method),
+        `Handled notification is in neither the pinned snapshot, the generated method list, nor the legacy allowlist: ${method}`,
       ).toBe(true);
     }
 
     for (const method of handledRequests) {
       expect(
-        upstreamServerRequests.has(method) || legacyServerRequests.has(method),
-        `Unhandled by upstream snapshot (server request): ${method}`,
+        upstreamServerRequests.has(method)
+          || knownRequests.has(method)
+          || legacyServerRequests.has(method),
+        `Handled request is in neither the pinned snapshot, the generated method list, nor the legacy allowlist: ${method}`,
       ).toBe(true);
     }
 

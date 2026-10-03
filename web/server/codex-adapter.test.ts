@@ -70,6 +70,8 @@ describe("CodexAdapter", () => {
   let stdout: MockReadableStream;
 
   beforeEach(() => {
+    // Tests that shorten or lengthen the lock budget must not leak it to others.
+    delete process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS;
     const mock = createMockProcess();
     proc = mock.proc;
     stdin = mock.stdin;
@@ -730,6 +732,204 @@ describe("CodexAdapter", () => {
     expect(allWritten).toContain('"method":"turn/start"');
     expect(allWritten).toContain("Fix the bug");
     expect(allWritten).toContain("thr_123");
+  });
+
+  // ─── Mid-turn steering ────────────────────────────────────────────────────
+  // Codex can fold new input INTO the turn already running (turn/steer) instead
+  // of opening a second one. `expectedTurnId` is a server-side precondition, so
+  // if that turn ended in the meantime the call fails and we must still deliver
+  // the message — never drop it.
+  async function initAdapter(a: CodexAdapter, threadId = "thr_123") {
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: threadId } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  /** JSON-RPC id of the last request written for `method`, or null. */
+  function lastRequestId(method: string): number | null {
+    const ids = stdin.chunks.join("").split("\n").filter(Boolean)
+      .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((o: { method?: string; id?: number } | null) => o && o.method === method && typeof o.id === "number")
+      .map((o: { id: number }) => o.id);
+    return ids.length ? ids[ids.length - 1] : null;
+  }
+
+  it("steers the in-flight turn instead of opening a second one", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    await initAdapter(adapter);
+
+    adapter.sendBrowserMessage({ type: "user_message", content: "first" });
+    await new Promise((r) => setTimeout(r, 50));
+    const startId = lastRequestId("turn/start")!;
+    stdout.push(JSON.stringify({ id: startId, result: { turn: { id: "turn_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "also check the nonce" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const written = stdin.chunks.join("");
+    expect(written).toContain('"method":"turn/steer"');
+    expect(written).toContain('"expectedTurnId":"turn_1"');
+    expect(written).toContain("also check the nonce");
+    // Must NOT have opened a competing turn.
+    expect(written).not.toContain('"method":"turn/start"');
+  });
+
+  it("falls back to turn/start when the steer precondition fails", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    await initAdapter(adapter);
+
+    adapter.sendBrowserMessage({ type: "user_message", content: "first" });
+    await new Promise((r) => setTimeout(r, 50));
+    const startId = lastRequestId("turn/start")!;
+    stdout.push(JSON.stringify({ id: startId, result: { turn: { id: "turn_1" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "late message" });
+    await new Promise((r) => setTimeout(r, 50));
+    const steerId = lastRequestId("turn/steer")!;
+    // The turn ended between our check and the call: precondition rejected.
+    stdout.push(JSON.stringify({
+      id: steerId,
+      error: { code: -32600, message: "expectedTurnId does not match the active turn" },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+
+    const written = stdin.chunks.join("");
+    // The message is delivered as a fresh turn rather than lost.
+    expect(written).toContain('"method":"turn/start"');
+    expect(written).toContain("late message");
+  });
+
+  it("opens a normal turn when nothing is running", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    await initAdapter(adapter);
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "hello" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const written = stdin.chunks.join("");
+    expect(written).toContain('"method":"turn/start"');
+    expect(written).not.toContain('"method":"turn/steer"');
+  });
+
+  // ─── thread/resume vs the thread-writer lock ───────────────────────────────
+  // When a relaunch races the previous app-server, thread/resume is refused with
+  // "thread-store conflict: thread X already has an active writer". That is a
+  // transient lock, not a bad rollout — falling back to thread/start there
+  // discards the whole context (observed 2026-09-11). The adapter must retry
+  // the resume and only give up after the retry budget.
+  const LOCK_ERR = { code: -32000, message: "Failed to create session: thread-store conflict: thread thr_old already has an active writer" };
+
+  it("retries thread/resume on a thread-lock conflict instead of starting a fresh thread", async () => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 1st resume → refused (lock still held by the dying process)
+    const r1 = lastRequestId("thread/resume")!;
+    stdout.push(JSON.stringify({ id: r1, error: LOCK_ERR }) + "\n");
+    await new Promise((r) => setTimeout(r, 700)); // > INIT_THREAD_RETRY_BASE_MS
+
+    // It must have RETRIED the resume, not fallen back.
+    const r2 = lastRequestId("thread/resume")!;
+    expect(r2).toBeGreaterThan(r1);
+    expect(stdin.chunks.join("")).not.toContain('"method":"thread/start"');
+
+    // 2nd resume → lock released → same thread comes back.
+    stdout.push(JSON.stringify({ id: r2, result: { thread: { id: "thr_old" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(adapter.getThreadId()).toBe("thr_old");
+  });
+
+  it("keeps waiting for the lock well past the old 1.5s budget", async () => {
+    // Regression (2026-09-22, session 991dbe91): the lock budget was 3 attempts
+    // with 500ms exponential backoff, so it expired ~1.5s after the first
+    // refusal. The dying app-server had not released the lock yet, the adapter
+    // started a fresh thread, and a 100-turn conversation was abandoned.
+    process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS = "30000";
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Refuse for longer than the whole old budget.
+    for (const wait of [700, 1300]) {
+      const rid = lastRequestId("thread/resume")!;
+      stdout.push(JSON.stringify({ id: rid, error: LOCK_ERR }) + "\n");
+      await new Promise((r) => setTimeout(r, wait));
+    }
+
+    // Still resuming, and it has NOT abandoned the context.
+    expect(stdin.chunks.join("")).not.toContain('"method":"thread/start"');
+    const rid = lastRequestId("thread/resume")!;
+    stdout.push(JSON.stringify({ id: rid, result: { thread: { id: "thr_old" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(adapter.getThreadId()).toBe("thr_old");
+  });
+
+  it("gives up on the thread only after the retry budget, and says so", async () => {
+    process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS = "300";
+    const errors: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", threadId: "thr_old" });
+    adapter.onBrowserMessage((m) => { if (m.type === "error") errors.push(String((m as { message: string }).message)); });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Refuse until the (here: tiny) lock budget is spent.
+    for (const wait of [700, 100]) {
+      const rid = lastRequestId("thread/resume")!;
+      stdout.push(JSON.stringify({ id: rid, error: LOCK_ERR }) + "\n");
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    // Only now the fallback: a fresh thread, and the user is told the context is gone.
+    const startId = lastRequestId("thread/start");
+    expect(startId).not.toBeNull();
+    stdout.push(JSON.stringify({ id: startId, result: { thread: { id: "thr_fresh" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(adapter.getThreadId()).toBe("thr_fresh");
+    expect(errors.some((e) => e.includes("could not be restored"))).toBe(true);
+  });
+
+  // ─── drift: known-but-unhandled vs genuinely unknown ──────────────────────
+  // A notification the protocol declares but the adapter ignores must NOT reach
+  // the user as an error (that produced a red banner on every turn, e.g.
+  // thread/goal/updated on 2026-09-11). Only something outside the protocol is
+  // worth alarming about.
+  async function adapterWithErrors() {
+    const errors: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((m) => { if (m.type === "error") errors.push(String((m as { message: string }).message)); });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+    errors.length = 0;
+    return { adapter, errors };
+  }
+
+  it("stays silent on a known notification it does not handle", async () => {
+    const { errors } = await adapterWithErrors();
+    stdout.push(JSON.stringify({
+      method: "thread/goal/updated",
+      params: { threadId: "thr_123", goal: { objective: "ship it", status: "active" } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(errors.filter((e) => e.includes("protocol drift"))).toEqual([]);
+  });
+
+  it("still reports drift for a notification outside the protocol", async () => {
+    const { errors } = await adapterWithErrors();
+    stdout.push(JSON.stringify({ method: "thread/teleport/engaged", params: {} }) + "\n");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(errors.some((e) => e.includes("protocol drift") && e.includes("thread/teleport/engaged"))).toBe(true);
   });
 
   it("uses executionCwd for turn/start when receiving user_message", async () => {

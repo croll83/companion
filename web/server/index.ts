@@ -1,3 +1,5 @@
+// Must stay first: timestamps every console line (see log-timestamps.ts).
+import "./log-timestamps.js";
 process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 
 // Enrich process PATH at startup so binary resolution and `which` calls can find
@@ -33,6 +35,7 @@ import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
 
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
+import { telegramBridgeManager } from "./telegram-bridge-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
@@ -73,6 +76,7 @@ const orchestrator = new SessionOrchestrator({
 // ── Restore persisted sessions from disk ────────────────────────────────────
 wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
+wsBridge.setArchivedCheck((sessionId) => launcher.getSession(sessionId)?.archived === true);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
 launcher.restoreFromDisk();
@@ -382,6 +386,10 @@ restoreTailscaleFunnel(port).catch((err) => {
   console.warn("[server] Tailscale Funnel restoration failed:", err);
 });
 
+// ── Telegram bridge ─────────────────────────────────────────────────────────
+// Supervises the single bridge child (spawned only when a bot token is set).
+telegramBridgeManager.start(port);
+
 // ── Update checker ──────────────────────────────────────────────────────────
 startPeriodicCheck();
 if (isRunningAsService()) {
@@ -422,6 +430,7 @@ setInterval(() => {
 // ── Graceful shutdown — persist container state ──────────────────────────────
 function gracefulShutdown() {
   console.log("[server] Persisting container state before shutdown...");
+  telegramBridgeManager.stop();
   containerManager.persistState(CONTAINER_STATE_PATH);
   cleanupTailscaleFunnel(port);
   closeLogFile();

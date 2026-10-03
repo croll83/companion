@@ -23,7 +23,14 @@ import type {
 } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
+import { isKnownServerNotification } from "./codex-protocol-known.js";
 import { log } from "./logger.js";
+import { INLINE_IMAGE_TYPES, saveAttachment, attachmentNote, type SavedAttachment } from "./attachment-store.js";
+
+/** Retryable: thread/resume refused because the previous app-server still holds the thread lock. */
+class CodexThreadLockConflict extends Error {
+  constructor(message: string) { super(message); this.name = "CodexThreadLockConflict"; }
+}
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -154,6 +161,7 @@ const DEFAULT_RPC_TIMEOUT_MS = 60_000;
 /** Per-method timeout overrides (ms). */
 const RPC_METHOD_TIMEOUTS: Record<string, number> = {
   "turn/start": 120_000,
+  "turn/steer": 15_000,
   "turn/interrupt": 15_000,
   "codex/configureSession": 30_000,
   "thread/start": 30_000,
@@ -948,7 +956,26 @@ export class CodexAdapter implements IBackendAdapter {
 
   /** Max retries for thread/start or thread/resume during initialization. */
   private static readonly INIT_THREAD_MAX_RETRIES = 3;
+  /** Codex's error when a thread is still locked by a (dying) previous app-server. */
+  static isThreadLockConflict(message: string): boolean {
+    return /thread-store conflict|already has an active writer/i.test(message);
+  }
   private static readonly INIT_THREAD_RETRY_BASE_MS = 500;
+  /**
+   * How long to keep retrying a resume that is blocked by a thread lock.
+   *
+   * The lock is held by the *previous* app-server while it shuts down, so the
+   * wait is bounded by that process's exit, not by a fixed number of tries. The
+   * costs are wildly asymmetric: waiting costs seconds, while giving up starts a
+   * fresh thread and abandons the conversation for good. The old 3-attempt budget
+   * expired after ~1.5s and routinely lost contexts that were about to unlock.
+   */
+  private static get THREAD_LOCK_MAX_WAIT_MS(): number {
+    const raw = parseInt(process.env.COMPANION_CODEX_THREAD_LOCK_WAIT_MS ?? "", 10);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 60_000;
+  }
+  /** Cap for the lock-conflict backoff, so long waits stay responsive. */
+  private static readonly THREAD_LOCK_RETRY_CAP_MS = 5_000;
 
   private async initialize(): Promise<void> {
     if (this.initInProgress) {
@@ -994,7 +1021,10 @@ export class CodexAdapter implements IBackendAdapter {
       let threadStarted = false;
       let lastThreadError: unknown;
 
-      for (let attempt = 0; attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES; attempt++) {
+      const lockWaitStartedAt = Date.now();
+      const lockBudgetLeft = () =>
+        Date.now() - lockWaitStartedAt < CodexAdapter.THREAD_LOCK_MAX_WAIT_MS;
+      for (let attempt = 0; ; attempt++) {
         // Bail out early if superseded by a newer init cycle
         if (myEpoch !== this.initEpoch) {
           console.warn(`[codex-adapter] Session ${this.sessionId}: init epoch ${myEpoch} superseded during thread start, aborting`);
@@ -1024,6 +1054,15 @@ export class CodexAdapter implements IBackendAdapter {
               const isTransport = resumeErr instanceof Error && resumeErr.message === "Transport closed";
               if (isTransport) throw resumeErr; // Let outer retry handle transient errors
               const resumeErrMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+              // "thread-store conflict: thread X already has an active writer" is
+              // NOT a bad rollout: the previous app-server still holds the
+              // thread lock while shutting down. Starting a fresh thread here
+              // throws away a perfectly good context. Treat it as transient —
+              // let the outer loop retry with backoff — and only give up (with
+              // the fallback below) once the retries are exhausted.
+              if (CodexAdapter.isThreadLockConflict(resumeErrMsg) && lockBudgetLeft()) {
+                throw new CodexThreadLockConflict(resumeErrMsg);
+              }
               console.warn(
                 `[codex-adapter] thread/resume failed for ${this.sessionId} (threadId=${this.options.threadId}), falling back to thread/start: ${resumeErrMsg}`,
               );
@@ -1060,11 +1099,18 @@ export class CodexAdapter implements IBackendAdapter {
         } catch (threadErr) {
           lastThreadError = threadErr;
           const isTransportClosed = threadErr instanceof Error && threadErr.message === "Transport closed";
-          if (!isTransportClosed || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
-            break; // Non-transient error or last attempt — give up
+          const isLockConflict = threadErr instanceof CodexThreadLockConflict;
+          const canRetry = isLockConflict
+            ? lockBudgetLeft()
+            : isTransportClosed && attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES - 1;
+          if (!canRetry) {
+            break; // Non-transient error, or the retry budget is spent — give up
           }
-          const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt);
-          console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Transport closed), retrying in ${delay}ms`);
+          const delay = Math.min(
+            CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt),
+            isLockConflict ? CodexAdapter.THREAD_LOCK_RETRY_CAP_MS : Infinity,
+          );
+          console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (${isLockConflict ? "thread lock held by previous process" : "Transport closed"}), retrying in ${delay}ms`);
           await new Promise((r) => setTimeout(r, delay));
         }
       }
@@ -1159,18 +1205,34 @@ export class CodexAdapter implements IBackendAdapter {
 
     const input: Array<{ type: string; text?: string; url?: string }> = [];
 
-    // Add images if present
+    // Codex turn input has no file variant (text/image/localImage/audio/
+    // localAudio/skill/mention), so anything that isn't an inline image is
+    // written to disk under COMPANION_HOME and referenced by path instead of
+    // being dropped. Images still travel inline as data URLs.
+    const savedFiles: SavedAttachment[] = [];
     if (msg.images?.length) {
       for (const img of msg.images) {
-        input.push({
-          type: "image",
-          url: `data:${img.media_type};base64,${img.data}`,
-        });
+        if (INLINE_IMAGE_TYPES.has(img.media_type)) {
+          input.push({
+            type: "image",
+            url: `data:${img.media_type};base64,${img.data}`,
+          });
+          continue;
+        }
+        try {
+          savedFiles.push(saveAttachment(this.sessionId, img));
+        } catch (e) {
+          log.error("codex-adapter", "Failed to persist attachment", {
+            sessionId: this.sessionId,
+            mediaType: img.media_type,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
     }
 
     // Add text
-    input.push({ type: "text", text: msg.content });
+    input.push({ type: "text", text: msg.content + attachmentNote(savedFiles) });
 
     try {
       // Only send collaborationMode on mode transitions — sending it every turn
@@ -1191,6 +1253,41 @@ export class CodexAdapter implements IBackendAdapter {
         turnParams.collaborationMode = this.mapCollaborationMode(this.currentCollaborationModeKind);
         this.lastSentCollaborationModeKind = this.currentCollaborationModeKind;
       }
+      // Mid-turn steering: when a turn is already in flight, Codex can fold new
+      // input INTO it instead of queueing a separate turn. `expectedTurnId` is a
+      // server-side precondition — if that turn finished in the meantime the
+      // call fails rather than silently landing somewhere unintended, and we
+      // fall through to a normal turn/start below.
+      const activeTurnId = this.currentTurnId;
+      if (activeTurnId) {
+        try {
+          await this.transport.call("turn/steer", {
+            threadId: this.threadId,
+            expectedTurnId: activeTurnId,
+            input,
+          });
+          log.info("codex-adapter", "Steered the in-flight turn", {
+            sessionId: this.sessionId,
+            turnId: activeTurnId,
+          });
+          this.reconnectRetryCount = 0;
+          this.overloadRetryCount = 0;
+          return;
+        } catch (steerErr) {
+          // Precondition lost (turn ended between our check and the call) or the
+          // server refused: fall back to opening a fresh turn with the same
+          // input, so the message is never dropped.
+          const m = steerErr instanceof Error ? steerErr.message : String(steerErr);
+          if (m === "Transport reconnected" || m === "Transport closed") throw steerErr;
+          log.info("codex-adapter", "Steer rejected, starting a new turn instead", {
+            sessionId: this.sessionId,
+            turnId: activeTurnId,
+            reason: m,
+          });
+          this.currentTurnId = null;
+        }
+      }
+
       const result = await this.transport.call("turn/start", turnParams) as { turn: { id: string } };
 
       this.currentTurnId = result.turn.id;
@@ -1690,6 +1787,15 @@ export class CodexAdapter implements IBackendAdapter {
       case "deprecationNotice":
       case "codex/event/deprecation_notice":
         break;
+      // Informational status notifications observed live against codex-cli
+      // 0.153.4 (spike 2026-09-08). They carry no turn content — the thread's
+      // own settings echo and the remote-control feature's on/off state — but
+      // hitting `default:` surfaced a "protocol drift" error banner in the UI
+      // on every Codex turn. Explicitly benign.
+      case "thread/settings/updated":
+      case "remoteControl/status/changed":
+      case "thread/goal/cleared":
+        break;
       // Legacy event variants already covered by canonical item/* handlers.
       case "codex/event/mcp_startup_update":
       case "codex/event/turn_aborted":
@@ -1701,7 +1807,15 @@ export class CodexAdapter implements IBackendAdapter {
         this.handleWsReconnected();
         break;
       default:
-        this.reportProtocolDrift("notification", method, { payload: params });
+        // A notification the protocol declares but we don't act on is normal —
+        // Codex emits plenty (goal/settings/telemetry updates). Note it once and
+        // stay silent. Only something OUTSIDE the known protocol is real drift
+        // worth putting in front of the user.
+        if (isKnownServerNotification(method)) {
+          this.noteUnhandledNotification(method);
+        } else {
+          this.reportProtocolDrift("notification", method, { payload: params });
+        }
         break;
     }
     } catch (err) {
@@ -2763,6 +2877,17 @@ export class CodexAdapter implements IBackendAdapter {
 
   private emit(msg: BrowserIncomingMessage): void {
     this.browserMessageCb?.(msg);
+  }
+
+  /** Log a known-but-unhandled notification once per adapter, at info level. */
+  private noteUnhandledNotification(method: string): void {
+    const key = `known-unhandled:${method}`;
+    if (this.protocolDriftSeen.has(key)) return;
+    this.protocolDriftSeen.add(key);
+    log.info("codex-adapter", "Ignoring a known Codex notification we don't handle", {
+      sessionId: this.sessionId,
+      method,
+    });
   }
 
   private reportProtocolDrift(

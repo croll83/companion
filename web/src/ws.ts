@@ -1,5 +1,5 @@
 import { useStore } from "./store.js";
-import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, SdkSessionInfo, McpServerConfig, BackgroundAgentItem } from "./types.js";
+import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, McpServerConfig, BackgroundAgentItem } from "./types.js";
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 import { getPreview } from "./components/ToolBlock.js";
@@ -28,15 +28,6 @@ function shouldReconnectSession(sessionId: string): boolean {
   return store.currentSessionId === sessionId;
 }
 
-function getReconnectCandidates(): string[] {
-  const store = useStore.getState();
-  const ids = new Set<string>();
-  for (const s of store.sdkSessions) {
-    if (!s.archived) ids.add(s.sessionId);
-  }
-  if (store.currentSessionId) ids.add(store.currentSessionId);
-  return Array.from(ids);
-}
 
 // ── Page visibility handling ─────────────────────────────────────────────────
 // Mobile browsers (Android Chrome, iOS Safari) aggressively kill WebSocket
@@ -59,19 +50,14 @@ if (typeof document !== "undefined") {
       }
     } else {
       pageHidden = false;
-      // Page is visible again — reconnect all known active sessions.
-      for (const sessionId of getReconnectCandidates()) {
-        // Re-check in case sdkSessions changed after candidate collection.
-        if (!shouldReconnectSession(sessionId)) continue;
-        const ws = sockets.get(sessionId);
-        if (!isSocketUsable(ws)) {
-          if (ws) {
-            try { ws.close(); } catch {}
-            sockets.delete(sessionId);
-          }
-          connectSession(sessionId);
-        }
-      }
+      // Page is visible again — reconnect ONLY the session on screen. Opening a
+      // socket per session made every refresh replay every history at once,
+      // which is what stalled the server and cost people live answers.
+      syncSessionSockets(focusedSessionId);
+      // Re-assert focus immediately: coming back from another app must not wait
+      // out the heartbeat, or a session can be reclaimed seconds after you look
+      // at it again.
+      if (focusedSessionId) sendSessionFocus(focusedSessionId);
     }
   });
 }
@@ -981,14 +967,21 @@ function handleParsedMessage(
         role: "system",
         content: data.message,
         timestamp: Date.now(),
+        isError: true,
       });
       break;
     }
 
     case "refusal": {
       // The model declined to answer (stop_reason "refusal"): surface it as a
-      // dedicated banner with the reason and a one-click retry on Opus 4.8,
-      // rather than letting the empty turn render as nothing.
+      // dedicated banner with the reason and a one-click retry on the next model
+      // of the refusal chain, rather than letting the empty turn render as nothing.
+      //
+      // Freeze which model refused NOW. Retrying switches the session's model,
+      // and a banner that fell back to the live model would recompute its step
+      // from the model that replaced it.
+      const refusedModel =
+        data.model ?? store.sdkSessions.find((s) => s.sessionId === sessionId)?.model;
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
@@ -997,7 +990,7 @@ function handleParsedMessage(
         refusal: {
           category: data.category,
           explanation: data.explanation,
-          model: data.model,
+          model: refusedModel,
         },
       });
       break;
@@ -1062,6 +1055,10 @@ function handleParsedMessage(
     }
 
     case "message_history": {
+      const isOlderPage = data.prepend === true;
+      if (typeof data.startIndex === "number" && typeof data.total === "number") {
+        store.setHistoryWindow(sessionId, data.startIndex, data.total);
+      }
       const chatMessages: ChatMessage[] = [];
       const toolActivityById = new Map<string, ToolActivityEntry>();
       for (let i = 0; i < data.messages.length; i++) {
@@ -1174,7 +1171,7 @@ function handleParsedMessage(
       }
       if (chatMessages.length > 0) {
         const existing = store.messages.get(sessionId) || [];
-        if (existing.length === 0) {
+        if (existing.length === 0 && !isOlderPage) {
           // Initial connect: history is the full truth
           store.setMessages(sessionId, chatMessages);
         } else {
@@ -1197,12 +1194,18 @@ function handleParsedMessage(
           store.setMessages(sessionId, merged);
         }
       }
+      if (isOlderPage) {
+        // Keep the live activity on screen; an older page only adds to it.
+        for (const entry of store.toolActivity.get(sessionId) || []) {
+          if (!toolActivityById.has(entry.toolUseId)) toolActivityById.set(entry.toolUseId, entry);
+        }
+      }
       store.setToolActivity(sessionId, Array.from(toolActivityById.values()).sort((a, b) => a.startedAt - b.startedAt));
       // Fix: if the last history message is a `result`, the session's last turn
       // is complete. Clear any stale streaming state that event_replay might not
       // correct (e.g. when `result` was pruned from the 600-event buffer).
       const lastHistMsg = data.messages[data.messages.length - 1];
-      if (lastHistMsg?.type === "result") {
+      if (!isOlderPage && lastHistMsg?.type === "result") {
         clearStreamingDraftMessage(sessionId);
         store.setStreaming(sessionId, null);
         streamingPhaseBySession.delete(sessionId);
@@ -1269,6 +1272,7 @@ function handleParsedMessage(
 }
 
 export function connectSession(sessionId: string) {
+  parked.delete(sessionId);
   const existing = sockets.get(sessionId);
   if (isSocketUsable(existing)) return;
   if (existing) {
@@ -1312,6 +1316,7 @@ export function connectSession(sessionId: string) {
 }
 
 function scheduleReconnect(sessionId: string) {
+  if (parked.has(sessionId)) return; // closed on purpose — stay closed
   if (reconnectTimers.has(sessionId)) return;
   // Don't schedule reconnect when page is hidden — mobile browsers will just
   // kill the new connection too, creating a wasteful connect/disconnect cycle.
@@ -1349,22 +1354,77 @@ export function disconnectSession(sessionId: string) {
   pendingOutgoingBySession.delete(sessionId);
 }
 
+/**
+ * Close a session's socket but keep its place in the stream.
+ *
+ * Used when the user navigates away: the session stays live on the server
+ * (browser sockets are not what keeps a CLI alive), and on return
+ * `session_subscribe` replays only what was missed instead of re-sending the
+ * whole history. Deliberately does NOT clear lastSeq or the streaming
+ * reconstruction state — this is the same situation as a dropped socket that
+ * simply never auto-reconnects, which the resume path already handles.
+ *
+ * Contrast with disconnectSession(), which tears the session down for good.
+ */
+export function parkSession(sessionId: string) {
+  const timer = reconnectTimers.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(sessionId);
+  }
+  const ws = sockets.get(sessionId);
+  if (!ws) return;
+  parked.add(sessionId);
+  try { ws.close(); } finally { sockets.delete(sessionId); }
+  useStore.getState().setConnectionStatus(sessionId, "disconnected");
+}
+
+/** Sessions closed on purpose, so onclose does not schedule a reconnect. */
+const parked = new Set<string>();
+
+/**
+ * Open exactly the sockets that are worth holding, and park the rest.
+ *
+ * Two reasons to hold one: the session is on screen, or its CLI is still alive
+ * and can therefore still produce something worth notifying about. A dead
+ * session has nothing to say, so a socket for it only costs a full history
+ * replay on every refresh — which is what stalled the server and truncated
+ * live answers.
+ */
+export function syncSessionSockets(focusedSessionId: string | null): void {
+  // Mobile browsers kill backgrounded sockets, so connecting here would cycle.
+  if (pageHidden) return;
+  const store = useStore.getState();
+
+  const wanted = new Set<string>();
+  // Fall back to the store: a freshly created session may not be in sdkSessions
+  // yet, and losing its socket would strand it.
+  const focused = focusedSessionId ?? store.currentSessionId;
+  if (focused) wanted.add(focused);
+  for (const s of store.sdkSessions) {
+    if (!s.archived && s.state !== "exited") wanted.add(s.sessionId);
+  }
+
+  for (const [id] of sockets) {
+    if (!wanted.has(id)) parkSession(id);
+  }
+  for (const id of wanted) {
+    const ws = sockets.get(id);
+    if (isSocketUsable(ws)) continue;
+    if (ws) {
+      try { ws.close(); } catch { /* already closing */ }
+      sockets.delete(id);
+    }
+    connectSession(id);
+  }
+}
+
 export function disconnectAll() {
   for (const [id] of sockets) {
     disconnectSession(id);
   }
 }
 
-export function connectAllSessions(sessions: SdkSessionInfo[]) {
-  // Skip connection attempts when page is hidden — mobile browsers kill
-  // backgrounded WS connections, so connecting here would just cycle.
-  if (pageHidden) return;
-  for (const s of sessions) {
-    if (!s.archived) {
-      connectSession(s.sessionId);
-    }
-  }
-}
 
 export function waitForConnection(sessionId: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -1415,6 +1475,45 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
   if (isIdempotent) {
     enqueueOutgoing(sessionId, outgoing);
   }
+}
+
+/**
+ * Tell the server which session the user is actually looking at.
+ *
+ * The server spares a focused session from the idle-kill sweep, and it cannot
+ * infer focus from the sockets: we open one to EVERY session on load, so they
+ * all look equally "connected". Refreshed on a heartbeat because the server
+ * measures "focused recently", not "was opened once".
+ */
+export function sendSessionFocus(sessionId: string) {
+  sendToSession(sessionId, { type: "session_focus" });
+}
+
+const FOCUS_HEARTBEAT_MS = 60_000;
+let focusTimer: ReturnType<typeof setInterval> | null = null;
+let focusedSessionId: string | null = null;
+
+/** Start (or move) the focus heartbeat onto `sessionId`; null stops it. */
+export function setFocusedSession(sessionId: string | null) {
+  focusedSessionId = sessionId;
+  if (focusTimer) {
+    clearInterval(focusTimer);
+    focusTimer = null;
+  }
+  if (!sessionId) return;
+  const beat = () => {
+    if (!focusedSessionId) return;
+    // A hidden tab is not focus — let the window lapse so the server can reclaim.
+    if (typeof document !== "undefined" && document.hidden) return;
+    sendSessionFocus(focusedSessionId);
+  };
+  beat();
+  focusTimer = setInterval(beat, FOCUS_HEARTBEAT_MS);
+}
+
+/** Ask for the page of history immediately before the loaded window. */
+export function loadMoreHistory(sessionId: string, beforeIndex: number) {
+  sendToSession(sessionId, { type: "history_load_more", before_index: beforeIndex });
 }
 
 export function sendMcpGetStatus(sessionId: string) {

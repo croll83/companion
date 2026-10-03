@@ -3,6 +3,7 @@ import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChanne
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
 import { hasContainerCodexAuth } from "../codex-container-auth.js";
+import { telegramBridgeManager } from "../telegram-bridge-manager.js";
 
 export function registerSettingsRoutes(api: Hono): void {
   api.get("/settings", (c) => {
@@ -30,6 +31,7 @@ export function registerSettingsRoutes(api: Hono): void {
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
       cliBridgeMode: settings.cliBridgeMode,
+      telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
     });
   });
 
@@ -98,6 +100,9 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.openaiApiKey !== undefined && typeof body.openaiApiKey !== "string") {
       return c.json({ error: "openaiApiKey must be a string" }, 400);
     }
+    if (body.telegramBotToken !== undefined && typeof body.telegramBotToken !== "string") {
+      return c.json({ error: "telegramBotToken must be a string" }, 400);
+    }
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
@@ -126,7 +131,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.publicUrl !== undefined
       || body.updateChannel !== undefined
       || body.dockerAutoUpdate !== undefined
-      || body.cliBridgeMode !== undefined;
+      || body.cliBridgeMode !== undefined
+      || body.telegramBotToken !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -226,7 +232,14 @@ export function registerSettingsRoutes(api: Hono): void {
         || body.cliBridgeMode === "tlsLoopback"
           ? (body.cliBridgeMode as CliBridgeMode)
           : undefined,
+      telegramBotToken:
+        typeof body.telegramBotToken === "string"
+          ? body.telegramBotToken.trim()
+          : undefined,
     });
+
+    // Token added/changed/cleared → spawn or stop the bridge child accordingly.
+    if (body.telegramBotToken !== undefined) telegramBridgeManager.sync();
 
     const connectionsAfterUpdate = listConnections();
     return c.json({
@@ -251,6 +264,7 @@ export function registerSettingsRoutes(api: Hono): void {
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
       cliBridgeMode: settings.cliBridgeMode,
+      telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
     });
   });
 

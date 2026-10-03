@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
-import { getModelsForBackend } from "../utils/backends.js";
+import { api } from "../api.js";
+import { getModelsForBackend, toModelOptions } from "../utils/backends.js";
 import type { ModelOption } from "../utils/backends.js";
 
 interface ModelSwitcherProps {
@@ -22,7 +23,19 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   const backendType = sdkSession?.backendType ?? runtimeSession?.backend_type ?? "claude";
   // Prefer runtime model (from CLI init) over sdkSession model (from launch config)
   const currentModel = runtimeSession?.model ?? sdkSession?.model ?? "";
-  const models = getModelsForBackend(backendType);
+  // Codex's lineup lives in its own catalogue and changes between releases, so
+  // it is fetched (same source as the new-session picker); the static list is
+  // only the offline fallback. Claude's list is static on purpose.
+  const [codexModels, setCodexModels] = useState<ModelOption[] | null>(null);
+  useEffect(() => {
+    if (backendType !== "codex") return;
+    let cancelled = false;
+    api.getBackendModels("codex")
+      .then((fetched) => { if (!cancelled && fetched.length > 0) setCodexModels(toModelOptions(fetched)); })
+      .catch(() => { /* keep the static fallback */ });
+    return () => { cancelled = true; };
+  }, [backendType]);
+  const models = (backendType === "codex" && codexModels) || getModelsForBackend(backendType);
 
   // Find the matching model option, or build a fallback for custom models
   const currentOption: ModelOption | null =
@@ -72,8 +85,9 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open]);
 
-  // Hide for Codex (set_model not supported) or when CLI disconnected
-  if (backendType === "codex" || !cliConnected || !currentOption) {
+  // Both backends switch model by relaunching on the resumed conversation
+  // (see ws-bridge set_model). Hidden only while there is no live CLI.
+  if (!cliConnected || !currentOption) {
     return null;
   }
 

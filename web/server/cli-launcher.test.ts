@@ -47,6 +47,9 @@ const isMockedPath = vi.hoisted(() => (path: string): boolean => {
   return path.includes(".claude") || path.startsWith("/tmp/worktrees/") || path.startsWith("/tmp/main-repo");
 });
 
+const mockTranscriptExists = vi.hoisted(() => vi.fn(() => true));
+vi.mock("./claude-session-history.js", () => ({ claudeTranscriptExists: mockTranscriptExists }));
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
   return {
@@ -96,7 +99,8 @@ function createMockProc(pid = 12345) {
   exitResolve = resolve!;
   return {
     pid,
-    kill: vi.fn(),
+    // Like a real process: SIGTERM may be ignored, SIGKILL always ends it.
+    kill: vi.fn((sig?: string) => { if (sig === "SIGKILL") resolve!(137); }),
     exited: exitedPromise,
     stdout: null,
     stderr: null,
@@ -111,7 +115,7 @@ function createMockCodexProc(pid = 12345) {
   exitResolve = resolve!;
   return {
     pid,
-    kill: vi.fn(),
+    kill: vi.fn((sig?: string) => { if (sig === "SIGKILL") resolve!(137); }),
     exited: exitedPromise,
     stdin: new WritableStream<Uint8Array>(),
     stdout: new ReadableStream<Uint8Array>(),
@@ -160,6 +164,8 @@ beforeEach(() => {
   delete process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER;
   // Default to stdio for most tests; WS launcher behavior is covered explicitly below.
   process.env.COMPANION_CODEX_TRANSPORT = "stdio";
+  // relaunch() waits a real grace period for the old process; keep it tiny here.
+  process.env.COMPANION_RELAUNCH_GRACE_MS = "50";
   tempDir = mkdtempSync(join(tmpdir(), "launcher-test-"));
   store = new SessionStore(tempDir);
   launcher = new CliLauncher(3456);
@@ -173,6 +179,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.COMPANION_CODEX_TRANSPORT;
+  delete process.env.COMPANION_RELAUNCH_GRACE_MS;
   delete process.env.COMPANION_CODEX_WS_CONNECT_TIMEOUT_MS;
   delete process.env.COMPANION_CODEX_PONG_TIMEOUT_MS;
   rmSync(tempDir, { recursive: true, force: true });
@@ -235,6 +242,34 @@ describe("launch", () => {
     const idx = cmdAndArgs.indexOf("--effort");
     expect(idx).toBeGreaterThan(-1);
     expect(cmdAndArgs[idx + 1]).toBe("xhigh");
+  });
+
+  // The CLI never persists ultracode, and Companion relaunches often; the
+  // flag has to be re-passed at every spawn or a relaunch silently drops it.
+  it("asks the CLI to report its own turn state", () => {
+    // session_state_changed is off by default in the CLI; Companion reads it to
+    // know whether a turn is really over (see session-work.ts).
+    launcher.launch({ model: "claude-opus-5-5", cwd: "/tmp" });
+    const [, opts] = mockSpawn.mock.calls[0];
+    expect(opts.env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBe("1");
+  });
+
+  it("passes ultracode via --settings on a model that can run it", () => {
+    launcher.launch({ model: "claude-opus-5-5", ultracode: true, cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const idx = cmdAndArgs.indexOf("--settings");
+    expect(idx).toBeGreaterThan(-1);
+    expect(JSON.parse(cmdAndArgs[idx + 1])).toEqual({ ultracode: true });
+  });
+
+  it("omits ultracode on a model without xhigh, and when it is off", () => {
+    launcher.launch({ model: "claude-sonnet-4-6", ultracode: true, cwd: "/tmp" });
+    launcher.launch({ model: "claude-opus-5-5", ultracode: false, cwd: "/tmp" });
+
+    for (const [cmdAndArgs] of mockSpawn.mock.calls) {
+      expect(cmdAndArgs).not.toContain("--settings");
+    }
   });
 
   it("omits --effort for a model that does not support it", () => {
@@ -736,6 +771,32 @@ describe("kill", () => {
 // ─── relaunch ────────────────────────────────────────────────────────────────
 
 describe("relaunch", () => {
+  it("re-applies ultracode on relaunch, where the CLI alone would drop it", async () => {
+    // Ultracode is toggled at runtime (no relaunch), so its only record across a
+    // respawn is the launcher's. Model change / recovery relaunches must keep it.
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({ cwd: "/tmp/project", model: "claude-opus-5-5" });
+    launcher.setCLISessionId("test-session-id", "cli-resume-id");
+    expect(mockSpawn.mock.calls[0][0]).not.toContain("--settings");
+
+    launcher.setUltracode("test-session-id", true); // confirmed by the CLI at runtime
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+    await launcher.relaunch("test-session-id");
+
+    const relaunchArgs = mockSpawn.mock.calls[1][0];
+    const idx = relaunchArgs.indexOf("--settings");
+    expect(idx).toBeGreaterThan(-1);
+    expect(JSON.parse(relaunchArgs[idx + 1])).toEqual({ ultracode: true });
+  });
+
   it("kills old process and spawns new one with --resume", async () => {
     // Create first proc whose exit resolves immediately when killed
     let resolveFirst: (code: number) => void;
@@ -1065,6 +1126,81 @@ describe("codex websocket launcher", () => {
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(proxy1.proc.kill).toHaveBeenCalledWith("SIGTERM");
     expect(mockSpawn).toHaveBeenCalledTimes(4);
+  });
+
+  it("relaunch escalates to SIGKILL and waits when the old codex process ignores SIGTERM", async () => {
+    // A Codex app-server that outlives the grace period keeps the thread-writer
+    // lock; spawning the replacement while it is alive makes thread/resume fail
+    // with "already has an active writer" and the adapter starts a FRESH thread
+    // (context lost — 2026-09-11). relaunch must not spawn until the old one is gone.
+    vi.useFakeTimers();
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 3101,
+      // Ignores SIGTERM (still flushing / holding the lock); only SIGKILL ends it.
+      kill: vi.fn((sig?: string) => { if (sig === "SIGKILL") resolveCodex1(137); }),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(3102);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    const codexProc2 = createMockProc(3103);
+    const proxy2 = createPendingCodexWsProxyProc(3104);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+    const relaunching = launcher.relaunch("test-session-id");
+    // Inside the grace window: SIGTERM sent, no SIGKILL yet, and NO new spawn.
+    await vi.advanceTimersByTimeAsync(CliLauncher.RELAUNCH_GRACE_MS - 1);
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(codexProc1.kill).not.toHaveBeenCalledWith("SIGKILL");
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+    // Grace expired → SIGKILL → the old proc exits → only now the replacement spawns.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGKILL");
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await relaunching;
+    expect(result).toEqual({ ok: true });
+    expect(mockSpawn).toHaveBeenCalledTimes(4);
+    vi.useRealTimers();
+  });
+
+  it("relaunch does not SIGKILL an old codex process that exits promptly on SIGTERM", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 3201,
+      kill: vi.fn(() => resolveCodex1(0)),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(3202);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(createMockProc(3203) as any)
+      .mockReturnValueOnce(createPendingCodexWsProxyProc(3204).proc as any);
+
+    launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    await new Promise((r) => setTimeout(r, 0));
+    await launcher.relaunch("test-session-id");
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(codexProc1.kill).not.toHaveBeenCalledWith("SIGKILL");
   });
 
   it("kill() returns true and kills the proxy when only a ws proxy remains", async () => {
@@ -1459,5 +1595,67 @@ describe("cliBridgeMode=tlsLoopback", () => {
       delete process.env.COMPANION_SDK_BRIDGE_HOST;
       delete process.env.COMPANION_SDK_BRIDGE_PORT;
     }
+  });
+});
+// ─── --resume quick-exit: clearing cliSessionId must be non-destructive ──────
+// A quick exit right after --resume used to discard cliSessionId on the spot.
+// That conflated "transcript is gone" with "the launch failed for an unrelated
+// reason" (network down during a relaunch discarded an intact 13.7 MB
+// transcript on 2026-09-08). Now the id is only cleared when the transcript is
+// genuinely missing, or after repeated consecutive failures.
+describe("--resume quick exit", () => {
+  const SID = "test-session-id";
+
+  /** launch → give it a cliSessionId → relaunch (which passes --resume) → quick exit. */
+  async function relaunchAndQuickExit(exitCode = 1): Promise<void> {
+    const resolveOld = exitResolve;             // proc from launch()
+    mockSpawn.mockReturnValue(createMockProc(222)); // relaunch spawns this one; exitResolve → proc 222
+    const relaunching = launcher.relaunch(SID);
+    resolveOld(0);                               // let relaunch's kill/await of the old proc finish
+    await relaunching;
+    const [cmdAndArgs] = mockSpawn.mock.calls[mockSpawn.mock.calls.length - 1];
+    expect(cmdAndArgs).toContain("--resume");
+    exitResolve(exitCode);                       // proc 222 dies immediately after --resume
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  beforeEach(() => {
+    mockTranscriptExists.mockReturnValue(true);
+    launcher.launch({ cwd: "/tmp" });
+    launcher.setCLISessionId(SID, "cli-keep-me");
+  });
+
+  it("keeps cliSessionId after ONE quick exit when the transcript is on disk", async () => {
+    await relaunchAndQuickExit();
+    const info = launcher.getSession(SID)!;
+    expect(info.cliSessionId).toBe("cli-keep-me");
+    expect(info.resumeFailures).toBe(1);
+  });
+
+  it("clears cliSessionId immediately when the transcript is missing on disk", async () => {
+    mockTranscriptExists.mockReturnValue(false);
+    await relaunchAndQuickExit();
+    expect(launcher.getSession(SID)!.cliSessionId).toBeUndefined();
+  });
+
+  it("clears cliSessionId only after RESUME_MAX_FAILURES consecutive quick exits", async () => {
+    for (let i = 1; i < CliLauncher.RESUME_MAX_FAILURES; i++) {
+      await relaunchAndQuickExit();
+      expect(launcher.getSession(SID)!.cliSessionId).toBe("cli-keep-me");
+      expect(launcher.getSession(SID)!.resumeFailures).toBe(i);
+    }
+    await relaunchAndQuickExit();
+    expect(launcher.getSession(SID)!.cliSessionId).toBeUndefined();
+  });
+
+  it("does not touch cliSessionId on a quick exit that was NOT a --resume launch", async () => {
+    // A fresh launch (no --resume) that dies fast is a different problem
+    // (bad binary, bad flags) and must not be mistaken for a bad transcript.
+    launcher.setCLISessionId(SID, undefined as unknown as string);
+    mockSpawn.mockReturnValue(createMockProc(333));
+    launcher.launch({ cwd: "/tmp" });
+    exitResolve(1);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(launcher.getSession(SID)!.resumeFailures ?? 0).toBe(0);
   });
 });

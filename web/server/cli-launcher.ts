@@ -7,6 +7,9 @@ import {
   realpathSync,
   writeFileSync,
   unlinkSync,
+  lstatSync,
+  readlinkSync,
+  symlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
-import { isValidEffort } from "./effort.js";
+import { isValidEffort, supportsUltracode } from "./effort.js";
+import { isValidCodexEffort } from "./codex-models.js";
+import { claudeTranscriptExists } from "./claude-session-history.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
@@ -25,7 +30,24 @@ import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
+  authRefreshedAt,
 } from "./codex-home.js";
+
+/**
+ * Who asked for this kill/relaunch.
+ *
+ * Both paths SIGTERM a possibly-live CLI, and the log used to name only the
+ * session. When a session died mid-answer there was no way to tell a user
+ * Reconnect from an auto-relaunch from a model change, which left the
+ * "sessions die on refresh" bug unattributable for weeks.
+ */
+function callerOf(): string {
+  const lines = (new Error().stack ?? "").split("\n").slice(3, 7);
+  return lines
+    .map((l) => l.trim().replace(/^at\s+/, "").split(" ")[0])
+    .filter((f) => f && !f.startsWith("("))
+    .join(" < ") || "unknown";
+}
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
@@ -89,11 +111,19 @@ export interface SdkSessionInfo {
   model?: string;
   /** Reasoning-effort level for effort-capable models (fable-5, Opus 4.6+). */
   effort?: string;
+  /** Claude only: standing dynamic-workflow orchestration (see buildUltracodeArgs). */
+  ultracode?: boolean;
   permissionMode?: string;
   cwd: string;
   createdAt: number;
   /** The CLI's internal session ID (from system.init), used for --resume */
   cliSessionId?: string;
+  /**
+   * Consecutive quick exits right after a `--resume` launch. Reset by any run
+   * that survives the startup window. See the exit handler for why one quick
+   * exit is NOT enough to discard cliSessionId.
+   */
+  resumeFailures?: number;
   archived?: boolean;
   /** User-facing session name */
   name?: string;
@@ -154,6 +184,8 @@ export interface LaunchOptions {
   model?: string;
   /** Reasoning-effort level (Claude only); passed as `--effort` when the model supports it. */
   effort?: string;
+  /** Claude only: standing dynamic-workflow orchestration (see buildUltracodeArgs). */
+  ultracode?: boolean;
   permissionMode?: string;
   cwd?: string;
   claudeBinary?: string;
@@ -190,6 +222,19 @@ export interface LaunchOptions {
  * or Codex via app-server stdio/WebSocket).
  */
 export class CliLauncher {
+  /** An exit faster than this after `--resume` counts as a failed resume attempt. */
+  static readonly RESUME_QUICK_EXIT_MS = 5000;
+  /** Consecutive quick exits (with the transcript present) before giving up on it. */
+  static readonly RESUME_MAX_FAILURES = 3;
+  /**
+   * Graceful-shutdown window for the OLD process on relaunch before SIGKILL.
+   * Env-overridable (COMPANION_RELAUNCH_GRACE_MS) so tests don't burn 5 real
+   * seconds per relaunch.
+   */
+  static get RELAUNCH_GRACE_MS(): number {
+    const v = Number(process.env.COMPANION_RELAUNCH_GRACE_MS);
+    return Number.isFinite(v) && v > 0 ? v : 5000;
+  }
   private sessions = new Map<string, SdkSessionInfo>();
   private processes = new Map<string, Subprocess>();
   /** Recent stderr (bounded) per stdio session, used to detect a too-old CLI. */
@@ -324,6 +369,7 @@ export class CliLauncher {
       state: "starting",
       model: options.model,
       effort: options.effort,
+      ultracode: options.ultracode,
       permissionMode: options.permissionMode,
       cwd,
       createdAt: Date.now(),
@@ -372,6 +418,7 @@ export class CliLauncher {
    * that connects back to the same session in the WsBridge.
    */
   async relaunch(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    console.log(`[cli-launcher] relaunch() requested for ${sessionId} — by: ${callerOf()}`);
     const info = this.sessions.get(sessionId);
     if (!info) return { ok: false, error: "Session not found" };
 
@@ -391,12 +438,28 @@ export class CliLauncher {
       this.codexWsProxies.delete(sessionId);
     }
     if (oldProc) {
+      // The old process MUST be gone before the new one starts: a Codex
+      // app-server that is still shutting down keeps the thread-writer lock,
+      // so a new app-server resuming the same thread hits "thread-store
+      // conflict: already has an active writer" and the adapter falls back to
+      // a FRESH thread — losing the whole context (observed 2026-09-11: a 2 s
+      // grace was not enough, the old process outlived it as an orphan holding
+      // the lock). Give it a real grace period, then escalate to SIGKILL and
+      // wait for the exit for real.
       try {
         oldProc.kill("SIGTERM");
-        await Promise.race([
-          oldProc.exited,
-          new Promise((r) => setTimeout(r, 2000)),
+        const gone = await Promise.race([
+          oldProc.exited.then(() => true),
+          new Promise<false>((r) => setTimeout(() => r(false), CliLauncher.RELAUNCH_GRACE_MS)),
         ]);
+        if (!gone) {
+          console.warn(`[cli-launcher] relaunch: old process for ${sessionId} still alive after ${CliLauncher.RELAUNCH_GRACE_MS}ms — SIGKILL`);
+          try { oldProc.kill("SIGKILL"); } catch {}
+          await Promise.race([
+            oldProc.exited,
+            new Promise((r) => setTimeout(r, Math.min(2000, CliLauncher.RELAUNCH_GRACE_MS))),
+          ]);
+        }
       } catch {}
       this.processes.delete(sessionId);
     } else if (info.pid) {
@@ -473,6 +536,7 @@ export class CliLauncher {
       this.spawnCLI(sessionId, info, {
         model: info.model,
         effort: info.effort,
+        ultracode: info.ultracode,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
         resumeSessionId: info.cliSessionId,
@@ -617,10 +681,17 @@ export class CliLauncher {
       args.push("--model", options.model);
     }
     // Reasoning effort: only pass `--effort` when the chosen model actually
-    // supports it. The CLI has no runtime control for effort, so it's a launch
-    // flag; passing it to a non-supporting model is rejected.
+    // supports it; passing it to a non-supporting model is rejected. This seeds
+    // the launch — later changes are applied at runtime (apply_flag_settings)
+    // and recorded back here, so a relaunch resumes on the current level.
     if (options.effort && isValidEffort(options.model, options.effort)) {
       args.push("--effort", options.effort);
+    }
+    // Ultracode is a per-session setting the CLI never persists, and Companion
+    // relaunches the CLI often (model/effort change, mid-turn recovery). Without
+    // re-passing it here every relaunch would silently drop it.
+    if (options.ultracode && supportsUltracode(options.model)) {
+      args.push("--settings", JSON.stringify({ ultracode: true }));
     }
     if (effectivePermissionMode) {
       args.push("--permission-mode", effectivePermissionMode);
@@ -686,6 +757,10 @@ export class CliLauncher {
       spawnEnv = {
         ...process.env,
         CLAUDECODE: undefined,
+        // Have the CLI report its own turn state (session_state_changed:
+        // idle | running | requires_action) instead of Companion inferring it.
+        // Off by default in the CLI; see session-work.ts for how it is used.
+        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
         ...options.env,
         PATH: getEnrichedPath(),
         ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),
@@ -745,12 +820,36 @@ export class CliLauncher {
         session.state = "exited";
         session.exitCode = exitCode;
 
-        // If the process exited almost immediately with --resume, the resume likely failed.
-        // Clear cliSessionId so the next relaunch starts fresh.
+        // A quick exit right after `--resume` is AMBIGUOUS: the transcript may be
+        // gone (cleanupPeriodDays pruned it), or the launch simply failed for a
+        // reason that has nothing to do with the transcript — network down, API
+        // 5xx, a relaunch racing another relaunch. Clearing cliSessionId is
+        // irreversible: it throws away the whole conversation context. So it is
+        // only done when the evidence is unambiguous:
+        //  - the transcript file is genuinely missing on disk, or
+        //  - resuming the SAME transcript has failed this many times in a row.
+        // (2026-09-08: a 3.4 s exit during a network drop discarded a 13.7 MB,
+        // perfectly intact transcript. This guard is the fix.)
         const uptime = Date.now() - spawnedAt;
-        if (uptime < 5000 && options.resumeSessionId) {
-          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
-          session.cliSessionId = undefined;
+        if (uptime < CliLauncher.RESUME_QUICK_EXIT_MS && options.resumeSessionId) {
+          const resumeId = options.resumeSessionId;
+          const transcriptOnDisk = claudeTranscriptExists(resumeId);
+          const failures = (session.resumeFailures ?? 0) + 1;
+          session.resumeFailures = failures;
+          if (!transcriptOnDisk) {
+            console.error(`[cli-launcher] Session ${sessionId} exited ${uptime}ms after --resume and transcript ${resumeId} is missing on disk. Clearing cliSessionId for fresh start.`);
+            session.cliSessionId = undefined;
+            session.resumeFailures = 0;
+          } else if (failures >= CliLauncher.RESUME_MAX_FAILURES) {
+            console.error(`[cli-launcher] Session ${sessionId} exited ${uptime}ms after --resume ${failures} times in a row (transcript present). Clearing cliSessionId for fresh start.`);
+            session.cliSessionId = undefined;
+            session.resumeFailures = 0;
+          } else {
+            console.warn(`[cli-launcher] Session ${sessionId} exited ${uptime}ms after --resume (attempt ${failures}/${CliLauncher.RESUME_MAX_FAILURES}); transcript is on disk — keeping cliSessionId for the next relaunch.`);
+          }
+        } else if (uptime >= CliLauncher.RESUME_QUICK_EXIT_MS) {
+          // A run that survived the startup window proves the transcript resumes fine.
+          session.resumeFailures = 0;
         }
 
         // Runtime backstop for stdio mode: a quick non-zero exit whose stderr
@@ -792,7 +891,8 @@ export class CliLauncher {
 
     // Bootstrap only the user-level artifacts Codex needs (auth/config/skills),
     // while intentionally skipping sessions/sqlite to avoid stale rollout indexes.
-    const fileSeeds = ["auth.json", "config.toml", "models_cache.json", "version.json"];
+    // NOTE: auth.json is deliberately NOT copied — see linkAuthJson().
+    const fileSeeds = ["config.toml", "models_cache.json", "version.json"];
     for (const name of fileSeeds) {
       try {
         const src = join(legacyHome, name);
@@ -816,6 +916,50 @@ export class CliLauncher {
       } catch (e) {
         console.warn(`[cli-launcher] Failed to bootstrap ${name}/ from legacy home:`, e);
       }
+    }
+
+    this.linkAuthJson(codexHome, legacyHome);
+  }
+
+  /**
+   * Point a session's auth.json at the user's global one instead of copying it.
+   *
+   * ChatGPT-plan OAuth rotates refresh tokens: every refresh mints a new one and
+   * revokes the previous one server-side. A per-session *copy* therefore dies the
+   * moment any other copy refreshes — permanently, because the dead token is on
+   * disk, so reconnecting or respawning re-reads the same revoked credentials and
+   * the user sees "your refresh token was revoked. Please log out and sign in
+   * again." Sharing one file is what Codex itself expects from concurrent
+   * processes (it re-reads auth.json before refreshing and skips the refresh when
+   * another process already rotated it), and Codex writes auth.json in place, so
+   * the symlink survives a rotation and every session sees the new token.
+   *
+   * Self-healing: a regular file left by an older Companion (or by a write that
+   * replaced the link) is folded back into the global home when it holds the
+   * newer rotation, then replaced by the symlink.
+   */
+  private linkAuthJson(codexHome: string, legacyHome: string): void {
+    const src = join(legacyHome, "auth.json");
+    const dest = join(codexHome, "auth.json");
+    try {
+      let destStat: ReturnType<typeof lstatSync> | null = null;
+      try { destStat = lstatSync(dest); } catch { /* absent */ }
+
+      if (destStat?.isSymbolicLink()) {
+        if (resolve(readlinkSync(dest)) === resolve(src)) return; // already correct
+        unlinkSync(dest);
+      } else if (destStat) {
+        // A real file: keep whichever credentials are newer before dropping it.
+        if (!existsSync(src) || authRefreshedAt(dest) > authRefreshedAt(src)) {
+          copyFileSync(dest, src);
+        }
+        unlinkSync(dest);
+      }
+
+      if (!existsSync(src)) return; // nothing to link to; Codex will prompt to log in
+      symlinkSync(src, dest);
+    } catch (e) {
+      console.warn(`[cli-launcher] Failed to link auth.json to the global Codex home:`, e);
     }
   }
 
@@ -899,6 +1043,12 @@ export class CliLauncher {
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
     args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
+    // not as a runtime call — same shape as Claude's `--effort` flag, so a change
+    // means relaunch with thread/resume. Levels are per-model, hence the check.
+    if (options.effort && isValidCodexEffort(options.model, options.effort)) {
+      args.push("-c", `model_reasoning_effort=${options.effort}`);
+    }
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1136,6 +1286,12 @@ export class CliLauncher {
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
     args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
+    // not as a runtime call — same shape as Claude's `--effort` flag, so a change
+    // means relaunch with thread/resume. Levels are per-model, hence the check.
+    if (options.effort && isValidCodexEffort(options.model, options.effort)) {
+      args.push("-c", `model_reasoning_effort=${options.effort}`);
+    }
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1298,6 +1454,9 @@ export class CliLauncher {
    * Kill a session's CLI process.
    */
   async kill(sessionId: string): Promise<boolean> {
+    // Attribution: SIGTERMs used to be unlogged, making mid-turn kills
+    // untraceable (see the 2026-09-02 lost-answer forensics).
+    console.log(`[cli-launcher] kill() requested for ${sessionId} — by: ${callerOf()}`);
     const proxy = this.codexWsProxies.get(sessionId);
     if (proxy) {
       try { proxy.kill("SIGTERM"); } catch {}
@@ -1383,6 +1542,14 @@ export class CliLauncher {
    * relaunch uses it. Like `setModel`, effort can only be applied at launch
    * (`--effort`), so the caller pairs this with `relaunch()`.
    */
+  setUltracode(sessionId: string, enabled: boolean): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.ultracode = enabled;
+    this.persistState();
+    return true;
+  }
+
   setEffort(sessionId: string, effort: string): boolean {
     const info = this.sessions.get(sessionId);
     if (!info) return false;

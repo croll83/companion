@@ -1,13 +1,12 @@
 import { Hono } from "hono";
+import { loadCodexCache, pickerModels } from "./codex-models.js";
 import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
 import { COMPANION_HOME } from "./paths.js";
-import { existsSync, readFileSync } from "node:fs";
 import type { SessionOrchestrator } from "./session-orchestrator.js";
 import type { CliLauncher } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
@@ -25,6 +24,7 @@ import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
 import { registerSettingsRoutes } from "./routes/settings-routes.js";
+import { registerTelegramRoutes } from "./routes/telegram-routes.js";
 import { registerTailscaleRoutes } from "./routes/tailscale-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
@@ -745,12 +745,13 @@ export function createRoutes(
 
   api.post("/sessions/:id/relaunch", async (c) => {
     const id = c.req.param("id");
-    const result = await orchestrator.relaunchSession(id);
+    const force = c.req.query("force") === "1";
+    const result = await orchestrator.relaunchSession(id, { force });
     if (!result.ok) {
       const status = result.error?.includes("not found") || result.error?.includes("Session not found") ? 404 : 503;
       return c.json({ error: result.error || "Relaunch failed" }, status);
     }
-    return c.json({ ok: true });
+    return c.json({ ok: true, ...(result.alreadyRunning ? { alreadyRunning: true } : {}) });
   });
 
   // Kill a background process spawned by a session
@@ -1187,35 +1188,13 @@ export function createRoutes(
     const backendId = c.req.param("id");
 
     if (backendId === "codex") {
-      // Read Codex model list from its local cache file
-      const cachePath = join(homedir(), ".codex", "models_cache.json");
-      if (!existsSync(cachePath)) {
+      // The freshest catalogue Codex has fetched anywhere — see codex-models.ts
+      // for why the host's ~/.codex alone goes stale.
+      const cache = loadCodexCache();
+      if (!cache) {
         return c.json({ error: "Codex models cache not found. Run codex once to populate it." }, 404);
       }
-      try {
-        const raw = readFileSync(cachePath, "utf-8");
-        const cache = JSON.parse(raw) as {
-          models: Array<{
-            slug: string;
-            display_name?: string;
-            description?: string;
-            visibility?: string;
-            priority?: number;
-          }>;
-        };
-        // Only return visible models, sorted by priority
-        const models = cache.models
-          .filter((m) => m.visibility === "list")
-          .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
-          .map((m) => ({
-            value: m.slug,
-            label: m.display_name || m.slug,
-            description: m.description || "",
-          }));
-        return c.json(models);
-      } catch (e) {
-        return c.json({ error: "Failed to parse Codex models cache" }, 500);
-      }
+      return c.json(pickerModels(cache));
     }
 
     // Claude models are hardcoded on the frontend
@@ -1241,6 +1220,7 @@ export function createRoutes(
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api);
+  registerTelegramRoutes(api);
 
   // ─── Tailscale ──────────────────────────────────────────────────────
 

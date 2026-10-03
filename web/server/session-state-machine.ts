@@ -38,6 +38,20 @@ export interface SessionTransitionEvent {
 /**
  * Defines which (from -> to) transitions are valid.
  * Any transition not listed here will be blocked with a warning.
+ *
+ * Two rules keep this table honest, both learned from production:
+ *
+ * 1. `starting` is reachable from EVERY live phase. A relaunch can be requested
+ *    at any moment (model/effort change, Reconnect, relaunch-on-send). When the
+ *    table only allowed it from `terminated`, the process really was replaced
+ *    but the phase stayed on the old value, so the UI sat on "CLI disconnected"
+ *    forever (104 blocked relaunches in one production log, 2026-09-22).
+ *
+ * 2. `awaiting_permission` is reachable from every phase where the CLI is alive.
+ *    It is the phase the idle-kill watchdog treats as protected; if a session
+ *    cannot ENTER it, it stays in `ready` — the only killable phase — and a
+ *    session waiting on the user's approval can be reclaimed out from under
+ *    them (35 blocked in the same log).
  */
 export const VALID_TRANSITIONS: ReadonlyMap<
   SessionPhase,
@@ -49,15 +63,17 @@ export const VALID_TRANSITIONS: ReadonlyMap<
   ],
   [
     "initializing",
-    new Set<SessionPhase>(["ready", "streaming", "reconnecting", "terminated"]),
+    new Set<SessionPhase>(["ready", "streaming", "reconnecting", "terminated", "starting"]),
   ],
   [
     "ready",
     new Set<SessionPhase>([
       "streaming",
+      "awaiting_permission",
       "compacting",
       "reconnecting",
       "terminated",
+      "starting",
     ]),
   ],
   [
@@ -69,11 +85,12 @@ export const VALID_TRANSITIONS: ReadonlyMap<
       "compacting",
       "reconnecting",
       "terminated",
+      "starting",
     ]),
   ],
   [
     "awaiting_permission",
-    new Set<SessionPhase>(["streaming", "ready", "reconnecting", "terminated"]),
+    new Set<SessionPhase>(["streaming", "ready", "reconnecting", "terminated", "starting"]),
   ],
   [
     "compacting",
@@ -82,6 +99,7 @@ export const VALID_TRANSITIONS: ReadonlyMap<
       "streaming",
       "reconnecting",
       "terminated",
+      "starting",
     ]),
   ],
   [
@@ -116,6 +134,26 @@ export class SessionStateMachine {
    * Returns true if successful (or same-state no-op), false if blocked.
    * Invalid transitions are logged but never throw.
    */
+  /**
+   * Transition that must succeed, for callers where a silent no-op corrupts the
+   * session (relaunch bookkeeping, user sends).
+   *
+   * `transition` returns false and nearly every caller uses it as a statement,
+   * so a rejected transition used to vanish into a warning while the phase and
+   * the real process drifted apart. This records it as an error instead.
+   */
+  mustTransition(to: SessionPhase, trigger: string): boolean {
+    if (this.transition(to, trigger)) return true;
+    metricsCollector.recordError("required_state_transition_blocked");
+    log.error("state-machine", "REQUIRED transition blocked — session phase now lies", {
+      sessionId: this._sessionId,
+      from: this._phase,
+      to,
+      trigger,
+    });
+    return false;
+  }
+
   transition(to: SessionPhase, trigger: string): boolean {
     if (this._phase === to) return true;
 

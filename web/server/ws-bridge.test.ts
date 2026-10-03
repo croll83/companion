@@ -85,6 +85,7 @@ let tempDir: string;
 let store: SessionStore;
 
 beforeEach(() => {
+  delete process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS;
   tempDir = mkdtempSync(join(tmpdir(), "bridge-test-"));
   store = new SessionStore(tempDir);
   bridge = new WsBridge();
@@ -1488,7 +1489,10 @@ describe("Browser handlers", () => {
     bridge.handleBrowserOpen(browser, "s1");
     browser.send.mockClear();
 
-    // Ask for replay after seq=2 (session_phase + cli_connected). Both stream events should replay.
+    // Ask for replay after seq=2 (session_phase + cli_connected). The first
+    // stream_event also flips the phase initializing→streaming (CLI output while
+    // at rest = turn in flight), so the buffer holds that session_phase + both
+    // stream events.
     bridge.handleBrowserMessage(browser, JSON.stringify({
       type: "session_subscribe",
       last_seq: 2,
@@ -1497,10 +1501,12 @@ describe("Browser handlers", () => {
     const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
     const replay = calls.find((c: any) => c.type === "event_replay");
     expect(replay).toBeDefined();
-    expect(replay.events).toHaveLength(2);
+    expect(replay.events).toHaveLength(3);
     expect(replay.events[0].seq).toBe(3);
-    expect(replay.events[0].message.type).toBe("stream_event");
+    expect(replay.events[0].message.type).toBe("session_phase");
+    expect(replay.events[0].message.phase).toBe("streaming");
     expect(replay.events[1].message.type).toBe("stream_event");
+    expect(replay.events[2].message.type).toBe("stream_event");
   });
 
   it("session_subscribe: sends full message_history on first subscribe even without a replay gap", async () => {
@@ -2554,21 +2560,40 @@ describe("Browser message routing", () => {
     off();
   });
 
-  it("set_effort (claude): emits session:effort-change and does NOT forward to CLI", () => {
-    // Effort has no runtime control_request — it's a launch flag — so the
-    // bridge mirrors set_model: persist + emit a bus event for the orchestrator
-    // to relaunch the CLI with --effort. Forwarding to the CLI would no-op.
-    const handler = vi.fn();
-    const off = companionBus.on("session:effort-change", handler);
+  it("set_effort (claude): changes effort in place on the CLI — no relaunch", () => {
+    // Claude's CLI accepts effort at runtime (apply_flag_settings). Relaunching
+    // for every effort change reconnected the session each time for nothing.
+    const relaunch = vi.fn();
+    const off = companionBus.on("session:effort-change", relaunch);
 
     bridge.handleBrowserMessage(browser, JSON.stringify({
       type: "set_effort",
       effort: "max",
     }));
 
-    expect(cli.send).not.toHaveBeenCalled();
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith({ sessionId: "s1", effort: "max" });
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(cli.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.request).toEqual({ subtype: "apply_flag_settings", settings: { effortLevel: "max" } });
+    off();
+  });
+
+  it("records a Claude effort the CLI confirmed, so the next launch keeps it", () => {
+    const applied = vi.fn();
+    const off = companionBus.on("session:effort-applied", applied);
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_effort", effort: "max" }));
+    const answer = (n: number, response: Record<string, unknown>) => {
+      const req = JSON.parse((cli.send.mock.calls[n][0] as string).trim());
+      bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "control_response",
+        response: { subtype: "success", request_id: req.request_id, response },
+      }));
+    };
+    answer(0, {});                                    // apply_flag_settings
+    answer(1, { applied: { effort: "max" } });        // get_settings read-back
+
+    expect(applied).toHaveBeenCalledWith({ sessionId: "s1", effort: "max" });
     expect(bridge.getSession("s1")?.state.effort).toBe("max");
     off();
   });
@@ -4438,6 +4463,15 @@ describe("sendToCLI error path", () => {
 // ─── CLI message deduplication (Bun.hash-based) ─────────────────────────────
 
 describe("CLI message deduplication", () => {
+  // The first CLI output frame after init also flips ready→streaming, which
+  // broadcasts a session_phase. Dedup assertions care about forwarded CLI
+  // frames only, so count everything except that phase notification.
+  function forwarded(browser: { send: { mock: { calls: [string][] } } }) {
+    return browser.send.mock.calls
+      .map(([arg]) => JSON.parse(arg) as { type: string })
+      .filter((m) => m.type !== "session_phase");
+  }
+
   async function setupSession() {
     const cli = makeCliSocket("s1");
     const browser = makeBrowserSocket("s1");
@@ -4454,12 +4488,12 @@ describe("CLI message deduplication", () => {
 
     // First send — should forward to browser
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).toHaveBeenCalledTimes(1);
+    expect(forwarded(browser)).toHaveLength(1);
 
     // Same message again (simulates CLI replay on WS reconnect) — should be filtered
     browser.send.mockClear();
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).not.toHaveBeenCalled();
+    expect(forwarded(browser)).toHaveLength(0);
   });
 
   it("forwards non-duplicate assistant messages normally", async () => {
@@ -4470,7 +4504,7 @@ describe("CLI message deduplication", () => {
     await bridge.handleCLIMessage(cli, msg1);
     await bridge.handleCLIMessage(cli, msg2);
 
-    expect(browser.send).toHaveBeenCalledTimes(2);
+    expect(forwarded(browser)).toHaveLength(2);
   });
 
   it("evicts oldest hashes when window is exceeded", async () => {
@@ -4505,12 +4539,12 @@ describe("CLI message deduplication", () => {
 
     // First send — should forward to browser
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).toHaveBeenCalledTimes(1);
+    expect(forwarded(browser)).toHaveLength(1);
 
     // Same uuid again (simulates CLI replay on WS reconnect) — should be filtered
     browser.send.mockClear();
     await bridge.handleCLIMessage(cli, msg);
-    expect(browser.send).not.toHaveBeenCalled();
+    expect(forwarded(browser)).toHaveLength(0);
   });
 
   it("forwards stream_event messages without uuid (no dedup possible)", async () => {
@@ -4526,7 +4560,7 @@ describe("CLI message deduplication", () => {
     await bridge.handleCLIMessage(cli, msg);
 
     // Both should be forwarded — no uuid means no dedup
-    expect(browser.send).toHaveBeenCalledTimes(2);
+    expect(forwarded(browser)).toHaveLength(2);
   });
 });
 
@@ -4905,6 +4939,40 @@ describe("Idle kill watchdog", () => {
     return { cli, session };
   }
 
+  // ─── Regression: disconnected mid-turn must come back on its own ─────────
+  // The CLI stdout can reach EOF while the process is still alive and its
+  // launcher record still reads "connected" (observed 2026-09-23:
+  // `cause=eof processAlive=true killed=false`). The session was then dead to
+  // us but healthy to every liveness check, so nothing relaunched it and the
+  // user had to click Reconnect and re-send the message.
+  it("relaunches itself when the transport dies mid-turn", async () => {
+    const relaunchNeeded = vi.fn();
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+
+    const { cli, session } = await makeReadySession("s1");
+    session.stateMachine.transition("streaming", "user_message");
+
+    bridge.handleCLIClose(cli);
+    await vi.advanceTimersByTimeAsync(16_000); // past the 15s disconnect debounce
+
+    expect(session.stateMachine.phase).toBe("terminated");
+    expect(relaunchNeeded).toHaveBeenCalledWith("s1");
+    off();
+  });
+
+  it("leaves an idle session down so restarts do not respawn every CLI", async () => {
+    const relaunchNeeded = vi.fn();
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+
+    const { cli } = await makeReadySession("s1"); // at rest, nothing in flight
+
+    bridge.handleCLIClose(cli);
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    expect(relaunchNeeded).not.toHaveBeenCalled();
+    off();
+  });
+
   it("emits idle-kill + cli_disconnected after threshold while at rest (ready)", async () => {
     // No activity (user or CLI) for the threshold while in "ready" → the watchdog
     // emits session:idle-kill AND notifies browsers via cli_disconnected.
@@ -5026,6 +5094,149 @@ describe("Idle kill watchdog", () => {
     expect(idleKillHandler).not.toHaveBeenCalled();
   });
 
+  it("does NOT kill a session with an unfinished tool call", async () => {
+    // The gap the phase gate left open: a Bash/MCP/sub-agent call can run for
+    // far longer than the idle threshold while the phase sits at "ready", so
+    // the watchdog saw an idle session and SIGTERMed live work.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { session } = await makeReadySession("s1");
+    session.openToolCalls.add("toolu_long_running");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+
+    // Once the tool finishes, the session becomes reclaimable again.
+    session.openToolCalls.clear();
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("does NOT kill a session a client is still looking at", async () => {
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { session } = await makeReadySession("s1");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+
+    // The client heartbeats focus every 60s while the session is on screen;
+    // refresh well inside the 10min grace window and run past the threshold.
+    for (let i = 0; i < 290; i++) {
+      session.lastFocusTs = Date.now();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    }
+    expect(idleKillHandler).not.toHaveBeenCalled();
+  });
+
+  it("kills once focus has gone stale", async () => {
+    // Switching to another app for a while must not keep the session forever.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { session } = await makeReadySession("s1");
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+    session.lastFocusTs = Date.now() - 11 * 60_000; // last looked at 11min ago
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("neither kills nor announces a disconnect for an archived session", async () => {
+    // The watchdog used to emit the kill (dropped later by the orchestrator)
+    // but announce the disconnect unconditionally, so an archived session was
+    // shown as disconnected while still alive.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    await makeReadySession("s1");
+    bridge.setArchivedCheck(() => true);
+    browser.send.mockClear();
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+
+    expect(idleKillHandler).not.toHaveBeenCalled();
+    const sent = browser.send.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(sent.some((m: string) => m.includes("cli_disconnected"))).toBe(false);
+  });
+
+  // The case from 2026-10-03: a turn ends after launching a terraform plan /
+  // Docker test in the background. Every turn signal says idle; only the CLI's
+  // background_tasks_changed says otherwise. The watchdog must listen to it.
+  it("does NOT kill a session whose turn ended while background work runs", async () => {
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+
+    const { cli, session } = await makeReadySession("s1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed",
+      tasks: [{ task_id: "b1", task_type: "local_bash", description: "terraform plan" }],
+      uuid: "u-bg-1", session_id: "cli-1",
+    }));
+    expect(session.stateMachine.phase).toBe("ready"); // the turn really is over
+    // Past the idle threshold (24h in tests), still inside the background cap.
+    process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS = "48";
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+
+    // The task ends (the CLI re-sends the now-empty set): reclaimable again.
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed", tasks: [],
+      uuid: "u-bg-2", session_id: "cli-1",
+    }));
+    session.lastCliActivityTs = 0;
+    session.lastUserActivityTs = 0;
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  it("reclaims a session kept alive only by background work that went silent for hours", async () => {
+    // A dev server or a perpetual Monitor must not pin the CLI forever.
+    const idleKillHandler = vi.fn();
+    companionBus.on("session:idle-kill", idleKillHandler);
+    const { cli } = await makeReadySession("s1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed",
+      tasks: [{ task_id: "dev", task_type: "local_bash", description: "npm run dev" }],
+      uuid: "u-bg-dev", session_id: "cli-1",
+    }));
+
+    process.env.COMPANION_BG_WORK_MAX_IDLE_HOURS = "25";
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled(); // idle, but inside the cap
+    await vi.advanceTimersByTimeAsync(60 * 60_000 + 2 * 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+  });
+
+  // Caught by the pre-deploy review: losing contact with a CLI used to trigger
+  // a relaunch whenever isSessionWorking() — which now includes background
+  // tasks. A relaunch SIGTERMs the CLI, killing the terraform plan the tracking
+  // exists to protect. Only an in-flight TURN justifies it.
+  it("does not relaunch a CLI it lost contact with just because background work runs", async () => {
+    const relaunchNeeded = vi.fn();
+    const off = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+    const { cli, session } = await makeReadySession("s1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "system", subtype: "background_tasks_changed",
+      tasks: [{ task_id: "tf", task_type: "local_bash", description: "terraform plan" }],
+      uuid: "u-bg-tf", session_id: "cli-1",
+    }));
+    expect(session.stateMachine.phase).toBe("ready");
+
+    bridge.handleCLIClose(cli);
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    expect(session.stateMachine.phase).toBe("terminated");
+    expect(relaunchNeeded).not.toHaveBeenCalled();
+    off();
+  });
+
   it("does NOT kill before the threshold", async () => {
     const idleKillHandler = vi.fn();
     companionBus.on("session:idle-kill", idleKillHandler);
@@ -5035,6 +5246,67 @@ describe("Idle kill watchdog", () => {
     // Well under 24h.
     await vi.advanceTimersByTimeAsync(60 * 60_000);
     expect(idleKillHandler).not.toHaveBeenCalled();
+  });
+
+  // ─── Regression: phase truth vs the idle-kill gate ───────────────────────
+  // Production failure (2026-09-02): the CLI emits system/status
+  // {status:"requesting"} at the start of every API call; the status_change
+  // handler treated any non-"compacting" status as "compaction ended" and
+  // forced the phase back to `ready` MID-TURN. The idle-kill gate then saw
+  // `ready` + a quiet stretch (long thinking / long tool) and SIGTERM'd a live
+  // turn, losing its answer. Turns started by a post-relaunch flush never even
+  // entered `streaming`.
+  function makeStatusMsg(status: string, uuid: string) {
+    return JSON.stringify({ type: "system", subtype: "status", status, session_id: "cli-123", uuid });
+  }
+  function makeAssistantFrame(id: string) {
+    return JSON.stringify({
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "working…" }], stop_reason: null,
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+      uuid: `u-${id}`,
+    });
+  }
+
+  it("status 'requesting' does NOT drop a streaming turn back to ready", async () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { cli, session } = await makeReadySession("s1");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "go" }));
+    expect(session.stateMachine.phase).toBe("streaming");
+
+    await bridge.handleCLIMessage(cli, makeStatusMsg("requesting", "u-req-1"));
+    expect(session.stateMachine.phase).toBe("streaming");
+  });
+
+  it("CLI output while at rest moves the phase to streaming (flushed turn)", async () => {
+    const { cli, session } = await makeReadySession("s1");
+    expect(session.stateMachine.phase).toBe("ready");
+
+    await bridge.handleCLIMessage(cli, makeStatusMsg("requesting", "u-req-2"));
+    expect(session.stateMachine.phase).toBe("streaming");
+
+    // And an assistant frame alone is enough too.
+    session.stateMachine.transition("ready", "test_back_to_ready");
+    await bridge.handleCLIMessage(cli, makeAssistantFrame("msg-flushed-1"));
+    expect(session.stateMachine.phase).toBe("streaming");
+  });
+
+  it("idle-kill never fires during a turn that went quiet after 'requesting'", async () => {
+    const idleKillHandler = vi.fn();
+    const off = companionBus.on("session:idle-kill", idleKillHandler);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { cli } = await makeReadySession("s1");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "long task" }));
+    await bridge.handleCLIMessage(cli, makeStatusMsg("requesting", "u-req-3"));
+
+    // Long silent stretch (model thinking / tool running) well past the threshold.
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).not.toHaveBeenCalled();
+    off();
   });
 
   it("checkIdleKill stops watchdog if session is removed", async () => {

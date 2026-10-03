@@ -15,6 +15,9 @@ interface ProjectGroupProps {
   onArchive: (e: React.MouseEvent, id: string) => void;
   onUnarchive: (e: React.MouseEvent, id: string) => void;
   onDelete: (e: React.MouseEvent, id: string) => void;
+  onConnectTelegram: (id: string) => void;
+  telegramConfigured: boolean;
+  telegramBoundIds?: Set<string>;
   onClearRecentlyRenamed: (id: string) => void;
   editingSessionId: string | null;
   editingName: string;
@@ -38,6 +41,9 @@ export function ProjectGroup({
   onArchive,
   onUnarchive,
   onDelete,
+  onConnectTelegram,
+  telegramConfigured,
+  telegramBoundIds,
   onClearRecentlyRenamed,
   editingSessionId,
   editingName,
@@ -115,6 +121,9 @@ export function ProjectGroup({
                 onArchive={onArchive}
                 onUnarchive={onUnarchive}
                 onDelete={onDelete}
+                onConnectTelegram={onConnectTelegram}
+                telegramConfigured={telegramConfigured}
+                telegramBoundIds={telegramBoundIds}
                 onClearRecentlyRenamed={onClearRecentlyRenamed}
                 editingSessionId={editingSessionId}
                 editingName={editingName}

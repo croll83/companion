@@ -1,3 +1,4 @@
+import { historyTail } from "./ws-bridge-persist.js";
 import type { ServerWebSocket } from "bun";
 import type { BrowserSocketData, Session, SocketData } from "./ws-bridge-types.js";
 import type {
@@ -37,10 +38,7 @@ export function handleSessionSubscribe(
   data.lastAckSeq = lastAckSeq;
 
   if (lastAckSeq === 0 && session.messageHistory.length > 0) {
-    sendToBrowser(ws, {
-      type: "message_history",
-      messages: session.messageHistory,
-    });
+    sendToBrowser(ws, { type: "message_history", ...historyTail(session.messageHistory) });
   }
 
   if (session.eventBuffer.length === 0) return;
@@ -50,10 +48,7 @@ export function handleSessionSubscribe(
   const hasGap = lastAckSeq > 0 && lastAckSeq < earliest - 1;
   if (hasGap) {
     if (session.messageHistory.length > 0) {
-      sendToBrowser(ws, {
-        type: "message_history",
-        messages: session.messageHistory,
-      });
+      sendToBrowser(ws, { type: "message_history", ...historyTail(session.messageHistory) });
     }
     const transientMissed = session.eventBuffer
       .filter((evt) => evt.seq > lastAckSeq && !isHistoryBackedEvent(evt.message));

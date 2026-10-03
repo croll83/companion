@@ -407,7 +407,7 @@ const MSG_REFUSAL: ChatMessage = {
   refusal: {
     category: "cyber",
     explanation: "This request involves developing capabilities that could enable cyberattacks against systems without authorization.",
-    model: "claude-fable-5",
+    model: "claude-fable-5-1",
   },
 };
 
@@ -2976,6 +2976,8 @@ const noopSessionItemProps = {
   onArchive: (e: React.MouseEvent) => e.stopPropagation(),
   onUnarchive: (e: React.MouseEvent) => e.stopPropagation(),
   onDelete: (e: React.MouseEvent) => e.stopPropagation(),
+  onConnectTelegram: () => {},
+  telegramConfigured: true,
   onClearRecentlyRenamed: () => {},
   editingSessionId: null,
   editingName: "",

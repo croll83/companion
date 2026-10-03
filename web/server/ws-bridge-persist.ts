@@ -9,6 +9,28 @@ import type { SessionStore, PersistedSession } from "./session-store.js";
 export const MESSAGE_HISTORY_LIMIT = 2000;
 
 /**
+ * How many messages a browser gets on connect.
+ *
+ * The full 2000-message history was replayed to every socket on every refresh.
+ * Sending the tail keeps the visible conversation instant and lets the client
+ * pull older pages on demand, which matters most on phones.
+ */
+export const HISTORY_PAGE_SIZE = 200;
+
+/** The newest `size` messages plus where they sit in the full history. */
+export function historyTail<T>(history: T[], size: number = HISTORY_PAGE_SIZE) {
+  const startIndex = Math.max(0, history.length - size);
+  return { messages: history.slice(startIndex), startIndex, total: history.length };
+}
+
+/** An older page ending just before `beforeIndex`. */
+export function historyPage<T>(history: T[], beforeIndex: number, size: number = HISTORY_PAGE_SIZE) {
+  const end = Math.max(0, Math.min(beforeIndex, history.length));
+  const startIndex = Math.max(0, end - size);
+  return { messages: history.slice(startIndex, end), startIndex, total: history.length };
+}
+
+/**
  * Append a message to session history with cap enforcement, then persist to disk.
  * Consolidates the common appendHistory + persistSession pattern into one call,
  * eliminating the risk of appending without persisting.

@@ -9,7 +9,14 @@ vi.mock("./analytics.js", () => ({
   captureException: captureExceptionMock,
 }));
 
-import { api } from "./api.js";
+// handle401() lazily imports the store to log the user out; stub it so the
+// test can observe the logout without pulling in the whole zustand store.
+const { logoutMock } = vi.hoisted(() => ({ logoutMock: vi.fn() }));
+vi.mock("./store.js", () => ({
+  useStore: { getState: () => ({ logout: logoutMock }) },
+}));
+
+import { api, createSessionStream } from "./api.js";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -2062,5 +2069,290 @@ describe("listExecutions", () => {
 
     const [url] = mockFetch.mock.calls[0];
     expect(url).toBe("/api/executions?status=running");
+  });
+});
+
+// ===========================================================================
+// Auth header + 401 handling (shared by every verb helper)
+// ===========================================================================
+describe("auth header and 401 handling", () => {
+  afterEach(() => {
+    localStorage.clear();
+    logoutMock.mockReset();
+  });
+
+  it("attaches the stored bearer token to requests", async () => {
+    // Guards that an authenticated browser actually sends its token.
+    localStorage.setItem("companion_auth_token", "tok-123");
+    mockFetch.mockResolvedValueOnce(mockResponse([]));
+
+    await api.listSessions();
+
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(opts.headers.Authorization).toBe("Bearer tok-123");
+  });
+
+  it("clears the token and logs out on a 401", async () => {
+    // A 401 means the token is stale: it must be dropped and the store logged out.
+    localStorage.setItem("companion_auth_token", "stale");
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "Unauthorized" }, 401));
+
+    await expect(api.listSessions()).rejects.toThrow("Unauthorized");
+
+    expect(localStorage.getItem("companion_auth_token")).toBeNull();
+    await vi.waitFor(() => expect(logoutMock).toHaveBeenCalledOnce());
+  });
+
+  it("falls back to Date.now() when performance.now is unavailable", async () => {
+    // Durations must still be reported in environments without performance.now.
+    vi.stubGlobal("performance", undefined);
+    try {
+      mockFetch.mockResolvedValueOnce(mockResponse([]));
+      await api.listSessions();
+      expect(captureEventMock).toHaveBeenCalledWith(
+        "api_request_succeeded",
+        expect.objectContaining({ method: "GET", path: "/sessions", duration_ms: expect.any(Number) }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      vi.stubGlobal("fetch", mockFetch);
+    }
+  });
+
+  it("tracks network failures for PUT, PATCH and DELETE", async () => {
+    // Non-HTTP failures (fetch rejects) must still be reported once per verb.
+    mockFetch.mockRejectedValue(new Error("offline"));
+
+    await expect(api.setTelegramBinding("s1", {
+      groupId: 1, topicId: null, allowlist: [], requireMention: false, enabled: true,
+    })).rejects.toThrow("offline");
+    await expect(api.renameSession("s1", "x")).rejects.toThrow("offline");
+    await expect(api.deleteSession("s1")).rejects.toThrow("offline");
+
+    const methods = captureEventMock.mock.calls
+      .filter(([name]) => name === "api_request_failed")
+      .map(([, props]) => (props as { method: string }).method);
+    expect(methods).toEqual(["PUT", "PATCH", "DELETE"]);
+    mockFetch.mockReset();
+  });
+
+  it("tracks POST network failures", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    await expect(api.killSession("s1")).rejects.toThrow("offline");
+    expect(captureEventMock).toHaveBeenCalledWith(
+      "api_request_failed",
+      expect.objectContaining({ method: "POST", error: "offline" }),
+    );
+  });
+});
+
+// ===========================================================================
+// createSessionStream (SSE over POST)
+// ===========================================================================
+describe("createSessionStream", () => {
+  /** Build a fetch response whose body streams the given string chunks. */
+  function sseResponse(chunks: string[]) {
+    const encoder = new TextEncoder();
+    let i = 0;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: {
+        getReader: () => ({
+          read: async () =>
+            i < chunks.length
+              ? { done: false, value: encoder.encode(chunks[i++]) }
+              : { done: true, value: undefined },
+        }),
+      },
+      json: () => Promise.resolve({}),
+    };
+  }
+
+  it("reports progress events and resolves with the done payload", async () => {
+    // Events can be split across chunk boundaries; the parser must buffer.
+    mockFetch.mockResolvedValueOnce(sseResponse([
+      'event: progress\ndata: {"step":"spawn","label":"Spawning","status":"in_progress"}\n\n',
+      "\n\n", // blank chunk is ignored
+      "event: progress\n", // no data line yet
+      '\n\nevent: done\ndata: {"sessionId":"s1","state":"starting","cwd":"/r"',
+      "}\n\n",
+    ]));
+    const onProgress = vi.fn();
+
+    const result = await createSessionStream({ cwd: "/r" }, onProgress);
+
+    expect(result).toEqual({ sessionId: "s1", state: "starting", cwd: "/r" });
+    expect(onProgress).toHaveBeenCalledOnce();
+    expect(onProgress).toHaveBeenCalledWith({ step: "spawn", label: "Spawning", status: "in_progress" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/create-stream");
+    expect(JSON.parse(opts.body)).toEqual({ cwd: "/r" });
+  });
+
+  it("sends an empty object when no options are given", async () => {
+    mockFetch.mockResolvedValueOnce(sseResponse(['event: done\ndata: {"sessionId":"s2"}\n\n']));
+    await createSessionStream(undefined, vi.fn());
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({});
+  });
+
+  it("throws the server error carried by an error event", async () => {
+    mockFetch.mockResolvedValueOnce(sseResponse(['event: error\ndata: {"error":"no cwd"}\n\n']));
+    await expect(createSessionStream({}, vi.fn())).rejects.toThrow("no cwd");
+  });
+
+  it("uses a generic message for an error event without text", async () => {
+    mockFetch.mockResolvedValueOnce(sseResponse(["event: error\ndata: {}\n\n"]));
+    await expect(createSessionStream({}, vi.fn())).rejects.toThrow("Session creation failed");
+  });
+
+  it("throws when the stream ends without a done event", async () => {
+    // A dropped connection must not resolve to a phantom session.
+    mockFetch.mockResolvedValueOnce(sseResponse(['event: progress\ndata: {"step":"x"}\n\n']));
+    await expect(createSessionStream({}, vi.fn())).rejects.toThrow(
+      "Stream ended without session creation result",
+    );
+  });
+
+  it("throws the JSON error of a non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({ ...mockResponse({ error: "busy" }, 503), body: null });
+    await expect(createSessionStream({}, vi.fn())).rejects.toThrow("busy");
+  });
+
+  it("falls back to statusText when the error body is not JSON", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      statusText: "Bad Gateway",
+      body: null,
+      json: () => Promise.reject(new Error("not json")),
+    });
+    await expect(createSessionStream({}, vi.fn())).rejects.toThrow("Bad Gateway");
+  });
+});
+
+// ===========================================================================
+// Telegram bridge API
+// ===========================================================================
+describe("telegram API", () => {
+  const binding = { groupId: -100123, topicId: 7, allowlist: [42], requireMention: true, enabled: true };
+
+  it("getTelegramStatus hits /api/telegram/status", async () => {
+    const data = { tokenConfigured: true, running: true, boundSessionIds: ["s1"] };
+    mockFetch.mockResolvedValueOnce(mockResponse(data));
+    expect(await api.getTelegramStatus()).toEqual(data);
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/telegram/status");
+  });
+
+  it("getTelegramBinding encodes the session id", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ binding: null }));
+    expect(await api.getTelegramBinding("a/b")).toEqual({ binding: null });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/sessions/a%2Fb/telegram");
+  });
+
+  it("setTelegramBinding PUTs the binding as body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, binding }));
+    await api.setTelegramBinding("s1", binding);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/telegram");
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body)).toEqual(binding);
+  });
+
+  it("deleteTelegramBinding sends DELETE without a body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, removed: true }));
+    await api.deleteTelegramBinding("s1");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/telegram");
+    expect(opts.method).toBe("DELETE");
+    expect(opts.body).toBeUndefined();
+    expect(opts.headers["Content-Type"]).toBeUndefined();
+  });
+
+  it("resolveTelegramUsername POSTs the username", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ id: 42, username: "marco" }));
+    expect(await api.resolveTelegramUsername("@marco")).toEqual({ id: 42, username: "marco" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/telegram/resolve-username");
+    expect(JSON.parse(opts.body)).toEqual({ username: "@marco" });
+  });
+});
+
+// ===========================================================================
+// File viewer: raw blob download
+// ===========================================================================
+describe("getFileBlob", () => {
+  it("returns an object URL for the fetched blob", async () => {
+    const blob = new Blob(["png"], { type: "image/png" });
+    const createObjectURL = vi.fn(() => "blob:mock-1");
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL }));
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, blob: () => Promise.resolve(blob) });
+
+    const url = await api.getFileBlob("/repo/a b.png");
+
+    expect(url).toBe("blob:mock-1");
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/fs/raw?path=%2Frepo%2Fa%20b.png");
+  });
+
+  it("throws the server error on failure", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "File too large" }, 413));
+    await expect(api.getFileBlob("/big.bin")).rejects.toThrow("File too large");
+  });
+
+  it("falls back to statusText when the error body is not JSON", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      json: () => Promise.reject(new Error("html")),
+    });
+    await expect(api.getFileBlob("/missing")).rejects.toThrow("Not Found");
+  });
+});
+
+// ===========================================================================
+// Misc endpoints: system checks, tailscale, linear connections, browser start
+// ===========================================================================
+describe("system and integration endpoints", () => {
+  // Each entry: [call, expected URL, expected method]
+  const cases: Array<[string, () => Promise<unknown>, string, string]> = [
+    ["verifyAnthropicKey", () => api.verifyAnthropicKey("sk-x"), "/api/settings/anthropic/verify", "POST"],
+    ["getHostsCheck", () => api.getHostsCheck(), "/api/system/hosts-check", "GET"],
+    ["getClaudeCliCheck", () => api.getClaudeCliCheck(), "/api/system/claude-cli-check", "GET"],
+    ["getClaudeCliCheck(force)", () => api.getClaudeCliCheck(true), "/api/system/claude-cli-check?force=1", "GET"],
+    ["getTailscaleStatus", () => api.getTailscaleStatus(), "/api/tailscale/status", "GET"],
+    ["startTailscaleFunnel", () => api.startTailscaleFunnel(), "/api/tailscale/funnel/start", "POST"],
+    ["stopTailscaleFunnel", () => api.stopTailscaleFunnel(), "/api/tailscale/funnel/stop", "POST"],
+    ["listLinearConnections", () => api.listLinearConnections(), "/api/linear/connections", "GET"],
+    ["createLinearConnection", () => api.createLinearConnection({ name: "n", apiKey: "k" }), "/api/linear/connections", "POST"],
+    ["updateLinearConnection", () => api.updateLinearConnection("c/1", { name: "m" }), "/api/linear/connections/c%2F1", "PUT"],
+    ["deleteLinearConnection", () => api.deleteLinearConnection("c1"), "/api/linear/connections/c1", "DELETE"],
+    ["verifyLinearConnection", () => api.verifyLinearConnection("c1"), "/api/linear/connections/c1/verify", "POST"],
+    ["listLinearOAuthConnections", () => api.listLinearOAuthConnections(), "/api/linear/oauth-connections", "GET"],
+    ["createLinearOAuthConnection", () => api.createLinearOAuthConnection({ name: "n", oauthClientId: "i", oauthClientSecret: "s", webhookSecret: "w" }), "/api/linear/oauth-connections", "POST"],
+    ["updateLinearOAuthConnection", () => api.updateLinearOAuthConnection("o1", { name: "m" }), "/api/linear/oauth-connections/o1", "PUT"],
+    ["deleteLinearOAuthConnection", () => api.deleteLinearOAuthConnection("o1"), "/api/linear/oauth-connections/o1", "DELETE"],
+    ["getLinearOAuthConnectionAuthorizeUrl", () => api.getLinearOAuthConnectionAuthorizeUrl("o1"), "/api/linear/oauth-connections/o1/authorize-url", "GET"],
+    ["getLinearOAuthConnectionAuthorizeUrl(returnTo)", () => api.getLinearOAuthConnectionAuthorizeUrl("o1", "/settings?x=1"), "/api/linear/oauth-connections/o1/authorize-url?returnTo=%2Fsettings%3Fx%3D1", "GET"],
+    ["startBrowser", () => api.startBrowser("s1"), "/api/sessions/s1/browser/start", "POST"],
+  ];
+
+  it.each(cases)("%s targets the right route and verb", async (_name, call, url, method) => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await call();
+    const [calledUrl, opts] = mockFetch.mock.calls[0];
+    expect(calledUrl).toBe(url);
+    expect(opts.method ?? "GET").toBe(method);
+  });
+
+  it("startBrowser sends the url only when provided", async () => {
+    mockFetch.mockResolvedValue(mockResponse({ ok: true }));
+    await api.startBrowser("s1");
+    await api.startBrowser("s1", "http://localhost:3000");
+    expect(mockFetch.mock.calls[0][1].body).toBeUndefined();
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ url: "http://localhost:3000" });
+    mockFetch.mockReset();
   });
 });

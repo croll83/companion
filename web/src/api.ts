@@ -415,6 +415,7 @@ export interface AppSettings {
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
   cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
+  telegramBotTokenConfigured: boolean;
 }
 
 export interface HostsCheckResult {
@@ -460,6 +461,15 @@ export interface LinearConnectionSummary {
   archiveTransition: boolean;
   archiveTransitionStateId: string;
   archiveTransitionStateName: string;
+}
+
+/** Telegram bridge binding for a session (mirrors server TelegramBinding). */
+export interface TelegramBinding {
+  groupId: number;
+  topicId: number | null;
+  allowlist: number[];
+  requireMention: boolean;
+  enabled: boolean;
 }
 
 export interface ArchiveInfo {
@@ -904,6 +914,29 @@ export const api = {
       { name },
     ),
 
+  // ─── Telegram bridge ───────────────────────────────────────────────────────
+  getTelegramStatus: () =>
+    get<{ tokenConfigured: boolean; running: boolean; boundSessionIds: string[] }>("/telegram/status"),
+
+  getTelegramBinding: (sessionId: string) =>
+    get<{ binding: TelegramBinding | null }>(
+      `/sessions/${encodeURIComponent(sessionId)}/telegram`,
+    ),
+
+  setTelegramBinding: (sessionId: string, binding: TelegramBinding) =>
+    put<{ ok: boolean; binding: TelegramBinding }>(
+      `/sessions/${encodeURIComponent(sessionId)}/telegram`,
+      binding,
+    ),
+
+  deleteTelegramBinding: (sessionId: string) =>
+    del<{ ok: boolean; removed: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/telegram`,
+    ),
+
+  resolveTelegramUsername: (username: string) =>
+    post<{ id: number; username: string | null }>("/telegram/resolve-username", { username }),
+
   listDirs: (path?: string) =>
     get<DirListResult>(
       `/fs/list${path ? `?path=${encodeURIComponent(path)}` : ""}`,
@@ -973,6 +1006,7 @@ export const api = {
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
     cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
+    telegramBotToken?: string;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

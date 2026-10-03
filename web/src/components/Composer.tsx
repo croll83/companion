@@ -6,6 +6,7 @@ import { api, type SavedPrompt } from "../api.js";
 import type { ModeOption } from "../utils/backends.js";
 import { ModelSwitcher } from "./ModelSwitcher.js";
 import { EffortSwitcher } from "./EffortSwitcher.js";
+import { UltracodeToggle } from "./UltracodeToggle.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 
@@ -142,7 +143,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       type: "user_message",
       content: msg,
       session_id: sessionId,
-      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
+      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64, name: img.name })) : undefined,
       client_msg_id: clientMsgId,
     });
 
@@ -150,7 +151,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       id: clientMsgId,
       role: "user",
       content: msg,
-      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
+      images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64, name: img.name })) : undefined,
       timestamp: Date.now(),
     });
 
@@ -277,7 +278,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
     if (!files) return;
     const newImages: ImageAttachment[] = [];
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
+      const isPdf = file.type === "application/pdf";
+      if (!file.type.startsWith("image/") && !isPdf) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
       newImages.push({ name: file.name, base64, mediaType });
     }
@@ -294,11 +296,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
     if (!items) return;
     const newImages: ImageAttachment[] = [];
     for (const item of Array.from(items)) {
-      if (!item.type.startsWith("image/")) continue;
+      const isPdf = item.type === "application/pdf";
+      if (!item.type.startsWith("image/") && !isPdf) continue;
       const file = item.getAsFile();
       if (!file) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: `pasted-${Date.now()}.${file.type.split("/")[1]}`, base64, mediaType });
+      const ext = file.type === "application/pdf" ? "pdf" : file.type.split("/")[1];
+      newImages.push({ name: file.name || `pasted-${Date.now()}.${ext}`, base64, mediaType });
     }
     if (newImages.length > 0) {
       e.preventDefault();
@@ -355,24 +359,43 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   const sessionStatus = useStore((s) => s.sessionStatus);
   const isRunning = sessionStatus.get(sessionId) === "running";
+  // Both backends fold new input into the turn already running: Codex through
+  // turn/steer, Claude because the adapter writes the message straight to the
+  // CLI's stdin and the CLI picks it up mid-turn. Nothing is queued on our side.
+  const willSteer = isRunning;
   const canSend = text.trim().length > 0 && isConnected;
+  // While a turn runs the send button stays next to stop: on a phone Enter only
+  // inserts a newline, so without it there is no way to steer mid-turn.
+  const sendTitle = willSteer ? "Add to what it's doing now" : "Send message";
 
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
       <div className="max-w-3xl mx-auto">
-        {/* Image thumbnails */}
+        {/* Attachment previews: image thumbnail, or a file chip for PDFs */}
         {images.length > 0 && (
           <div className="flex items-center gap-2 mb-2 px-3 sm:px-0 flex-wrap">
-            {images.map((img, i) => (
+            {images.map((att, i) => (
               <div key={i} className="relative group">
-                <img
-                  src={`data:${img.mediaType};base64,${img.base64}`}
-                  alt={img.name}
-                  className="w-12 h-12 rounded-lg object-cover border border-cc-border"
-                />
+                {att.mediaType === "application/pdf" ? (
+                  <div
+                    title={att.name}
+                    className="h-12 max-w-[10rem] px-2 rounded-lg border border-cc-border bg-cc-bg flex items-center gap-1.5"
+                  >
+                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4 text-cc-error shrink-0">
+                      <path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h4.09a1.5 1.5 0 0 1 1.06.44l2.91 2.91a1.5 1.5 0 0 1 .44 1.06V14.5A1.5 1.5 0 0 1 12.5 16h-7A1.5 1.5 0 0 1 4 14.5v-13Z" />
+                    </svg>
+                    <span className="text-[10px] text-cc-fg truncate">{att.name}</span>
+                  </div>
+                ) : (
+                  <img
+                    src={`data:${att.mediaType};base64,${att.base64}`}
+                    alt={att.name}
+                    className="w-12 h-12 rounded-lg object-cover border border-cc-border"
+                  />
+                )}
                 <button
                   onClick={() => removeImage(i)}
-                  aria-label="Remove image"
+                  aria-label="Remove attachment"
                   className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity cursor-pointer"
                 >
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
@@ -388,11 +411,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept="image/*,application/pdf"
           multiple
           onChange={handleFileSelect}
           className="hidden"
-          aria-label="Attach images"
+          aria-label="Attach images or PDFs"
         />
 
         {/* Prompt suggestion chips */}
@@ -585,6 +608,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
             <ModelSwitcher sessionId={sessionId} />
             <EffortSwitcher sessionId={sessionId} />
+            <UltracodeToggle sessionId={sessionId} />
 
             <div className="flex-1" />
 
@@ -637,9 +661,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
               onKeyUp={syncCaret}
               onPaste={handlePaste}
               aria-label="Message input"
-              placeholder={isConnected
-                ? "Type a message... (/ + @)"
-                : "Waiting for CLI connection..."}
+              placeholder={!isConnected
+                ? "Waiting for CLI connection..."
+                : willSteer
+                  ? "Add to what it's doing now... (/ + @)"
+                  : "Type a message... (/ + @)"}
               disabled={!isConnected}
               rows={1}
               className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
@@ -649,33 +675,34 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
           {/* Mobile action row (hidden on sm+) */}
           <div className="flex items-center justify-end gap-1 px-3 pb-1 sm:hidden">
-            {/* Send/stop */}
-            {isRunning ? (
+            {/* Stop while running, send always — see sendTitle */}
+            {isRunning && (
               <button
                 onClick={handleInterrupt}
                 className="flex items-center justify-center w-10 h-10 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
                 title="Stop generation"
+                aria-label="Stop generation"
               >
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                   <rect x="3" y="3" width="10" height="10" rx="1" />
                 </svg>
               </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className={`flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 ${
-                  canSend
-                    ? "bg-cc-primary hover:bg-cc-primary-hover active:scale-95 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
-                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                }`}
-                title="Send message"
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                  <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
-                </svg>
-              </button>
             )}
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className={`flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 ${
+                canSend
+                  ? "bg-cc-primary hover:bg-cc-primary-hover active:scale-95 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
+                  : "bg-cc-hover text-cc-muted cursor-not-allowed"
+              }`}
+              title={sendTitle}
+              aria-label={sendTitle}
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+              </svg>
+            </button>
           </div>
 
           {/* Desktop action bar: + bookmark mode spacer model send (hidden on mobile) */}
@@ -750,34 +777,36 @@ export function Composer({ sessionId }: { sessionId: string }) {
             {/* Model switcher */}
             <ModelSwitcher sessionId={sessionId} />
             <EffortSwitcher sessionId={sessionId} />
+            <UltracodeToggle sessionId={sessionId} />
 
-            {/* Send/stop */}
-            {isRunning ? (
+            {/* Stop while running, send always — see sendTitle */}
+            {isRunning && (
               <button
                 onClick={handleInterrupt}
                 className="flex items-center justify-center w-9 h-9 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
                 title="Stop generation"
+                aria-label="Stop generation"
               >
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                   <rect x="3" y="3" width="10" height="10" rx="1" />
                 </svg>
               </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className={`flex items-center justify-center w-9 h-9 rounded-full transition-all duration-200 ${
-                  canSend
-                    ? "bg-cc-primary hover:bg-cc-primary-hover hover:scale-105 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
-                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                }`}
-                title="Send message"
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                  <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
-                </svg>
-              </button>
             )}
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className={`flex items-center justify-center w-9 h-9 rounded-full transition-all duration-200 ${
+                canSend
+                  ? "bg-cc-primary hover:bg-cc-primary-hover hover:scale-105 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
+                  : "bg-cc-hover text-cc-muted cursor-not-allowed"
+              }`}
+              title={sendTitle}
+              aria-label={sendTitle}
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+              </svg>
+            </button>
           </div>
 
         </div>

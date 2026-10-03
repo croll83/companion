@@ -308,14 +308,29 @@ describe("Composer plan mode toggle", () => {
 // ─── Interrupt button ────────────────────────────────────────────────────────
 
 describe("Composer interrupt button", () => {
-  it("interrupt button appears when session is running", () => {
+  it("keeps the send button next to stop while the session is running", () => {
+    // On a phone Enter only inserts a newline, so a send button that vanished
+    // behind stop left no way to steer mid-turn. Both must be there.
     setupMockStore({ sessionStatus: "running" });
     render(<Composer sessionId="s1" />);
 
-    const stopBtn = screen.getAllByTitle("Stop generation")[0];
-    expect(stopBtn).toBeTruthy();
-    // Send button should not be present (both mobile and desktop show stop)
-    expect(screen.queryAllByTitle("Send message")).toHaveLength(0);
+    expect(screen.getAllByTitle("Stop generation")[0]).toBeTruthy();
+    // Claude steers like Codex: the message joins the running turn.
+    expect(screen.getAllByTitle("Add to what it's doing now")[0]).toBeTruthy();
+  });
+
+  it("sends a message while running, which is how mobile steers", () => {
+    setupMockStore({ sessionStatus: "running" });
+    render(<Composer sessionId="s1" />);
+
+    const textarea = screen.getByLabelText("Message input");
+    fireEvent.change(textarea, { target: { value: "also check the logs" } });
+    fireEvent.click(screen.getAllByTitle("Add to what it's doing now")[0]);
+
+    expect(mockSendToSession).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ type: "user_message", content: "also check the logs" }),
+    );
   });
 
   it("interrupt button sends interrupt message", () => {
@@ -782,6 +797,25 @@ describe("Composer toolbar interactions", () => {
     expect(clickSpy).toHaveBeenCalled();
   });
 
+  it("accepts PDFs (not just images) on a Claude session", () => {
+    // The hidden file input must allow application/pdf so PDFs can be attached.
+    const { container } = render(<Composer sessionId="s1" />);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput.getAttribute("accept")).toContain("application/pdf");
+  });
+
+  it("attaching a PDF adds a file chip with the filename", async () => {
+    // Selecting a PDF should add a non-image attachment rendered as a labelled chip.
+    mockReadFileAsBase64.mockResolvedValue({ base64: "pdfb64", mediaType: "application/pdf" });
+    const { container } = render(<Composer sessionId="s1" />);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const pdf = new File(["%PDF-1.7"], "report.pdf", { type: "application/pdf" });
+    fireEvent.change(fileInput, { target: { files: [pdf] } });
+    // The chip shows the filename (no <img> is rendered for a PDF).
+    await waitFor(() => expect(screen.getByText("report.pdf")).toBeTruthy());
+    expect(screen.queryByAltText("report.pdf")).toBeNull();
+  });
+
   it("desktop save prompt button opens save modal with default name", () => {
     // Validates clicking the desktop bookmark icon opens save modal and pre-fills name.
     const { container } = render(<Composer sessionId="s1" />);
@@ -879,7 +913,7 @@ describe("Composer image attachment", () => {
     });
 
     // Remove the image
-    fireEvent.click(screen.getByLabelText("Remove image"));
+    fireEvent.click(screen.getByLabelText("Remove attachment"));
     expect(screen.queryByAltText("test.png")).toBeFalsy();
   });
 });

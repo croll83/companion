@@ -10,6 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readFileSync, readlinkSync, readdirSync } from "node:fs";
 import type { ServerWebSocket, Subprocess } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import type {
@@ -89,7 +90,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     process.env.COMPANION_STDIO_ATTACH_WINDOW_MS || "2000",
   );
   private static readonly INPUT_ACK_TIMEOUT_MS = Number(
-    process.env.COMPANION_STDIO_INPUT_ACK_MS || "6000",
+    process.env.COMPANION_STDIO_INPUT_ACK_MS || "12000",
   );
 
   // Callbacks registered by the bridge via on*() methods
@@ -204,14 +205,18 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.stdioReaderActive = true;
     const decoder = new TextDecoder();
     let buffer = "";
+    let bytesRead = 0;
+    let readerError: unknown = null;
     const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        // Any inbound byte means the CLI is alive and reading stdin — our last
-        // attach input was received, so cancel the re-send self-heal.
-        this.clearInputAckTimer();
+        // NOTE: inbound bytes alone do NOT prove the CLI consumed our input —
+        // it emits unrelated output (control responses, diagnostics) too. The
+        // self-heal is cleared in routeCLIMessage(), on a frame that can only
+        // exist because our user message was taken up.
+        bytesRead += value.byteLength;
         buffer += decoder.decode(value, { stream: true });
         const lastNl = buffer.lastIndexOf("\n");
         if (lastNl === -1) continue;
@@ -222,11 +227,32 @@ export class ClaudeAdapter implements IBackendAdapter {
       const tail = (buffer + decoder.decode()).trim();
       if (tail) this.handleRawMessage(tail);
     } catch (err) {
+      readerError = err;
       console.error(`[claude-adapter] stdio reader error for session ${this.sessionId}:`, err);
     } finally {
       this.stdioReaderActive = false;
       this.clearInputAckTimer();
-      // stdout closed -> the CLI process is exiting -> transport is gone.
+      // Attribution for the "session died mid-answer" class of bug. A clean EOF
+      // on a process that is STILL ALIVE means something closed the stream on
+      // our side — not the CLI finishing — and the user loses the rest of the
+      // answer. Without this we cannot tell the two apart after the fact.
+      // kill(pid, 0) succeeds on a zombie too, so it cannot tell "still running"
+      // from "just exited, not yet reaped" — the exact distinction that matters
+      // here. Read the state letter from /proc instead (R/S/D running, Z zombie).
+      let procState = "unknown";
+      if (proc.pid) {
+        try {
+          const stat = readFileSync(`/proc/${proc.pid}/stat`, "utf8");
+          procState = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] ?? "unknown";
+        } catch { procState = "gone"; }
+      }
+      console.warn(
+        `[claude-adapter] stdio reader ENDED for session ${this.sessionId}: ` +
+        `cause=${readerError ? "error" : "eof"} procState=${procState} ` +
+        `exitCode=${proc.exitCode ?? "n/a"} ` +
+        `bytesRead=${bytesRead} attachedForMs=${Date.now() - this.lastAttachTs} ` +
+        stdoutForensics(proc.pid),
+      );
       if (this.transportMode === "stdio" && this.stdioProc === proc) {
         this.stdioProc = null;
         this.disconnectCb?.();
@@ -337,6 +363,14 @@ export class ClaudeAdapter implements IBackendAdapter {
         continue;
       }
 
+      // Proof the CLI actually consumed our input: `system` (the CLI emits
+      // system/init ONLY after receiving a user message) or any turn output.
+      // Anything else is not an ack — see startStdioReader().
+      const t = (msg as { type?: string }).type;
+      if (t === "system" || t === "assistant" || t === "stream_event" || t === "result") {
+        this.clearInputAckTimer();
+      }
+
       this.routeCLIMessage(msg);
     }
   }
@@ -356,6 +390,12 @@ export class ClaudeAdapter implements IBackendAdapter {
 
       case "set_model":
         return this.handleOutgoingSetModel(msg.model);
+
+      case "set_ultracode":
+        return this.handleOutgoingSetUltracode(msg.enabled);
+
+      case "set_effort":
+        return this.handleOutgoingSetEffort(msg.effort);
 
       case "set_permission_mode":
         return this.handleOutgoingSetPermissionMode(msg.mode);
@@ -404,12 +444,22 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Build content: if images are present, use content block array; otherwise plain string
     let content: string | unknown[];
     if (msg.images?.length) {
+      // The `images` field carries any base64 attachment. PDFs become
+      // `document` blocks (Claude reads them natively); everything else is an
+      // `image` block. This lets the composer attach PDFs, not just images.
       const blocks: unknown[] = [];
-      for (const img of msg.images) {
-        blocks.push({
-          type: "image",
-          source: { type: "base64", media_type: img.media_type, data: img.data },
-        });
+      for (const att of msg.images) {
+        if (att.media_type === "application/pdf") {
+          blocks.push({
+            type: "document",
+            source: { type: "base64", media_type: "application/pdf", data: att.data },
+          });
+        } else {
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: att.media_type, data: att.data },
+          });
+        }
       }
       blocks.push({ type: "text", text: msg.content });
       content = blocks;
@@ -478,6 +528,91 @@ export class ClaudeAdapter implements IBackendAdapter {
       request: { subtype: "interrupt" },
     });
     this.sendToBackend(ndjson);
+    return true;
+  }
+
+  /**
+   * Change runtime flag settings and report what the CLI actually applied.
+   *
+   * apply_flag_settings answers "success" even for values it ignores — probed
+   * on CLI 2.1.288: `effortLevel: "bogus"` returns success and leaves the
+   * effort untouched, and ultracode returns success on Haiku too. So the
+   * answer to apply is not a confirmation. The confirmation is a get_settings
+   * read-back of `applied`, which is what gets reported to the browser.
+   */
+  private applyFlagSettingsAndConfirm(
+    settings: Record<string, unknown>,
+    report: (applied: { effort?: string; ultracode?: boolean }, error?: string) => void,
+  ): void {
+    const readBack = (applyError?: string) => {
+      this.sendControlRequest(
+        { subtype: "get_settings" },
+        {
+          subtype: "get_settings",
+          resolve: (response) => {
+            const applied = (response as { applied?: { effort?: unknown; ultracode?: unknown } }).applied ?? {};
+            report(
+              {
+                effort: typeof applied.effort === "string" ? applied.effort : undefined,
+                ultracode: typeof applied.ultracode === "boolean" ? applied.ultracode : undefined,
+              },
+              applyError,
+            );
+          },
+          reject: (error) => report({}, applyError ?? `could not read the settings back (${error})`),
+        },
+      );
+    };
+    this.sendControlRequest(
+      { subtype: "apply_flag_settings", settings },
+      { subtype: "apply_flag_settings", resolve: () => readBack(), reject: (error) => readBack(error) },
+    );
+  }
+
+  /**
+   * Toggle ultracode on the live CLI, without a relaunch. The browser only
+   * learns the state the CLI reports as applied; `ultracodeConfirmedAt` moves
+   * on every answer so the UI stops waiting even when nothing changed.
+   */
+  private handleOutgoingSetUltracode(enabled: boolean): boolean {
+    this.applyFlagSettingsAndConfirm({ ultracode: enabled }, (applied, error) => {
+      if (error || applied.ultracode !== enabled) {
+        const why = error ?? `the CLI kept it ${applied.ultracode ? "on" : "off"}`;
+        this.browserMessageCb?.({ type: "error", message: `Ultracode not changed: ${why}` });
+      }
+      this.browserMessageCb?.({
+        type: "session_update",
+        session: {
+          ...(applied.ultracode !== undefined ? { ultracode: applied.ultracode } : {}),
+          ultracodeConfirmedAt: Date.now(),
+        },
+      });
+    });
+    return true;
+  }
+
+  /**
+   * Change reasoning effort on the live CLI, without a relaunch.
+   *
+   * This used to kill and respawn the CLI with a new --effort, reconnecting the
+   * session for every change. The CLI accepts effort at runtime through the same
+   * flag-settings channel as ultracode ("only effortLevel and ultracode can" be
+   * changed this way); --effort still seeds it at launch.
+   */
+  private handleOutgoingSetEffort(effort: string): boolean {
+    this.applyFlagSettingsAndConfirm({ effortLevel: effort }, (applied, error) => {
+      if (error || applied.effort !== effort) {
+        const why = error ?? `the CLI is still on ${applied.effort ?? "an unknown level"}`;
+        this.browserMessageCb?.({ type: "error", message: `Effort not changed: ${why}` });
+      }
+      this.browserMessageCb?.({
+        type: "session_update",
+        session: {
+          ...(applied.effort !== undefined ? { effort: applied.effort } : {}),
+          effortConfirmedAt: Date.now(),
+        },
+      });
+    });
     return true;
   }
 
@@ -679,6 +814,38 @@ export class ClaudeAdapter implements IBackendAdapter {
         uuid: m.uuid,
         session_id: m.session_id,
       });
+      return;
+    }
+
+    // The CLI's own answer to "is there still work in flight?". Companion used
+    // to drop both, so a turn that ended with a terraform plan or a workflow
+    // running in the background looked idle, and the idle-kill took the CLI —
+    // and the background work with it — 30 minutes later.
+    if ((msg.subtype as string) === "background_tasks_changed") {
+      const tasks = (msg as unknown as { tasks?: unknown }).tasks;
+      if (Array.isArray(tasks)) {
+        this.browserMessageCb?.({
+          type: "background_tasks",
+          tasks: tasks
+            .filter((t): t is { task_id: string } => typeof (t as { task_id?: unknown })?.task_id === "string")
+            .map((t) => {
+              const r = t as { task_id: string; task_type?: unknown; description?: unknown; ambient?: unknown };
+              return {
+                task_id: r.task_id,
+                task_type: typeof r.task_type === "string" ? r.task_type : "unknown",
+                description: typeof r.description === "string" ? r.description : "",
+                ...(r.ambient === true ? { ambient: true } : {}),
+              };
+            }),
+        });
+      }
+      return;
+    }
+    if ((msg.subtype as string) === "session_state_changed") {
+      const state = (msg as unknown as { state?: unknown }).state;
+      if (state === "idle" || state === "running" || state === "requires_action") {
+        this.browserMessageCb?.({ type: "cli_session_state", state });
+      }
       return;
     }
 
@@ -901,6 +1068,7 @@ export class ClaudeAdapter implements IBackendAdapter {
       console.warn(
         `[claude-adapter] Control request ${pending.subtype} failed: ${msg.response.error}`,
       );
+      pending.reject?.(String(msg.response.error ?? "refused by the CLI"));
       return;
     }
     pending.resolve(msg.response.response ?? {});
@@ -956,7 +1124,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   private sendControlRequest(
     request: Record<string, unknown>,
-    onResponse?: { subtype: string; resolve: (response: unknown) => void },
+    onResponse?: PendingControlRequest,
   ): void {
     const requestId = randomUUID();
     if (onResponse) {
@@ -1057,4 +1225,46 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.inputAckTimer = null;
     }
   }
+}
+
+/**
+ * Who closed the CLI's stdout? (Forensics for "stdout EOF on a live CLI".)
+ *
+ * Observed repeatedly: the read side reaches EOF while the CLI is still alive
+ * and nobody signalled it; Companion then relaunches and the SIGTERM kills its
+ * running tools (the "exit 137" an agent sees on resume). The CLI's stdout is a
+ * socket, and a socket can be shut down by ANY process holding it, not only the
+ * CLI. This records, at the moment of EOF: whether the CLI still holds its
+ * stdout, which other processes hold the same socket, and what the CLI is
+ * blocked on — enough to tell a CLI that closed its own stdout from one whose
+ * socket was shut down underneath it.
+ */
+function stdoutForensics(pid: number | undefined): string {
+  if (!pid) return "fd1=n/a";
+  const read = (path: string): string | null => {
+    try { return readFileSync(path, "utf8").trim(); } catch { return null; }
+  };
+  let fd1: string | null = null;
+  try { fd1 = readlinkSync(`/proc/${pid}/fd/1`); } catch { fd1 = null; }
+  const holders: string[] = [];
+  if (fd1?.startsWith("socket:")) {
+    try {
+      for (const entry of readdirSync("/proc")) {
+        if (!/^\d+$/.test(entry) || entry === String(pid)) continue;
+        let fds: string[];
+        try { fds = readdirSync(`/proc/${entry}/fd`); } catch { continue; }
+        for (const fd of fds) {
+          let link: string;
+          try { link = readlinkSync(`/proc/${entry}/fd/${fd}`); } catch { continue; }
+          if (link === fd1) {
+            const cmd = (read(`/proc/${entry}/cmdline`) ?? "").replace(/\0/g, " ").slice(0, 60);
+            holders.push(`${entry}:fd${fd}:${cmd}`);
+          }
+        }
+      }
+    } catch { /* best effort */ }
+  }
+  const wchan = read(`/proc/${pid}/wchan`) ?? "n/a";
+  const children = (read(`/proc/${pid}/task/${pid}/children`) ?? "").split(/\s+/).filter(Boolean).length;
+  return `fd1=${fd1 ?? "closed"} sharedWith=[${holders.join(" ; ")}] wchan=${wchan} children=${children}`;
 }

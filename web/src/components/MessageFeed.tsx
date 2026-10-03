@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useState, useCallback } from "react";
 import { useStore } from "../store.js";
+import { loadMoreHistory } from "../ws.js";
 import { api } from "../api.js";
 import { MessageBubble } from "./MessageBubble.js";
 import {
@@ -596,6 +597,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const sessionStatus = useStore((s) => s.sessionStatus.get(sessionId));
   const toolProgress = useStore((s) => s.toolProgress.get(sessionId));
   const toolActivity = useStore((s) => s.toolActivity.get(sessionId));
+  const historyWindow = useStore((s) => s.historyWindow?.get(sessionId));
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
@@ -660,8 +662,13 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   }, [sessionId, resumeSourceSessionId]);
 
   const totalEntries = grouped.length;
-  const hasMore = totalEntries > visibleCount;
-  const visibleEntries = hasMore
+  const localHasMore = totalEntries > visibleCount;
+  // The server now sends only the tail of a long conversation, so "older" can
+  // also mean "not downloaded yet".
+  const serverStartIndex = historyWindow?.startIndex ?? 0;
+  const serverHasMore = serverStartIndex > 0;
+  const hasMore = localHasMore || serverHasMore;
+  const visibleEntries = localHasMore
     ? grouped.slice(totalEntries - visibleCount)
     : grouped;
   const hiddenCount = totalEntries - visibleEntries.length;
@@ -669,7 +676,13 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const handleLoadMore = useCallback(() => {
     const el = containerRef.current;
     const prevHeight = el?.scrollHeight ?? 0;
-    setVisibleCount((c) => c + FEED_PAGE_SIZE);
+    if (hiddenCount > 0) {
+      setVisibleCount((c) => c + FEED_PAGE_SIZE);
+    } else if (serverStartIndex > 0) {
+      // Everything downloaded is on screen — pull the previous page.
+      loadMoreHistory(sessionId, serverStartIndex);
+      setVisibleCount((c) => c + FEED_PAGE_SIZE);
+    }
     // Preserve scroll position after DOM updates
     requestAnimationFrame(() => {
       if (el) {
@@ -677,7 +690,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
         el.scrollTop += newHeight - prevHeight;
       }
     });
-  }, []);
+  }, [hiddenCount, serverStartIndex, sessionId]);
 
   const loadResumeHistoryPage = useCallback(
     async (options: { preserveScroll?: boolean } = {}) => {
@@ -984,8 +997,17 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
                 >
                   <path d="M8 3v10M3 8l5-5 5 5" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                Load {Math.min(FEED_PAGE_SIZE, hiddenCount)} more
-                <span className="text-cc-muted/50 tabular-nums">({hiddenCount} hidden)</span>
+                {hiddenCount > 0 ? (
+                  <>
+                    Load {Math.min(FEED_PAGE_SIZE, hiddenCount)} more
+                    <span className="text-cc-muted/50 tabular-nums">({hiddenCount} hidden)</span>
+                  </>
+                ) : (
+                  <>
+                    Load older messages
+                    <span className="text-cc-muted/50 tabular-nums">({serverStartIndex} earlier)</span>
+                  </>
+                )}
               </button>
             </div>
           )}

@@ -6,12 +6,12 @@ import type { SessionState, SdkSessionInfo } from "../types.js";
 // ─── Mock setup ──────────────────────────────────────────────────────────────
 
 const mockConnectSession = vi.fn();
-const mockConnectAllSessions = vi.fn();
+const mockSyncSessionSockets = vi.fn();
 const mockDisconnectSession = vi.fn();
 
 vi.mock("../ws.js", () => ({
   connectSession: (...args: unknown[]) => mockConnectSession(...args),
-  connectAllSessions: (...args: unknown[]) => mockConnectAllSessions(...args),
+  syncSessionSockets: (...args: unknown[]) => mockSyncSessionSockets(...args),
   disconnectSession: (...args: unknown[]) => mockDisconnectSession(...args),
 }));
 
@@ -22,6 +22,7 @@ const mockApi = {
   unarchiveSession: vi.fn().mockResolvedValue({}),
   renameSession: vi.fn().mockResolvedValue({}),
   getArchiveInfo: vi.fn().mockResolvedValue({ hasLinkedIssue: false, issueNotDone: false }),
+  getTelegramStatus: vi.fn().mockResolvedValue({ tokenConfigured: false, running: false, boundSessionIds: [] }),
 };
 
 vi.mock("../api.js", () => ({
@@ -32,6 +33,7 @@ vi.mock("../api.js", () => ({
     unarchiveSession: (...args: unknown[]) => mockApi.unarchiveSession(...args),
     renameSession: (...args: unknown[]) => mockApi.renameSession(...args),
     getArchiveInfo: (...args: unknown[]) => mockApi.getArchiveInfo(...args),
+    getTelegramStatus: (...args: unknown[]) => mockApi.getTelegramStatus(...args),
   },
 }));
 
@@ -881,7 +883,7 @@ describe("Sidebar", () => {
 
   it("polls for SDK sessions on mount and hydrates session names", async () => {
     // Verifies that the Sidebar's useEffect poll() fetches sessions from the
-    // API, calls setSdkSessions + connectAllSessions, and hydrates names from
+    // API, calls setSdkSessions, and hydrates names from
     // the server response when the store has a random (two-word) name.
     const serverSessions = [
       makeSdkSession("s1", { name: "Server Name" }),
@@ -902,7 +904,9 @@ describe("Sidebar", () => {
     await vi.waitFor(() => {
       expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
     });
-    expect(mockConnectAllSessions).toHaveBeenCalledWith(serverSessions);
+    // Polling re-evaluates which sockets to hold (focused + live CLIs) instead
+    // of opening one per session, which made every refresh replay every history.
+    expect(mockSyncSessionSockets).toHaveBeenCalled();
     expect(mockState.setSessionName).toHaveBeenCalledWith("s1", "Server Name");
     // Since the store had a random two-word name, markRecentlyRenamed should fire
     expect(mockState.markRecentlyRenamed).toHaveBeenCalledWith("s1");

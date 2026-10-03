@@ -180,6 +180,7 @@ function createMockBridge() {
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
     notifyCliDisconnected: vi.fn(),
+    resyncCliConnected: vi.fn(),
   } as any;
 }
 
@@ -345,10 +346,11 @@ describe("SessionOrchestrator", () => {
       await Promise.resolve();
     });
 
-    it("effort-change suppresses the cli_disconnected from the old process exit", async () => {
+    it("effort-change (Codex) suppresses the cli_disconnected from the old process exit", async () => {
+      // Only Codex relaunches for effort; Claude changes it in place.
       deps.launcher.getSession.mockReturnValue({
         archived: false,
-        backendType: "claude",
+        backendType: "codex",
         effort: "low",
         state: "running",
       } as any);
@@ -367,6 +369,26 @@ describe("SessionOrchestrator", () => {
       resolveRelaunch();
       await Promise.resolve();
       await Promise.resolve();
+    });
+
+    it("effort-change does not relaunch a Claude session", async () => {
+      deps.launcher.getSession.mockReturnValue({
+        archived: false, backendType: "claude", effort: "low", state: "running",
+      } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:effort-change", { sessionId: "s1", effort: "high" });
+      await Promise.resolve();
+
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("effort-applied records the level for the next launch, without relaunching", () => {
+      orchestrator.initialize();
+      companionBus.emit("session:effort-applied", { sessionId: "s1", effort: "max" });
+
+      expect(deps.launcher.setEffort).toHaveBeenCalledWith("s1", "max");
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
     });
 
     it("git info ready callback starts PR polling", () => {
@@ -1121,6 +1143,46 @@ describe("SessionOrchestrator", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toContain("Container removed externally");
+    });
+
+    // Reconnect pressed on a browser showing stale "disconnected" state must
+    // not SIGTERM a CLI that is connected and in the middle of real work.
+    function workingSession() {
+      return {
+        pendingPermissions: new Map(),
+        openToolCalls: new Set<string>(),
+        backgroundTasks: new Map([["b1", { type: "local_bash", description: "terraform plan", ambient: false }]]),
+        stateMachine: { phase: "ready", mustTransition: vi.fn(() => true) },
+      };
+    }
+
+    it("does not kill a connected CLI with work in flight — resyncs the browser instead", async () => {
+      deps.wsBridge.isCliConnected.mockReturnValue(true);
+      deps.wsBridge.getSession.mockReturnValue(workingSession());
+
+      const result = await orchestrator.relaunchSession("s1");
+
+      expect(result).toEqual({ ok: true, alreadyRunning: true });
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+      expect(deps.wsBridge.resyncCliConnected).toHaveBeenCalledWith("s1");
+    });
+
+    it("still relaunches a working CLI when forced (deliberate wedge recovery)", async () => {
+      deps.wsBridge.isCliConnected.mockReturnValue(true);
+      deps.wsBridge.getSession.mockReturnValue(workingSession());
+
+      await orchestrator.relaunchSession("s1", { force: true });
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+    });
+
+    it("relaunches a connected CLI that is idle (the user asked for a restart)", async () => {
+      deps.wsBridge.isCliConnected.mockReturnValue(true);
+      deps.wsBridge.getSession.mockReturnValue({ ...workingSession(), backgroundTasks: new Map() });
+
+      await orchestrator.relaunchSession("s1");
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
     });
   });
 

@@ -20,6 +20,9 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     backendType: "claude",
     backendAdapter: null,
     browserSockets: new Set(),
+  openToolCalls: new Set<string>(),
+  backgroundTasks: new Map(),
+  lastFocusTs: 0,
     state: {
       session_id: "test-session",
       model: "claude-sonnet-4-6",

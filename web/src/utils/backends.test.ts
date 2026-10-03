@@ -5,6 +5,7 @@ import {
   getModesForBackend,
   getAgentModesForBackend,
   getDefaultModel,
+  DEFAULT_CLAUDE_MODEL,
   getDefaultMode,
   getDefaultAgentMode,
   CLAUDE_MODELS,
@@ -95,8 +96,17 @@ describe("getModesForBackend", () => {
 });
 
 describe("getDefaultModel", () => {
-  it("returns first claude model for claude backend", () => {
-    expect(getDefaultModel("claude")).toBe(CLAUDE_MODELS[0].value);
+  it("returns the explicit default claude model (decoupled from list order)", () => {
+    // The default is intentionally NOT CLAUDE_MODELS[0]: the list can be
+    // reordered (e.g. Fable 5 shown first) without changing the default.
+    expect(getDefaultModel("claude")).toBe(DEFAULT_CLAUDE_MODEL);
+    expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-5-5");
+  });
+
+  it("keeps the default model selectable in the picker", () => {
+    // A default missing from CLAUDE_MODELS leaves the dropdown showing nothing
+    // for every new session.
+    expect(CLAUDE_MODELS.map((m) => m.value)).toContain(DEFAULT_CLAUDE_MODEL);
   });
 
   it("returns first codex model for codex backend", () => {
@@ -135,9 +145,11 @@ describe("getDefaultAgentMode", () => {
 });
 
 describe("static model/mode lists", () => {
-  it("has codex models with GPT-5.x slugs", () => {
+  it("has codex models with gpt- slugs", () => {
+    // Pinned to the vendor prefix, not a generation: the list moves with each
+    // release (GPT-6 arrived 2026-09), and a generation check would fail on it.
     for (const m of CODEX_MODELS) {
-      expect(m.value).toMatch(/^gpt-5/);
+      expect(m.value).toMatch(/^gpt-/);
     }
   });
 
