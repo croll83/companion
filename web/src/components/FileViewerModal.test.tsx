@@ -99,4 +99,89 @@ describe("FileViewerModal", () => {
     await waitFor(() => expect(screen.getByTestId("md")).not.toBeNull());
     expect(screen.getByTestId("md").closest(".markdown-body")).not.toBeNull();
   });
+  it("downloads through an authenticated blob fetch and revokes the temporary URL", async () => {
+    // Binary files have no blob yet: download must fetch one (auth headers),
+    // click a synthetic <a download>, and revoke the URL later to avoid a leak.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      getFileBlob.mockResolvedValue("blob:dl");
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      render(<FileViewerModal />);
+      open("/h/archive.zip");
+      await waitFor(() => expect(screen.getByText(/can't be previewed/)).not.toBeNull());
+      fireEvent.click(screen.getByText("Download"));
+      await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
+      const anchor = clickSpy.mock.instances[0] as unknown as HTMLAnchorElement;
+      expect(anchor.download).toBe("archive.zip");
+      expect(anchor.href).toBe("blob:dl");
+      expect(getFileBlob).toHaveBeenCalledWith("/h/archive.zip");
+      // The anchor is removed right after the click.
+      expect(document.querySelector("a[download]")).toBeNull();
+      expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(10_000);
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:dl");
+      clickSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reuses the already-loaded image blob for download without refetching or revoking it", async () => {
+    // The preview still needs the blob URL, so download must not revoke it.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      getFileBlob.mockResolvedValue("blob:img");
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      const { container } = render(<FileViewerModal />);
+      open("/h/pic.png");
+      await waitFor(() => expect(container.querySelector("img")).not.toBeNull());
+      fireEvent.click(screen.getByText("Download"));
+      await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
+      expect(getFileBlob).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(10_000);
+      expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+      clickSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows a download failure in the alert area", async () => {
+    getFileBlob.mockRejectedValue(new Error("401 Unauthorized"));
+    render(<FileViewerModal />);
+    open("/h/archive.zip");
+    await waitFor(() => expect(screen.getByText(/can't be previewed/)).not.toBeNull());
+    fireEvent.click(screen.getByText("Download"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("401 Unauthorized"));
+  });
+
+  it("falls back to a generic message when a non-Error is thrown", async () => {
+    readFile.mockRejectedValue("boom");
+    render(<FileViewerModal />);
+    open("/h/a.txt");
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Cannot open file"));
+  });
+
+  it("revokes an image blob that arrives after the viewer was closed", async () => {
+    // Closing before the fetch resolves must not leak the object URL.
+    let resolve!: (u: string) => void;
+    getFileBlob.mockReturnValue(new Promise<string>((r) => { resolve = r; }));
+    render(<FileViewerModal />);
+    open("/h/pic.png");
+    await waitFor(() => expect(getFileBlob).toHaveBeenCalled());
+    useStore.getState().closeFileViewer();
+    resolve("blob:late");
+    await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:late"));
+  });
+
+  it("closes when the backdrop is clicked but not when the dialog body is", async () => {
+    readFile.mockResolvedValue({ path: "/h/a.md", content: "x" });
+    render(<FileViewerModal />);
+    open("/h/a.md");
+    await waitFor(() => expect(screen.getByRole("dialog")).not.toBeNull());
+    fireEvent.click(screen.getByRole("dialog"));
+    expect(useStore.getState().viewerFilePath).toBe("/h/a.md");
+    fireEvent.click(screen.getByRole("presentation"));
+    await waitFor(() => expect(useStore.getState().viewerFilePath).toBeNull());
+  });
 });

@@ -34,6 +34,7 @@ interface MockStoreState {
   setUpdateInfo: ReturnType<typeof vi.fn>;
   setUpdateOverlayActive: ReturnType<typeof vi.fn>;
   setEditorTabEnabled: ReturnType<typeof vi.fn>;
+  currentSessionId?: string | null;
 }
 
 let mockState: MockStoreState;
@@ -1273,5 +1274,449 @@ describe("SettingsPage", () => {
 
     const results = await axe(providersSection!);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// ─── Additional coverage: navigation, bridge mode, tokens, error paths ────────
+describe("SettingsPage – extended behaviour", () => {
+  const baseSettings = {
+    anthropicApiKeyConfigured: true,
+    anthropicModel: "claude-sonnet-4-6",
+    claudeCodeOAuthTokenConfigured: false,
+    openaiApiKeyConfigured: false,
+    telegramBotTokenConfigured: false,
+    updateChannel: "stable",
+    publicUrl: "",
+  };
+
+  async function renderLoaded(overrides: Record<string, unknown> = {}) {
+    mockApi.getSettings.mockResolvedValueOnce({ ...baseSettings, ...overrides });
+    const utils = render(<SettingsPage />);
+    await screen.findByText(/Anthropic key (not )?configured/);
+    return utils;
+  }
+
+  // The Back button returns to the active session when there is one, not home.
+  it("navigates back to the current session when one is active", async () => {
+    mockState = createMockState({ currentSessionId: "sess-42" });
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(window.location.hash).toBe("#/session/sess-42");
+  });
+
+  // Clicking a category scrolls its section into view and highlights the nav item.
+  it("scrolls to a section and marks it active when a nav item is clicked", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    await renderLoaded();
+    const navs = screen.getAllByRole("navigation", { name: "Settings categories" });
+    // Both the mobile and the desktop nav drive the same handler.
+    for (const nav of navs) {
+      const btn = Array.from(nav.querySelectorAll("button")).find((b) => b.textContent === "Telemetry")!;
+      fireEvent.click(btn);
+      expect(btn.className).toContain("text-cc-primary");
+    }
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+  });
+
+  // The IntersectionObserver callback picks the topmost intersecting section
+  // and ignores non-intersecting entries.
+  it("highlights the topmost visible section reported by the IntersectionObserver", async () => {
+    let captured: IntersectionObserverCallback | null = null;
+    const Original = (globalThis as Record<string, unknown>).IntersectionObserver;
+    class CapturingObserver {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+      constructor(cb: IntersectionObserverCallback) { captured = cb; }
+    }
+    (globalThis as Record<string, unknown>).IntersectionObserver = CapturingObserver;
+    try {
+      await renderLoaded();
+      expect(captured).not.toBeNull();
+      const entry = (id: string, top: number, isIntersecting = true) =>
+        ({ isIntersecting, target: document.getElementById(id), boundingClientRect: { top } }) as unknown as IntersectionObserverEntry;
+      act(() => {
+        captured!([
+          entry("updates", 300),
+          entry("providers", 50),
+          entry("general", -500, false),
+        ], {} as IntersectionObserver);
+      });
+      const desktopNav = screen.getAllByRole("navigation", { name: "Settings categories" })[1];
+      const providersBtn = Array.from(desktopNav.querySelectorAll("button")).find((b) => b.textContent === "Providers")!;
+      const generalBtn = Array.from(desktopNav.querySelectorAll("button")).find((b) => b.textContent === "General")!;
+      expect(providersBtn.className).toContain("text-cc-primary");
+      expect(generalBtn.className).not.toContain("text-cc-primary");
+
+      // No intersecting entries → active section unchanged.
+      act(() => { captured!([entry("updates", 0, false)], {} as IntersectionObserver); });
+      expect(providersBtn.className).toContain("text-cc-primary");
+    } finally {
+      (globalThis as Record<string, unknown>).IntersectionObserver = Original;
+    }
+  });
+
+  it("toggles the diff base between last commit and default branch", async () => {
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: /Diff compare against/ }));
+    expect(mockState.setDiffBase).toHaveBeenCalledWith("default-branch");
+  });
+
+  it("toggles the diff base back to last commit from default branch", async () => {
+    mockState = createMockState({ diffBase: "default-branch" });
+    await renderLoaded();
+    expect(screen.getByText("Default branch")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Diff compare against/ }));
+    expect(mockState.setDiffBase).toHaveBeenCalledWith("last-commit");
+  });
+
+  // ─── CLI bridge mode ───────────────────────────────────────────────
+
+  // A server-provided bridge mode is reflected in the select on load.
+  it("loads the CLI bridge mode from settings", async () => {
+    await renderLoaded({ cliBridgeMode: "tlsLoopback" });
+    expect((screen.getByLabelText("CLI bridge mode") as HTMLSelectElement).value).toBe("tlsLoopback");
+  });
+
+  it.each(["stdio", "jsonHandoff", "tlsLoopback", "loopback"] as const)(
+    "persists bridge mode %s when selected",
+    async (mode) => {
+      await renderLoaded({ cliBridgeMode: mode === "loopback" ? "stdio" : "loopback" });
+      fireEvent.change(screen.getByLabelText("CLI bridge mode"), { target: { value: mode } });
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ cliBridgeMode: mode }));
+      expect((screen.getByLabelText("CLI bridge mode") as HTMLSelectElement).value).toBe(mode);
+    },
+  );
+
+  // A failed save rolls the select back to the previous mode.
+  it("reverts the bridge mode when saving fails", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("nope"));
+    await renderLoaded({ cliBridgeMode: "jsonHandoff" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "stdio" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    await waitFor(() => expect(select.value).toBe("jsonHandoff"));
+  });
+
+  // ─── Webhooks / public URL ─────────────────────────────────────────
+
+  it("shows the server error when saving the public URL fails", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("bad url"));
+    await renderLoaded();
+    fireEvent.change(screen.getByLabelText("Public URL"), { target: { value: "https://x.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Public URL" }));
+    expect(await screen.findByText("bad url")).toBeInTheDocument();
+    expect(mockState.setPublicUrl).not.toHaveBeenCalledWith("https://x.example");
+  });
+
+  // The "Saved!" confirmation on the public URL button clears itself.
+  it("clears the public URL saved confirmation after a delay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockApi.updateSettings.mockResolvedValueOnce({ ...baseSettings, publicUrl: "https://x.example" });
+      await renderLoaded();
+      fireEvent.change(screen.getByLabelText("Public URL"), { target: { value: "https://x.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save Public URL" }));
+      expect(await screen.findByRole("button", { name: "Saved!" })).toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(1900); });
+      expect(screen.getByRole("button", { name: "Save Public URL" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ─── Authentication ────────────────────────────────────────────────
+
+  it("copies the auth token to the clipboard and shows a transient confirmation", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await renderLoaded();
+      const copyBtn = screen.getByTitle("Copy token to clipboard");
+      await waitFor(() => expect(copyBtn).not.toBeDisabled());
+      fireEvent.click(copyBtn);
+      expect(writeText).toHaveBeenCalledWith("abc123testtoken");
+      expect(await screen.findByText("Copied")).toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(1600); });
+      expect(screen.getByTitle("Copy token to clipboard").textContent).toBe("Copy");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The QR picker switches the displayed QR/URL when another address tab is chosen.
+  it("switches between QR address tabs", async () => {
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Show QR Code" }));
+    await screen.findByAltText("QR code for LAN login");
+    fireEvent.click(screen.getByRole("button", { name: "Tailscale" }));
+    expect(screen.getByAltText("QR code for Tailscale login")).toHaveAttribute("src", "data:image/png;base64,TS_QR");
+    expect(screen.getByText("http://100.118.112.23:3456")).toBeInTheDocument();
+  });
+
+  it("explains when no remote addresses are available for a QR code", async () => {
+    mockApi.getAuthQr.mockResolvedValueOnce({ qrCodes: [] });
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Show QR Code" }));
+    expect(await screen.findByText(/No remote addresses detected/)).toBeInTheDocument();
+  });
+
+  // A failing QR request leaves the button available so the user can retry.
+  it("keeps the Show QR Code button after a QR generation failure", async () => {
+    mockApi.getAuthQr.mockRejectedValueOnce(new Error("qr fail"));
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Show QR Code" }));
+    await waitFor(() => expect(mockApi.getAuthQr).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: "Show QR Code" })).not.toBeDisabled();
+  });
+
+  it("keeps the old token when regeneration fails", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockApi.regenerateAuthToken.mockRejectedValueOnce(new Error("regen fail"));
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate Token" }));
+    await waitFor(() => expect(mockApi.regenerateAuthToken).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: "Regenerate Token" })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(screen.getByText("abc123testtoken")).toBeInTheDocument();
+  });
+
+  // ─── Notifications ─────────────────────────────────────────────────
+
+  // Denied permission must not flip desktop alerts on.
+  it("does not enable desktop alerts when permission is denied", async () => {
+    const requestPermission = vi.fn().mockResolvedValue("denied");
+    vi.stubGlobal("Notification", { permission: "default", requestPermission });
+    try {
+      await renderLoaded();
+      fireEvent.click(screen.getByRole("button", { name: /Desktop Alerts/i }));
+      await waitFor(() => expect(requestPermission).toHaveBeenCalled());
+      expect(mockState.setNotificationDesktop).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("disables desktop alerts without prompting when they are on", async () => {
+    const requestPermission = vi.fn();
+    vi.stubGlobal("Notification", { permission: "granted", requestPermission });
+    mockState = createMockState({ notificationDesktop: true });
+    try {
+      await renderLoaded();
+      fireEvent.click(screen.getByRole("button", { name: /Desktop Alerts/i }));
+      await waitFor(() => expect(mockState.setNotificationDesktop).toHaveBeenCalledWith(false));
+      expect(requestPermission).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // ─── Providers ─────────────────────────────────────────────────────
+
+  // Masked dots return on blur when nothing was typed, for every secret field.
+  it("restores masked placeholders on blur for configured secrets", async () => {
+    await renderLoaded({
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      telegramBotTokenConfigured: true,
+    });
+    for (const label of ["Claude Code OAuth Token", "OpenAI API Key (Codex)", "Telegram Bot Token", "Anthropic API Key"]) {
+      const input = screen.getByLabelText(label) as HTMLInputElement;
+      expect(input.value).toBe("••••••••••••••••");
+      fireEvent.focus(input);
+      expect(input.value).toBe("");
+      fireEvent.blur(input);
+      expect(input.value).toBe("••••••••••••••••");
+    }
+  });
+
+  it("saves only the OpenAI key when just that field is filled", async () => {
+    mockApi.updateSettings.mockResolvedValueOnce({ ...baseSettings, openaiApiKeyConfigured: true });
+    await renderLoaded();
+    fireEvent.change(screen.getByLabelText("OpenAI API Key (Codex)"), { target: { value: " sk-x " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Provider Settings" }));
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ openaiApiKey: "sk-x" }));
+    expect(await screen.findByText("OpenAI key configured")).toBeInTheDocument();
+  });
+
+  it("shows provider save errors and clears the success banner after a delay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockApi.updateSettings
+        .mockRejectedValueOnce(new Error("provider down"))
+        .mockResolvedValueOnce({ ...baseSettings, claudeCodeOAuthTokenConfigured: true });
+      await renderLoaded();
+      fireEvent.change(screen.getByLabelText("Claude Code OAuth Token"), { target: { value: "tok" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save Provider Settings" }));
+      expect(await screen.findByText("provider down")).toBeInTheDocument();
+
+      // Retry succeeds: the error disappears and the banner auto-dismisses.
+      fireEvent.click(screen.getByRole("button", { name: "Save Provider Settings" }));
+      expect(await screen.findByText("Provider settings saved.")).toBeInTheDocument();
+      expect(screen.queryByText("provider down")).not.toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(1900); });
+      expect(screen.queryByText("Provider settings saved.")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ─── Telegram bot token ────────────────────────────────────────────
+
+  it("saves a trimmed Telegram bot token and confirms briefly", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockApi.updateSettings.mockResolvedValueOnce({ ...baseSettings, telegramBotTokenConfigured: true });
+      await renderLoaded();
+      const saveBtn = screen.getByRole("button", { name: "Save Telegram token" });
+      expect(saveBtn).toBeDisabled();
+      fireEvent.change(screen.getByLabelText("Telegram Bot Token"), { target: { value: "  123:ABC  " } });
+      expect(saveBtn).not.toBeDisabled();
+      fireEvent.click(saveBtn);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ telegramBotToken: "123:ABC" }));
+      expect(await screen.findByText("Telegram bot token saved.")).toBeInTheDocument();
+      expect(screen.getByText("Bot token configured")).toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(1900); });
+      expect(screen.queryByText("Telegram bot token saved.")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows an error when saving the Telegram token fails", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("invalid bot token"));
+    await renderLoaded();
+    fireEvent.change(screen.getByLabelText("Telegram Bot Token"), { target: { value: "bad" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Telegram token" }));
+    expect(await screen.findByText("invalid bot token")).toBeInTheDocument();
+    expect(screen.getByText("Bot token not configured")).toBeInTheDocument();
+  });
+
+  // Remove sends an empty token, which the server treats as "unset".
+  it("removes a configured Telegram token", async () => {
+    mockApi.updateSettings.mockResolvedValueOnce({ ...baseSettings, telegramBotTokenConfigured: false });
+    await renderLoaded({ telegramBotTokenConfigured: true });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ telegramBotToken: "" }));
+    expect(await screen.findByText("Bot token not configured")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the Telegram token configured and shows the error when removal fails", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce("server exploded");
+    await renderLoaded({ telegramBotTokenConfigured: true });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText("server exploded")).toBeInTheDocument();
+    expect(screen.getByText("Bot token configured")).toBeInTheDocument();
+  });
+
+  // ─── Anthropic verify ──────────────────────────────────────────────
+
+  // A thrown verify request (network error) is reported as an invalid key.
+  it("reports a verify request failure as an invalid key", async () => {
+    mockApi.verifyAnthropicKey.mockRejectedValueOnce(new Error("network down"));
+    await renderLoaded();
+    fireEvent.change(screen.getByLabelText("Anthropic API Key"), { target: { value: "sk-ant-x" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    expect(await screen.findByText("Invalid API key: network down")).toBeInTheDocument();
+  });
+
+  // ─── AI validation reverts ─────────────────────────────────────────
+
+  it("reverts auto-approve and auto-deny toggles when saving fails", async () => {
+    await renderLoaded({ aiValidationEnabled: true, aiValidationAutoApprove: true, aiValidationAutoDeny: false });
+    mockApi.updateSettings.mockRejectedValue(new Error("fail"));
+
+    const approve = screen.getByRole("button", { name: /Auto-approve safe tools/ });
+    fireEvent.click(approve);
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ aiValidationAutoApprove: false }));
+    await waitFor(() => expect(approve).toHaveTextContent(/On$/));
+
+    const deny = screen.getByRole("button", { name: /Auto-deny dangerous tools/ });
+    fireEvent.click(deny);
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ aiValidationAutoDeny: true }));
+    await waitFor(() => expect(deny).toHaveTextContent(/Off$/));
+  });
+
+  // ─── Updates ───────────────────────────────────────────────────────
+
+  it("reports up-to-date when no newer version is available", async () => {
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+    expect(await screen.findByText("You are up to date.")).toBeInTheDocument();
+  });
+
+  it("shows the error when checking for updates fails", async () => {
+    mockApi.forceCheckForUpdate.mockRejectedValueOnce(new Error("github unreachable"));
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+    expect(await screen.findByText("github unreachable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check for updates" })).not.toBeDisabled();
+  });
+
+  // A failed update must clear the post-restart Docker prompt flag and re-enable the button.
+  it("clears the docker prompt flag and shows the error when the update fails", async () => {
+    mockState = createMockState({
+      updateInfo: {
+        currentVersion: "0.22.1",
+        latestVersion: "0.23.0",
+        updateAvailable: true,
+        isServiceMode: true,
+        updateInProgress: false,
+        lastChecked: Date.now(),
+      },
+    });
+    mockApi.triggerUpdate.mockRejectedValueOnce(new Error("update failed"));
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Update & Restart" }));
+    expect(await screen.findByText("update failed")).toBeInTheDocument();
+    expect(localStorage.getItem("companion_docker_prompt_pending")).toBeNull();
+    expect(screen.getByRole("button", { name: "Update & Restart" })).not.toBeDisabled();
+    expect(mockState.setUpdateOverlayActive).not.toHaveBeenCalled();
+  });
+
+  it("switches back to the stable channel and refreshes update info", async () => {
+    await renderLoaded({ updateChannel: "prerelease" });
+    fireEvent.click(screen.getByRole("radio", { name: "Stable" }));
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ updateChannel: "stable" }));
+    await waitFor(() => expect(mockState.setUpdateInfo).toHaveBeenCalled());
+    expect(screen.getByRole("radio", { name: "Stable" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  // Saving the channel succeeded but the follow-up check failed: keep the new channel.
+  it("keeps the stable channel when only the follow-up update check fails", async () => {
+    mockApi.forceCheckForUpdate.mockRejectedValueOnce(new Error("check failed"));
+    await renderLoaded({ updateChannel: "prerelease" });
+    fireEvent.click(screen.getByRole("radio", { name: "Stable" }));
+    await waitFor(() => expect(mockApi.forceCheckForUpdate).toHaveBeenCalled());
+    expect(screen.getByRole("radio", { name: "Stable" })).toHaveAttribute("aria-checked", "true");
+    expect(mockState.setUpdateInfo).not.toHaveBeenCalled();
+  });
+
+  it("reverts to prerelease when saving the stable channel fails", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("fail"));
+    await renderLoaded({ updateChannel: "prerelease" });
+    fireEvent.click(screen.getByRole("radio", { name: "Stable" }));
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Prerelease" })).toHaveAttribute("aria-checked", "true"));
+    expect(mockApi.forceCheckForUpdate).not.toHaveBeenCalled();
+  });
+
+  it("reverts to stable when saving the prerelease channel fails", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("fail"));
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("radio", { name: "Prerelease" }));
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Stable" })).toHaveAttribute("aria-checked", "true"));
+    expect(mockApi.forceCheckForUpdate).not.toHaveBeenCalled();
+  });
+
+  it("ignores clicks on the already-selected prerelease channel", async () => {
+    await renderLoaded({ updateChannel: "prerelease" });
+    fireEvent.click(screen.getByRole("radio", { name: "Prerelease" }));
+    expect(mockApi.updateSettings).not.toHaveBeenCalled();
   });
 });
