@@ -2743,11 +2743,12 @@ describe("message times: known vs unknown timestamps", () => {
     const msgs = useStore.getState().messages.get("s1")!;
     // Order is the history order, untouched.
     expect(msgs.map((m) => m.id)).toEqual(["u-legacy", "a-legacy", "hist-system-event-2", "u-new", "a-new"]);
-    // Legacy: flagged, with a numeric placeholder so sorting still works.
-    for (const m of msgs.slice(0, 3)) {
-      expect(m.timestampUnknown).toBe(true);
-      expect(m.timestamp).toBe(9_000_000);
-    }
+    // Legacy: flagged, with the numeric sort key each kind used before:
+    // user messages sorted as `undefined ?? 0`, the others got Date.now().
+    for (const m of msgs.slice(0, 3)) expect(m.timestampUnknown).toBe(true);
+    expect(msgs[0].timestamp).toBe(0);
+    expect(msgs[1].timestamp).toBe(9_000_000);
+    expect(msgs[2].timestamp).toBe(9_000_000);
     // Stamped: real time, not flagged.
     expect(msgs[3]).toMatchObject({ timestamp: 5000 });
     expect(msgs[3].timestampUnknown).toBeUndefined();
@@ -2767,9 +2768,10 @@ describe("message times: known vs unknown timestamps", () => {
     expect(msg.timestampUnknown).toBe(true);
   });
 
-  // Reconnect merge: the sort by timestamp still runs over placeholders exactly
-  // as before (unstamped entries sort by their placeholder), stamped ones by time.
-  it("keeps the reconnect merge sort working with unknown entries", () => {
+  // Older-page merge (prepend): the sort by timestamp orders an unstamped
+  // history user message exactly as main did (sort key 0 → top), so a message
+  // from an older page never lands below the newest live message.
+  it("keeps the older-page merge order of unknown user messages", () => {
     vi.setSystemTime(9_000_000);
     wsModule.connectSession("s1");
     fireMessage({ type: "user_message", id: "u-live", content: "live", timestamp: 3000 });
@@ -2777,14 +2779,55 @@ describe("message times: known vs unknown timestamps", () => {
       type: "message_history",
       prepend: true,
       messages: [
-        { type: "user_message", id: "u-old", content: "older", timestamp: 1000 },
         { type: "user_message", id: "u-legacy", content: "legacy" },
+        { type: "user_message", id: "u-old", content: "older", timestamp: 1000 },
       ],
     });
     const msgs = useStore.getState().messages.get("s1")!;
-    expect(msgs.map((m) => m.id)).toEqual(["u-old", "u-live", "u-legacy"]);
+    expect(msgs.map((m) => m.id)).toEqual(["u-legacy", "u-old", "u-live"]);
     expect(msgs.find((m) => m.id === "u-legacy")!.timestampUnknown).toBe(true);
     expect(msgs.find((m) => m.id === "u-live")!.timestampUnknown).toBeUndefined();
+  });
+
+  // Reconnect: the server re-sends the whole history on every browser
+  // connect. Unstamped entries must keep their place instead of taking a new
+  // placeholder (reconnect time) and jumping below every stamped message.
+  it("keeps unknown entries in place across a reconnect replay", () => {
+    vi.setSystemTime(9_000_000);
+    wsModule.connectSession("s1");
+    const history = {
+      type: "message_history",
+      messages: [
+        { type: "user_message", id: "u-legacy", content: "legacy" },
+        { type: "user_message", id: "u1", content: "q", timestamp: 1000 },
+        assistantFrame("a1", "answer", 2000),
+        { type: "result", data: { is_error: true, errors: ["boom"], total_cost_usd: 0, num_turns: 1 } },
+      ],
+    };
+    fireMessage(history);
+    const before = useStore.getState().messages.get("s1")!;
+    expect(before.map((m) => m.id)).toEqual(["u-legacy", "u1", "a1", "hist-error-3"]);
+
+    // Reconnect much later: same history again.
+    vi.setSystemTime(20_000_000);
+    fireMessage(history);
+    const after = useStore.getState().messages.get("s1")!;
+    expect(after.map((m) => m.id)).toEqual(["u-legacy", "u1", "a1", "hist-error-3"]);
+    // The unknown error line kept its first placeholder, still flagged.
+    const err = after.find((m) => m.id === "hist-error-3")!;
+    expect(err.timestamp).toBe(9_000_000);
+    expect(err.timestampUnknown).toBe(true);
+  });
+
+  // A re-sent unknown copy of an entry whose time is already known keeps the
+  // known time (the known value wins over a placeholder).
+  it("keeps a known time when the re-sent copy is unknown", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "user_message", id: "u1", content: "q", timestamp: 4000 });
+    fireMessage({ type: "message_history", messages: [{ type: "user_message", id: "u1", content: "q" }] });
+    const msg = useStore.getState().messages.get("s1")![0];
+    expect(msg.timestamp).toBe(4000);
+    expect(msg.timestampUnknown).toBeUndefined();
   });
 
   // A placeholder is replaced when an in-place update of the same assistant

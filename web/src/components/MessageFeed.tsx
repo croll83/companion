@@ -410,9 +410,32 @@ function computeDayStarts(entries: FeedEntry[], timeZone: string): (number | nul
   });
 }
 
+/** How often an open feed checks whether the calendar day changed. */
+const DAY_ROLLOVER_CHECK_MS = 60_000;
+
+/**
+ * An instant inside the current calendar day of `timeZone`. It only changes
+ * when that day does (checked once a minute, and right away when the zone
+ * changes), so a chat left open past midnight re-labels its separators
+ * ("Today" becomes "Yesterday") without re-rendering the feed every minute.
+ */
+function useCurrentDayInstant(timeZone: string): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const check = () => {
+      const t = Date.now();
+      setNow((prev) => (dayKey(prev, timeZone) === dayKey(t, timeZone) ? prev : t));
+    };
+    check();
+    const id = setInterval(check, DAY_ROLLOVER_CHECK_MS);
+    return () => clearInterval(id);
+  }, [timeZone]);
+  return now;
+}
+
 /** Centered "Today" / "Yesterday" / date pill between messages of different days. */
-function DaySeparator({ timestamp, timeZone }: { timestamp: number; timeZone: string }) {
-  const label = formatDayLabel(timestamp, timeZone);
+function DaySeparator({ timestamp, timeZone, now }: { timestamp: number; timeZone: string; now: number }) {
+  const label = formatDayLabel(timestamp, timeZone, now);
   return (
     <div role="separator" aria-label={label} className="flex items-center gap-3 select-none">
       <div className="flex-1 h-px bg-cc-border" />
@@ -427,24 +450,28 @@ function DaySeparator({ timestamp, timeZone }: { timestamp: number; timeZone: st
 function FeedEntries({
   entries,
   toolActivity,
-  showDaySeparators = false,
+  daySeparators,
 }: {
   entries: FeedEntry[];
   toolActivity?: ToolActivityEntry[];
-  /** Only the top-level feed is split by day; nested subagent feeds are not. */
-  showDaySeparators?: boolean;
+  /**
+   * Split the feed by day in `timeZone`, labelling days relative to `now`.
+   * Only the top-level feed passes this; nested subagent feeds are not split.
+   */
+  daySeparators?: { timeZone: string; now: number };
 }) {
-  const timeZoneSetting = useStore((s) => s.timeZone);
-  const timeZone = resolveTimeZone(timeZoneSetting);
+  const timeZone = daySeparators?.timeZone;
   const dayStarts = useMemo(
-    () => (showDaySeparators ? computeDayStarts(entries, timeZone) : null),
-    [showDaySeparators, entries, timeZone],
+    () => (timeZone ? computeDayStarts(entries, timeZone) : null),
+    [entries, timeZone],
   );
   return (
     <>
       {entries.map((entry, i) => {
         const dayStart = dayStarts?.[i] ?? null;
-        const separator = dayStart !== null ? <DaySeparator timestamp={dayStart} timeZone={timeZone} /> : null;
+        const separator = dayStart !== null && daySeparators
+          ? <DaySeparator timestamp={dayStart} timeZone={daySeparators.timeZone} now={daySeparators.now} />
+          : null;
         if (entry.kind === "tool_msg_group") {
           return (
             <Fragment key={entry.firstId || i}>
@@ -672,6 +699,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const toolProgress = useStore((s) => s.toolProgress.get(sessionId));
   const toolActivity = useStore((s) => s.toolActivity.get(sessionId));
   const historyWindow = useStore((s) => s.historyWindow?.get(sessionId));
+  const timeZoneSetting = useStore((s) => s.timeZone);
+  const timeZone = resolveTimeZone(timeZoneSetting);
+  const dayNow = useCurrentDayInstant(timeZone);
+  const daySeparators = useMemo(() => ({ timeZone, now: dayNow }), [timeZone, dayNow]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
@@ -794,10 +825,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
             content: msg.content,
             contentBlocks:
               msg.role === "assistant" ? msg.contentBlocks : undefined,
-            // No recorded time: a placeholder for ordering, never shown.
-            ...(msg.timestamp
-              ? { timestamp: msg.timestamp }
-              : { timestamp: Date.now(), timestampUnknown: true }),
+            // No recorded time (missing, or the server flagged its value as
+            // a fallback sort key): order by it, never show it.
+            timestamp: msg.timestamp || Date.now(),
+            ...(!msg.timestamp || msg.timestampUnknown ? { timestampUnknown: true } : {}),
             model: msg.role === "assistant" ? msg.model : undefined,
             stopReason: msg.role === "assistant" ? msg.stopReason : undefined,
           }),
@@ -1088,7 +1119,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} showDaySeparators />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} daySeparators={daySeparators} />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (

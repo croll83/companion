@@ -722,6 +722,41 @@ describe("MessageBubble - send time", () => {
     expect(container.querySelectorAll("time")).toHaveLength(1);
   });
 
+  // Contrast: on tinted surfaces (user bubble gradient, error plate)
+  // text-cc-muted falls below WCAG AA in light mode, so the time uses the
+  // darker text-cc-fg/70 there; on the plain feed background (assistant) it
+  // keeps text-cc-muted. jsdom has no real colours, so axe can't catch this:
+  // the class is asserted directly.
+  it("uses a contrast-safe colour for the time on tinted bubbles", () => {
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ id: "u", role: "user", content: "hello", timestamp: TS })} />
+        <MessageBubble message={makeMessage({ id: "a", role: "assistant", content: "answer", timestamp: TS })} />
+        <MessageBubble message={makeMessage({ id: "e", role: "system", isError: true, content: "boom", timestamp: TS })} />
+      </div>,
+    );
+    const [userTime, assistantTime, errorTime] = Array.from(container.querySelectorAll("time"));
+    expect(userTime.className).toContain("text-cc-fg/70");
+    expect(userTime.className).not.toContain("text-cc-muted");
+    expect(errorTime.className).toContain("text-cc-fg/70");
+    expect(errorTime.className).not.toContain("text-cc-muted");
+    expect(assistantTime.className).toContain("text-cc-muted");
+  });
+
+  // The tooltip names the short zone too, so the repeated DST hour is
+  // unambiguous (CEST vs CET in Rome on 2026-10-25).
+  it("tooltip distinguishes the two 02:30s of the DST-end day", () => {
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ id: "x", role: "user", content: "a", timestamp: Date.parse("2026-10-25T00:30:00Z") })} />
+        <MessageBubble message={makeMessage({ id: "y", role: "user", content: "b", timestamp: Date.parse("2026-10-25T01:30:00Z") })} />
+      </div>,
+    );
+    const [first, second] = Array.from(container.querySelectorAll("time"));
+    expect(first.textContent).toBe(second.textContent);
+    expect(first.getAttribute("title")).not.toBe(second.getAttribute("title"));
+  });
+
   // Unknown send time (legacy history entry): render nothing rather than the
   // placeholder, which would be the page-load time.
   it("renders no time when the timestamp is unknown", () => {

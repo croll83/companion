@@ -49,11 +49,31 @@ function SmartLink({ href, children }: { href?: string; children?: React.ReactNo
 }
 
 /**
+ * Text colour of the send time per surface. `text-cc-muted` meets WCAG AA
+ * (4.5:1) on the plain feed background but not, in light mode, on the tinted
+ * user-bubble gradient (3.9:1 at its darkest corner) or the error plate
+ * (4.2:1); `text-cc-fg/70` stays above 5.9:1 on both, in light and dark mode.
+ */
+const MESSAGE_TIME_TONE = {
+  muted: "text-cc-muted",
+  "on-tint": "text-cc-fg/70",
+} as const;
+
+/**
  * Small muted send time ("14:05") with the full date, time and zone in the
  * tooltip. Renders nothing while the message is still streaming or when the
  * server never recorded when it was sent — an invented time is worse than none.
  */
-export function MessageTime({ message, className = "" }: { message: ChatMessage; className?: string }) {
+export function MessageTime({
+  message,
+  className = "",
+  tone = "muted",
+}: {
+  message: ChatMessage;
+  className?: string;
+  /** "on-tint" inside tinted surfaces (user bubble, error plate). */
+  tone?: keyof typeof MESSAGE_TIME_TONE;
+}) {
   const timeZoneSetting = useStore((s) => s.timeZone);
   if (message.isStreaming || !hasKnownTimestamp(message)) return null;
   const zone = resolveTimeZone(timeZoneSetting);
@@ -61,7 +81,7 @@ export function MessageTime({ message, className = "" }: { message: ChatMessage;
     <time
       dateTime={new Date(message.timestamp).toISOString()}
       title={formatMessageTooltip(message.timestamp, zone)}
-      className={`text-[10px] leading-none text-cc-muted tabular-nums select-none whitespace-nowrap ${className}`}
+      className={`text-[10px] leading-none ${MESSAGE_TIME_TONE[tone]} tabular-nums select-none whitespace-nowrap ${className}`}
     >
       {formatMessageTime(message.timestamp, zone)}
     </time>
@@ -88,7 +108,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           <span className="text-[12px] text-cc-error font-mono-code min-w-0 break-words">
             {message.content}
           </span>
-          <MessageTime message={message} className="self-end shrink-0 ml-1" />
+          <MessageTime message={message} tone="on-tint" className="self-end shrink-0 ml-1" />
         </div>
       </div>
     );
@@ -126,7 +146,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             <MarkdownContent text={message.content} />
           </div>
           <div className="mt-1 -mb-0.5 flex justify-end">
-            <MessageTime message={message} />
+            <MessageTime message={message} tone="on-tint" />
           </div>
         </div>
       </div>

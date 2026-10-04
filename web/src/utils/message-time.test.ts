@@ -125,6 +125,17 @@ describe("formatMessageTime / formatMessageTooltip", () => {
     expect(tip).toContain("00:30:09");
     expect(tip).toContain("(Europe/Rome)");
   });
+
+  // On the DST-end day the 02:00-03:00 hour happens twice in Rome (CEST, then
+  // CET). The two instants an hour apart must not share one tooltip: the
+  // short zone name / offset distinguishes them.
+  it("tooltip tells apart the two occurrences of the repeated DST hour", () => {
+    const first = formatMessageTooltip(iso("2026-10-25T00:30:00Z"), ROME, "en-GB");
+    const second = formatMessageTooltip(iso("2026-10-25T01:30:00Z"), ROME, "en-GB");
+    expect(first).toContain("02:30:00");
+    expect(second).toContain("02:30:00");
+    expect(first).not.toBe(second);
+  });
 });
 
 describe("formatDayLabel — Today / Yesterday / date", () => {

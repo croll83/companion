@@ -18,7 +18,13 @@ type FormatterKind = "time" | "full" | "day-key" | "label" | "label-year";
 
 const FORMATTER_OPTIONS: Record<FormatterKind, Intl.DateTimeFormatOptions> = {
   time: { hour: "2-digit", minute: "2-digit" },
-  full: { dateStyle: "full", timeStyle: "medium" },
+  // Not dateStyle/timeStyle: those can't carry timeZoneName, and without the
+  // zone abbreviation/offset ("CEST" vs "CET") the two 02:30s of the repeated
+  // DST-end hour would read the same.
+  full: {
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short",
+  },
   // en-CA would give YYYY-MM-DD directly, but formatToParts is explicit about
   // which number is which and does not depend on a locale's field order.
   "day-key": { year: "numeric", month: "2-digit", day: "2-digit" },
@@ -112,7 +118,11 @@ export function formatMessageTime(ts: number, timeZone: string, locale?: string)
   return getFormatter("time", timeZone, locale).format(ts);
 }
 
-/** Full date + time + zone, for the tooltip: "Sunday 4 October 2026, 14:05:09 (Europe/Rome)". */
+/**
+ * Full date + time + zone, for the tooltip:
+ * "Sunday, 4 October 2026 at 14:05:09 CEST (Europe/Rome)". The short zone name
+ * (or GMT offset) tells apart the two occurrences of a repeated DST hour.
+ */
 export function formatMessageTooltip(ts: number, timeZone: string, locale?: string): string {
   return `${getFormatter("full", timeZone, locale).format(ts)} (${timeZone})`;
 }

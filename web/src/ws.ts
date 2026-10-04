@@ -563,12 +563,29 @@ function buildToolActivityEntry(
 /**
  * The send time of a server message, or — when the server never recorded one
  * (history written before timestamps existed) — a placeholder flagged
- * `timestampUnknown`. The placeholder keeps the old ordering behavior; the
- * flag keeps the UI from presenting it as the time the message was sent.
+ * `timestampUnknown`. The flag keeps the UI from presenting the placeholder as
+ * the time the message was sent; the placeholder itself is only a sort key and
+ * must match what each message kind used before (Date.now() for most, 0 for
+ * history user messages, which used to sort as `undefined ?? 0`), so the
+ * merge sort orders unstamped entries exactly as it always did.
  */
-function messageTime(serverTimestamp: number | undefined): Pick<ChatMessage, "timestamp" | "timestampUnknown"> {
+function messageTime(
+  serverTimestamp: number | undefined,
+  placeholder: number = Date.now(),
+): Pick<ChatMessage, "timestamp" | "timestampUnknown"> {
   if (typeof serverTimestamp === "number" && serverTimestamp > 0) return { timestamp: serverTimestamp };
-  return { timestamp: Date.now(), timestampUnknown: true };
+  return { timestamp: placeholder, timestampUnknown: true };
+}
+
+/**
+ * Replace a merged history entry with its re-sent copy. When the copy has no
+ * known time, keep the sort key the entry already had: a fresh placeholder
+ * would move it on every reconnect / older-page load. Assistant entries go
+ * through mergeAssistantMessage, which does the same.
+ */
+function replaceMergedEntry(current: ChatMessage, incoming: ChatMessage): ChatMessage {
+  if (!incoming.timestampUnknown) return incoming;
+  return { ...incoming, timestamp: current.timestamp, timestampUnknown: current.timestampUnknown };
 }
 
 function mergeAssistantMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
@@ -1083,7 +1100,7 @@ function handleParsedMessage(
             id: histMsg.id || nextId(),
             role: "user",
             content: histMsg.content,
-            ...messageTime(histMsg.timestamp),
+            ...messageTime(histMsg.timestamp, 0),
           });
         } else if (histMsg.type === "assistant") {
           const msg = histMsg.message;
@@ -1203,7 +1220,7 @@ function handleParsedMessage(
             if (current.role === "assistant" && incoming.role === "assistant") {
               merged[idx] = mergeAssistantMessage(current, incoming);
             } else {
-              merged[idx] = incoming;
+              merged[idx] = replaceMergedEntry(current, incoming);
             }
           }
           merged.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));

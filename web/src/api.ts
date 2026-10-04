@@ -257,6 +257,8 @@ export interface ClaudeSessionHistoryMessage {
   content: string;
   contentBlocks?: ContentBlock[];
   timestamp: number;
+  /** The transcript line had no usable time: `timestamp` is only a sort key. */
+  timestampUnknown?: boolean;
   model?: string;
   stopReason?: string | null;
 }

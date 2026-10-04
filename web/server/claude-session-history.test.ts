@@ -155,4 +155,56 @@ describe("getClaudeSessionHistoryPage", () => {
     });
     expect(page).toBeNull();
   });
+
+  it("flags lines without a usable timestamp instead of inventing a send time", () => {
+    // Validate that a transcript line with no (or an unparseable) timestamp is
+    // returned with timestampUnknown: its `timestamp` is only a sort key built
+    // from the request time, so the client must not show it as when the
+    // message was sent. Lines with a real time are not flagged, and the
+    // transcript order is preserved.
+    const root = createTempProjectsRoot();
+    const sessionId = "session-unknown-ts";
+    writeSessionHistoryFile(root, "-Users-test-repo", sessionId, [
+      {
+        type: "user",
+        sessionId,
+        uuid: "u-dated",
+        timestamp: "2026-02-20T10:00:00.000Z",
+        message: { role: "user", content: "dated prompt" },
+      },
+      {
+        type: "user",
+        sessionId,
+        uuid: "u-undated",
+        message: { role: "user", content: "undated prompt" },
+      },
+      {
+        type: "assistant",
+        sessionId,
+        uuid: "a-bad",
+        timestamp: "not a date",
+        message: {
+          id: "msg-bad",
+          role: "assistant",
+          model: "claude-sonnet-4-5",
+          content: [{ type: "text", text: "answer with a broken time" }],
+          stop_reason: "end_turn",
+        },
+      },
+    ]);
+
+    const page = getClaudeSessionHistoryPage({ sessionId, projectsRoot: root, limit: 10 });
+    expect(page).not.toBeNull();
+    const [dated, undated, bad] = page!.messages;
+    expect(page!.messages.map((m) => m.content)).toEqual([
+      "dated prompt",
+      "undated prompt",
+      "answer with a broken time",
+    ]);
+    expect(dated.timestamp).toBe(Date.parse("2026-02-20T10:00:00.000Z"));
+    expect(dated.timestampUnknown).toBeUndefined();
+    expect(undated.timestampUnknown).toBe(true);
+    expect(typeof undated.timestamp).toBe("number");
+    expect(bad.timestampUnknown).toBe(true);
+  });
 });

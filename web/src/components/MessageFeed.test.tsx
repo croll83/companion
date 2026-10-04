@@ -5,7 +5,7 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ChatMessage } from "../types.js";
 
 const { getClaudeSessionHistoryMock } = vi.hoisted(() => ({
@@ -873,6 +873,70 @@ describe("MessageFeed - day separators", () => {
       await labelFor(d1, ROME),
       await labelFor(d2, ROME),
     ]);
+  });
+
+  // A chat left open past midnight (in the configured zone) re-labels its
+  // separators on its own: "Today" becomes "Yesterday" without any new
+  // message or setting change triggering a re-render.
+  it("re-labels separators when the day changes while the chat is open", () => {
+    vi.useFakeTimers();
+    try {
+      mockStoreValues.timeZone = ROME;
+      // 22:00 in Rome on 10 March; the message was sent that morning.
+      vi.setSystemTime(at("2026-03-10T21:00:00Z"));
+      const sid = "days-rollover";
+      setStoreMessages(sid, [
+        makeMessage({ id: "u1", role: "user", content: "morning", timestamp: at("2026-03-10T08:00:00Z") }),
+      ]);
+      render(<MessageFeed sessionId={sid} />);
+      expect(separators().map((s) => s.getAttribute("aria-label"))).toEqual(["Today"]);
+
+      // Past midnight in Rome (00:01 on 11 March): the next check re-labels.
+      act(() => {
+        vi.setSystemTime(at("2026-03-10T23:01:00Z"));
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(separators().map((s) => s.getAttribute("aria-label"))).toEqual(["Yesterday"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Resumed CLI transcripts: a line the server flags timestampUnknown (no or
+  // unparseable time in the JSONL; its timestamp is only a sort key built from
+  // the request time) renders without a time and opens no day.
+  it("shows no time for resumed transcript lines flagged timestampUnknown", async () => {
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-resume-unknown";
+    setStoreMessages(sid, []);
+    setSdkSessions([
+      {
+        sessionId: sid,
+        state: "connected",
+        cwd: "/Users/test/repo",
+        createdAt: Date.now(),
+        backendType: "claude",
+        resumeSessionAt: "prior-unknown",
+        forkSession: true,
+      },
+    ]);
+    getClaudeSessionHistoryMock.mockResolvedValueOnce({
+      sourceFile: "/x.jsonl",
+      nextCursor: 2,
+      hasMore: false,
+      totalMessages: 2,
+      messages: [
+        { id: "r-u1", role: "user", content: "undated line", timestamp: Date.now(), timestampUnknown: true },
+        { id: "r-a1", role: "assistant", content: "dated line", timestamp: at("2026-03-10T09:00:00Z") },
+      ],
+    });
+    render(<MessageFeed sessionId={sid} />);
+    fireEvent.click(screen.getByRole("button", { name: /load previous history/i }));
+    expect(await screen.findByText("undated line")).toBeTruthy();
+    expect(await screen.findByText("dated line")).toBeTruthy();
+    // Only the dated line gets a time and a day separator.
+    expect(document.querySelectorAll("time")).toHaveLength(1);
+    expect(separators()).toHaveLength(1);
   });
 
   it("passes axe with day separators and message times", async () => {
