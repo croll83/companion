@@ -14,6 +14,7 @@ import { useStore } from "../store.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import { UpdateBanner } from "./UpdateBanner.js";
 import { HostsBridgeAlert } from "./HostsBridgeAlert.js";
+import { BunRuntimeAlert } from "./BunRuntimeAlert.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
 import { api } from "../api.js";
@@ -52,6 +53,10 @@ import type { SessionItem as SessionItemType } from "../utils/project-grouping.j
 // ─── Mock Data ──────────────────────────────────────────────────────────────
 
 const MOCK_SESSION_ID = "playground-session";
+// Separate dismissal key for the Bun Runtime Alert samples: the Playground runs
+// on the same origin as the app, so sharing the real key would let a click on a
+// sample's X permanently hide the real banner for that (outdated) Bun version.
+const PLAYGROUND_BUN_DISMISS_KEY = "companion_playground_bun_runtime_dismissed_version";
 
 function mockPermission(
   overrides: Partial<PermissionRequest> & {
@@ -1969,6 +1974,54 @@ export function Playground() {
               />
               <p className="text-xs text-cc-muted px-1 py-2">
                 (banner intentionally renders nothing for non-Claude backends)
+              </p>
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Bun Runtime Alert ──────────────────────────────── */}
+        <Section
+          title="Bun Runtime Alert"
+          description="Banner shown app-wide when Companion runs on Bun < 1.4.0 (oven-sh/bun#32743 can drop live sessions). Dismissal is remembered per Bun version."
+        >
+          <div className="space-y-4 max-w-3xl">
+            <Card label="Outdated Bun (service mode, with restart command)">
+              <BunRuntimeAlert
+                storageKey={PLAYGROUND_BUN_DISMISS_KEY}
+                fetcher={async () => ({
+                  version: "1.3.9",
+                  minimum: "1.4.0",
+                  ok: false,
+                  reason: "outdated",
+                  isServiceMode: true,
+                })}
+              />
+            </Card>
+            <Card label="Outdated Bun (foreground mode)">
+              <BunRuntimeAlert
+                storageKey={PLAYGROUND_BUN_DISMISS_KEY}
+                fetcher={async () => ({
+                  version: "1.3.10-canary.20260901.3",
+                  minimum: "1.4.0",
+                  ok: false,
+                  reason: "outdated",
+                  isServiceMode: false,
+                })}
+              />
+            </Card>
+            <Card label="Bun up to date (banner hidden)">
+              <BunRuntimeAlert
+                storageKey={PLAYGROUND_BUN_DISMISS_KEY}
+                fetcher={async () => ({
+                  version: "1.4.2",
+                  minimum: "1.4.0",
+                  ok: true,
+                  reason: "ok",
+                  isServiceMode: true,
+                })}
+              />
+              <p className="text-xs text-cc-muted px-1 py-2">
+                (banner intentionally renders nothing when ok=true)
               </p>
             </Card>
           </div>

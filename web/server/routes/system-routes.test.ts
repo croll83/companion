@@ -40,6 +40,14 @@ vi.mock("../hosts-check.js", () => ({
   checkHostsEntry: mockCheckHostsEntry,
 }));
 
+// ─── Mock bun-runtime-check ────────────────────────────────────────────────
+// Drives /api/system/bun-runtime-check without depending on the Bun version
+// of the machine running the tests (vitest runs on Node anyway).
+const mockCheckBunRuntime = vi.hoisted(() => vi.fn());
+vi.mock("../bun-runtime-check.js", () => ({
+  checkBunRuntime: mockCheckBunRuntime,
+}));
+
 // ─── Mock tls-manager (constant only) ──────────────────────────────────────
 vi.mock("../tls-manager.js", () => ({
   TLS_BRIDGE_HOSTNAME: "beacon.claude-ai.staging.ant.dev",
@@ -824,5 +832,62 @@ describe("GET /api/system/hosts-check", () => {
     const json = await res.json();
     expect(json.hostname).toBe("claude.fedstart.com");
     expect(mockCheckHostsEntry).toHaveBeenCalledWith("claude.fedstart.com");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET /api/system/bun-runtime-check
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("GET /api/system/bun-runtime-check", () => {
+  // Outdated Bun: the endpoint passes the check result through unchanged so
+  // the BunRuntimeAlert banner can show the version and the minimum.
+  it("returns the outdated check result plus isServiceMode", async () => {
+    // Earlier tests may leave a service-mode state behind (clearAllMocks keeps
+    // implementations), so pin foreground mode explicitly.
+    vi.mocked(getUpdateState).mockReturnValueOnce({
+      currentVersion: "1.0.0",
+      latestVersion: null,
+      lastChecked: 0,
+      isServiceMode: false,
+      checking: false,
+      updateInProgress: false,
+      channel: "stable",
+    });
+    mockCheckBunRuntime.mockReturnValue({ version: "1.3.9", minimum: "1.4.0", ok: false, reason: "outdated" });
+
+    const res = await app.request("/api/system/bun-runtime-check");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      version: "1.3.9",
+      minimum: "1.4.0",
+      ok: false,
+      reason: "outdated",
+      isServiceMode: false,
+    });
+    expect(mockCheckBunRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  // In service mode the banner suggests `the-companion restart`, so the
+  // endpoint must surface the update-checker's service-mode flag.
+  it("reports isServiceMode=true when running as a service", async () => {
+    vi.mocked(getUpdateState).mockReturnValueOnce({
+      currentVersion: "1.0.0",
+      latestVersion: null,
+      lastChecked: 0,
+      isServiceMode: true,
+      checking: false,
+      updateInProgress: false,
+      channel: "stable",
+    });
+    mockCheckBunRuntime.mockReturnValue({ version: "1.4.2", minimum: "1.4.0", ok: true, reason: "ok" });
+
+    const res = await app.request("/api/system/bun-runtime-check");
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.isServiceMode).toBe(true);
   });
 });

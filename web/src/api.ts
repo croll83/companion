@@ -439,6 +439,19 @@ export interface ClaudeCliCheckResult {
   suggestedCommand: string;
 }
 
+/**
+ * Result of GET /api/system/bun-runtime-check. Bun < `minimum` has a
+ * subprocess-stream bug (oven-sh/bun#32743) that can drop live sessions.
+ * `reason: "unknown"` means the version couldn't be parsed (reported ok=true).
+ */
+export interface BunRuntimeCheckResult {
+  version: string | null;
+  minimum: string;
+  ok: boolean;
+  reason: "ok" | "outdated" | "unknown";
+  isServiceMode: boolean;
+}
+
 export interface LinearOAuthConnectionSummary {
   id: string;
   name: string;
@@ -1023,6 +1036,9 @@ export const api = {
 
   getClaudeCliCheck: (force?: boolean) =>
     get<ClaudeCliCheckResult>(`/system/claude-cli-check${force ? "?force=1" : ""}`),
+
+  // Bun runtime version check — drives the BunRuntimeAlert banner.
+  getBunRuntimeCheck: () => get<BunRuntimeCheckResult>("/system/bun-runtime-check"),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),

@@ -124,6 +124,10 @@ vi.mock("./components/UpdateBanner.js", () => ({
   UpdateBanner: () => <div data-testid="update-banner">UpdateBanner</div>,
 }));
 
+vi.mock("./components/BunRuntimeAlert.js", () => ({
+  BunRuntimeAlert: () => <div data-testid="bun-runtime-alert">BunRuntimeAlert</div>,
+}));
+
 vi.mock("./components/SessionLaunchOverlay.js", () => ({
   SessionLaunchOverlay: () => <div data-testid="session-launch-overlay">SessionLaunchOverlay</div>,
 }));
@@ -250,6 +254,9 @@ describe("App", () => {
       expect(screen.getByTestId("update-banner")).toBeInTheDocument();
       expect(screen.getByTestId("home-page")).toBeInTheDocument();
       expect(screen.getByTestId("update-overlay")).toBeInTheDocument();
+      // The Bun runtime banner is mounted app-wide next to the update banner
+      // (it hides itself when Bun is up to date).
+      expect(screen.getByTestId("bun-runtime-alert")).toBeInTheDocument();
     });
 
     it("renders ChatView when a session is active", () => {
