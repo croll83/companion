@@ -26,6 +26,7 @@ import { getSettings } from "../settings-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
 import { checkHostsEntry } from "../hosts-check.js";
 import { checkClaudeCli } from "../claude-cli-check.js";
+import { checkBunRuntime } from "../bun-runtime-check.js";
 import { TLS_BRIDGE_HOSTNAME } from "../tls-manager.js";
 
 /**
@@ -339,6 +340,13 @@ export function registerSystemRoutes(
   api.get("/system/claude-cli-check", (c) => {
     const force = c.req.query("force") === "1";
     return c.json(checkClaudeCli({ force }));
+  });
+
+  // Bun runtime version (used by the BunRuntimeAlert banner). Bun < 1.4 can
+  // drop live sessions (oven-sh/bun#32743) and the auto-updater never upgrades
+  // Bun itself. `isServiceMode` lets the banner suggest `the-companion restart`.
+  api.get("/system/bun-runtime-check", (c) => {
+    return c.json({ ...checkBunRuntime(), isServiceMode: getUpdateState().isServiceMode });
   });
 
   api.post("/sessions/:id/message", async (c) => {

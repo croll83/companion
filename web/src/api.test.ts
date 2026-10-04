@@ -2322,6 +2322,8 @@ describe("system and integration endpoints", () => {
     ["getHostsCheck", () => api.getHostsCheck(), "/api/system/hosts-check", "GET"],
     ["getClaudeCliCheck", () => api.getClaudeCliCheck(), "/api/system/claude-cli-check", "GET"],
     ["getClaudeCliCheck(force)", () => api.getClaudeCliCheck(true), "/api/system/claude-cli-check?force=1", "GET"],
+    // Bun runtime check used by the BunRuntimeAlert banner.
+    ["getBunRuntimeCheck", () => api.getBunRuntimeCheck(), "/api/system/bun-runtime-check", "GET"],
     ["getTailscaleStatus", () => api.getTailscaleStatus(), "/api/tailscale/status", "GET"],
     ["startTailscaleFunnel", () => api.startTailscaleFunnel(), "/api/tailscale/funnel/start", "POST"],
     ["stopTailscaleFunnel", () => api.stopTailscaleFunnel(), "/api/tailscale/funnel/stop", "POST"],

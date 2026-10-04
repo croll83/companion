@@ -46,6 +46,7 @@ import type { ServerWebSocket } from "bun";
 import { ensureTlsCerts, TLS_BRIDGE_HOSTNAME } from "./tls-manager.js";
 import { checkHostsEntry } from "./hosts-check.js";
 import { checkClaudeCli } from "./claude-cli-check.js";
+import { warnIfBunOutdated } from "./bun-runtime-check.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -354,6 +355,9 @@ if (cliCheck.found) {
 if (!cliCheck.ok) {
   console.warn(`[server] WARNING: ${cliCheck.reason} Run:\n  ${cliCheck.suggestedCommand}`);
 }
+
+// ── Bun runtime diagnostic — Bun < 1.4 can drop live sessions (bun#32743) ──
+warnIfBunOutdated();
 
 const authToken = getToken();
 console.log(`Server running on http://${host}:${server.port}`);

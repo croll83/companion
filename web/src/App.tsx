@@ -12,6 +12,7 @@ import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { DiffPanel } from "./components/DiffPanel.js";
 import { UpdateBanner } from "./components/UpdateBanner.js";
+import { BunRuntimeAlert } from "./components/BunRuntimeAlert.js";
 import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { UpdateOverlay } from "./components/UpdateOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
@@ -218,6 +219,8 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <TopBar />
         <UpdateBanner />
+        {/* Bun < 1.4 can drop live sessions; app-wide (affects Claude and Codex). */}
+        <BunRuntimeAlert />
         <div className="flex-1 overflow-hidden relative">
           {isSettingsPage && (
             <div className="absolute inset-0">
