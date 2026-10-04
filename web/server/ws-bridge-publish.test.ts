@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   broadcastToBrowsers,
   sendToBrowser,
+  withServerTimestamp,
   EVENT_BUFFER_LIMIT,
 } from "./ws-bridge-publish.js";
 import type { Session, SocketData } from "./ws-bridge-types.js";
@@ -234,5 +235,47 @@ describe("sendToBrowser", () => {
 describe("EVENT_BUFFER_LIMIT", () => {
   it("is 600", () => {
     expect(EVENT_BUFFER_LIMIT).toBe(600);
+  });
+});
+
+// ── Server timestamps on chat-visible notices ─────────────────────────────────
+// Errors and refusals are built all over the server without a send time; the
+// publish pipeline stamps them so the chat can show when they happened and an
+// event_replay after a reconnect does not re-date them to the reconnect time.
+describe("withServerTimestamp", () => {
+  it("stamps error and refusal frames that have no timestamp", () => {
+    expect(withServerTimestamp({ type: "error", message: "boom" }, 1234)).toEqual({
+      type: "error", message: "boom", timestamp: 1234,
+    });
+    expect(withServerTimestamp({ type: "refusal", category: "cyber" }, 1234)).toEqual({
+      type: "refusal", category: "cyber", timestamp: 1234,
+    });
+  });
+
+  it("keeps a timestamp that is already there", () => {
+    const msg: BrowserIncomingMessage = { type: "error", message: "old", timestamp: 99 };
+    expect(withServerTimestamp(msg, 1234)).toBe(msg);
+  });
+
+  it("leaves every other frame untouched (same object)", () => {
+    const msg: BrowserIncomingMessage = { type: "status_change", status: "idle" };
+    expect(withServerTimestamp(msg)).toBe(msg);
+  });
+
+  // End to end through broadcastToBrowsers: both the wire frame and the
+  // buffered replay copy carry the stamp, so a later replay shows the real time.
+  it("broadcastToBrowsers sends and buffers the stamped error", () => {
+    const ws = makeMockSocket();
+    const session = makeSession({ browserSockets: new Set([ws]) });
+    const before = Date.now();
+    broadcastToBrowsers(session, { type: "error", message: "boom" }, {
+      eventBufferLimit: EVENT_BUFFER_LIMIT,
+      recorder: null,
+      persistFn: () => {},
+    });
+    const sent = JSON.parse((ws.send as ReturnType<typeof vi.fn>).mock.calls[0][0] as string);
+    expect(sent.timestamp).toBeGreaterThanOrEqual(before);
+    const buffered = session.eventBuffer[0].message as { timestamp?: number };
+    expect(buffered.timestamp).toBe(sent.timestamp);
   });
 });

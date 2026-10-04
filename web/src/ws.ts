@@ -560,6 +560,34 @@ function buildToolActivityEntry(
   };
 }
 
+/**
+ * The send time of a server message, or — when the server never recorded one
+ * (history written before timestamps existed) — a placeholder flagged
+ * `timestampUnknown`. The flag keeps the UI from presenting the placeholder as
+ * the time the message was sent; the placeholder itself is only a sort key and
+ * must match what each message kind used before (Date.now() for most, 0 for
+ * history user messages, which used to sort as `undefined ?? 0`), so the
+ * merge sort orders unstamped entries exactly as it always did.
+ */
+function messageTime(
+  serverTimestamp: number | undefined,
+  placeholder: number = Date.now(),
+): Pick<ChatMessage, "timestamp" | "timestampUnknown"> {
+  if (typeof serverTimestamp === "number" && serverTimestamp > 0) return { timestamp: serverTimestamp };
+  return { timestamp: placeholder, timestampUnknown: true };
+}
+
+/**
+ * Replace a merged history entry with its re-sent copy. When the copy has no
+ * known time, keep the sort key the entry already had: a fresh placeholder
+ * would move it on every reconnect / older-page load. Assistant entries go
+ * through mergeAssistantMessage, which does the same.
+ */
+function replaceMergedEntry(current: ChatMessage, incoming: ChatMessage): ChatMessage {
+  if (!incoming.timestampUnknown) return incoming;
+  return { ...incoming, timestamp: current.timestamp, timestampUnknown: current.timestampUnknown };
+}
+
 function mergeAssistantMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
   const mergedBlocks = mergeContentBlocks(previous.contentBlocks, incoming.contentBlocks);
   const mergedContent = mergedBlocks && mergedBlocks.length > 0
@@ -571,8 +599,12 @@ function mergeAssistantMessage(previous: ChatMessage, incoming: ChatMessage): Ch
     ...incoming,
     content: mergedContent,
     contentBlocks: mergedBlocks,
-    // Keep the original timestamp position when this is an in-place assistant update.
-    timestamp: previous.timestamp ?? incoming.timestamp,
+    // Keep the original timestamp position when this is an in-place assistant
+    // update — unless that was only a placeholder and the update knows the
+    // real time.
+    ...(previous.timestampUnknown && !incoming.timestampUnknown
+      ? { timestamp: incoming.timestamp, timestampUnknown: undefined }
+      : { timestamp: previous.timestamp ?? incoming.timestamp, timestampUnknown: previous.timestampUnknown }),
     // Explicitly clear stale streaming marker when incoming is final.
     isStreaming: incoming.isStreaming,
   };
@@ -657,7 +689,7 @@ function handleParsedMessage(
         role: "assistant",
         content: textContent,
         contentBlocks: msg.content,
-        timestamp: data.timestamp || Date.now(),
+        ...messageTime(data.timestamp),
         parentToolUseId: data.parent_tool_use_id,
         model: msg.model,
         stopReason: msg.stop_reason,
@@ -910,7 +942,7 @@ function handleParsedMessage(
         id: data.id || nextId(),
         role: "user",
         content: data.content,
-        timestamp: data.timestamp || Date.now(),
+        ...messageTime(data.timestamp),
       });
       store.clearPromptSuggestions(sessionId);
       break;
@@ -935,7 +967,7 @@ function handleParsedMessage(
         id: nextId(),
         role: "system",
         content: summary,
-        timestamp: data.timestamp || Date.now(),
+        ...messageTime(data.timestamp),
       });
       break;
     }
@@ -966,7 +998,7 @@ function handleParsedMessage(
         id: nextId(),
         role: "system",
         content: data.message,
-        timestamp: Date.now(),
+        ...messageTime(data.timestamp),
         isError: true,
       });
       break;
@@ -986,7 +1018,7 @@ function handleParsedMessage(
         id: nextId(),
         role: "system",
         content: data.explanation || "The model declined to respond.",
-        timestamp: Date.now(),
+        ...messageTime(data.timestamp),
         refusal: {
           category: data.category,
           explanation: data.explanation,
@@ -1068,7 +1100,7 @@ function handleParsedMessage(
             id: histMsg.id || nextId(),
             role: "user",
             content: histMsg.content,
-            timestamp: histMsg.timestamp,
+            ...messageTime(histMsg.timestamp, 0),
           });
         } else if (histMsg.type === "assistant") {
           const msg = histMsg.message;
@@ -1078,7 +1110,7 @@ function handleParsedMessage(
             role: "assistant",
             content: textContent,
             contentBlocks: msg.content,
-            timestamp: histMsg.timestamp || Date.now(),
+            ...messageTime(histMsg.timestamp),
             parentToolUseId: histMsg.parent_tool_use_id,
             model: msg.model,
             stopReason: msg.stop_reason,
@@ -1134,7 +1166,8 @@ function handleParsedMessage(
               id: `hist-error-${i}`,
               role: "system",
               content: `Error: ${r.errors.join(", ")}`,
-              timestamp: Date.now(),
+              // Results are stored unstamped: the time is not known.
+              ...messageTime(undefined),
             });
           }
           // Track cost/turns from history result, same as the live result handler
@@ -1165,7 +1198,7 @@ function handleParsedMessage(
             id: `hist-system-event-${i}`,
             role: "system",
             content: summary,
-            timestamp: histMsg.timestamp || Date.now(),
+            ...messageTime(histMsg.timestamp),
           });
         }
       }
@@ -1187,7 +1220,7 @@ function handleParsedMessage(
             if (current.role === "assistant" && incoming.role === "assistant") {
               merged[idx] = mergeAssistantMessage(current, incoming);
             } else {
-              merged[idx] = incoming;
+              merged[idx] = replaceMergedEntry(current, incoming);
             }
           }
           merged.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));

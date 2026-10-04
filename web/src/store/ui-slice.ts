@@ -42,6 +42,8 @@ export interface UiSlice {
   taskPanelConfigMode: boolean;
   homeResetKey: number;
   publicUrl: string;
+  /** Global time-zone setting for chat times: IANA zone, "" = Automatic (device zone). */
+  timeZone: string;
   activeTab: "chat" | "diff";
   chatTabReentryTickBySession: Map<string, number>;
   diffPanelSelectedFile: Map<string, string>;
@@ -54,6 +56,7 @@ export interface UiSlice {
   setNotificationDesktop: (v: boolean) => void;
   toggleNotificationDesktop: () => void;
   setPublicUrl: (url: string) => void;
+  setTimeZone: (zone: string) => void;
   setSidebarOpen: (v: boolean) => void;
   setTaskPanelOpen: (open: boolean) => void;
   setTaskPanelConfigMode: (open: boolean) => void;
@@ -82,6 +85,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
   taskPanelConfigMode: false,
   homeResetKey: 0,
   publicUrl: "",
+  timeZone: "",
   activeTab: "chat",
   chatTabReentryTickBySession: new Map(),
   diffPanelSelectedFile: new Map(),
@@ -118,6 +122,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set) => (
       return { notificationDesktop: next };
     }),
   setPublicUrl: (url) => set({ publicUrl: url }),
+  setTimeZone: (zone) => set({ timeZone: zone }),
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
   setTaskPanelOpen: (open) => set({ taskPanelOpen: open }),
   setTaskPanelConfigMode: (open) => set({ taskPanelConfigMode: open }),

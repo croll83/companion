@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { MessageBubble } from "./MessageBubble.js";
+import { MessageFeed } from "./MessageFeed.js";
 import {
   ToolBlock,
   getToolIcon,
@@ -397,6 +398,62 @@ const MSG_SYSTEM: ChatMessage = {
   content: "Context compacted successfully",
   timestamp: Date.now() - 30000,
 };
+
+// Backend error plate (red), with its send time.
+const MSG_ERROR: ChatMessage = {
+  id: "msg-error",
+  role: "system",
+  content: "Codex server busy. Retrying your message...",
+  timestamp: Date.now() - 25000,
+  isError: true,
+};
+
+// History entry stored before timestamps existed: no time is shown for it.
+const MSG_USER_TIME_UNKNOWN: ChatMessage = {
+  id: "msg-time-unknown",
+  role: "user",
+  content: "An old message whose send time was never recorded",
+  timestamp: Date.now(),
+  timestampUnknown: true,
+};
+
+// Day separators: a feed spanning three calendar days (plus a legacy message
+// without a known time, which neither shows a time nor opens a day).
+const DAY_SEPARATORS_SESSION_ID = "playground-day-separators";
+const DAY_MS = 24 * 60 * 60 * 1000;
+function buildDaySeparatorMessages(now: number): ChatMessage[] {
+  return [
+    { id: "day-legacy", role: "user", content: "Legacy message (time unknown)", timestamp: now - 9 * DAY_MS, timestampUnknown: true },
+    { id: "day-old-u", role: "user", content: "Can you review last week's migration?", timestamp: now - 3 * DAY_MS },
+    { id: "day-old-a", role: "assistant", content: "Sure — the migration looks good, two nits inline.", timestamp: now - 3 * DAY_MS + 90_000 },
+    { id: "day-yday-u", role: "user", content: "Run the full test suite please.", timestamp: now - DAY_MS },
+    { id: "day-yday-a", role: "assistant", content: "All 4,210 tests pass.", timestamp: now - DAY_MS + 60_000 },
+    { id: "day-today-u", role: "user", content: "Good morning! Let's ship it.", timestamp: now },
+    { id: "day-today-a", role: "assistant", content: "Release branch is ready.", timestamp: now },
+  ];
+}
+
+/** MessageFeed seeded with messages over several days, to show the separators. */
+function DaySeparatorsDemo() {
+  useEffect(() => {
+    useStore.getState().setMessages(DAY_SEPARATORS_SESSION_ID, buildDaySeparatorMessages(Date.now()));
+    return () => {
+      useStore.setState((s) => {
+        const messages = new Map(s.messages);
+        messages.delete(DAY_SEPARATORS_SESSION_ID);
+        return { messages };
+      });
+    };
+  }, []);
+  return (
+    <div
+      data-testid="playground-day-separators"
+      className="max-w-3xl border border-cc-border rounded-xl overflow-hidden bg-cc-card h-[520px] flex flex-col"
+    >
+      <MessageFeed sessionId={DAY_SEPARATORS_SESSION_ID} />
+    </div>
+  );
+}
 
 // Refusal banner (stop_reason: "refusal")
 const MSG_REFUSAL: ChatMessage = {
@@ -1074,10 +1131,24 @@ export function Playground() {
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />
             </Card>
+            <Card label="Error message (with send time)">
+              <MessageBubble message={MSG_ERROR} />
+            </Card>
+            <Card label="User message (history without timestamp: no time shown)">
+              <MessageBubble message={MSG_USER_TIME_UNKNOWN} />
+            </Card>
             <Card label="Refusal (stop_reason: refusal)">
               <MessageBubble message={MSG_REFUSAL} />
             </Card>
           </div>
+        </Section>
+
+        {/* ─── Day Separators ──────────────────────── */}
+        <Section
+          title="Day Separators"
+          description="MessageFeed splits the chat by calendar day (Today / Yesterday / date) in the Settings time zone; bubbles show their send time"
+        >
+          <DaySeparatorsDemo />
         </Section>
 
         {/* ─── Tool Blocks (standalone) ──────────────────────── */}

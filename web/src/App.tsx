@@ -156,7 +156,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Load publicUrl from settings + check onboarding status.
+  // Load publicUrl + the chat time zone from settings + check onboarding status.
   // Re-runs when isAuthenticated flips to true (e.g. after login) so that
   // users who authenticate first still see the onboarding wizard.
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -164,6 +164,7 @@ export default function App() {
     if (!isAuthenticated) return;
     api.getSettings().then((s) => {
       if (s.publicUrl) useStore.getState().setPublicUrl(s.publicUrl);
+      if (typeof s.timeZone === "string") useStore.getState().setTimeZone(s.timeZone);
       if (!s.onboardingCompleted) {
         setShowOnboarding(true);
       }

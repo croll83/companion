@@ -257,6 +257,8 @@ export interface ClaudeSessionHistoryMessage {
   content: string;
   contentBlocks?: ContentBlock[];
   timestamp: number;
+  /** The transcript line had no usable time: `timestamp` is only a sort key. */
+  timestampUnknown?: boolean;
   model?: string;
   stopReason?: string | null;
 }
@@ -416,6 +418,8 @@ export interface AppSettings {
   dockerAutoUpdate: boolean;
   cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
   telegramBotTokenConfigured: boolean;
+  /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
+  timeZone: string;
 }
 
 export interface HostsCheckResult {
@@ -1007,6 +1011,7 @@ export const api = {
     dockerAutoUpdate?: boolean;
     cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
     telegramBotToken?: string;
+    timeZone?: string;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

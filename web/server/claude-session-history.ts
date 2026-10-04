@@ -12,6 +12,11 @@ interface ClaudeSessionHistoryMessage {
   content: string;
   contentBlocks?: ContentBlock[];
   timestamp: number;
+  /**
+   * The transcript line carried no usable time: `timestamp` is then only a
+   * sort key (request time + line order) and must not be shown as a send time.
+   */
+  timestampUnknown?: boolean;
   model?: string;
   stopReason?: string | null;
 }
@@ -93,13 +98,14 @@ function resolveSessionSourceFile(
   return newest;
 }
 
-function parseTimestamp(raw: unknown, fallback: number): number {
+/** The line's time in epoch ms, or null when it has none / it is unparseable. */
+function parseTimestamp(raw: unknown): number | null {
   if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   if (typeof raw === "string") {
     const parsed = Date.parse(raw);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return fallback;
+  return null;
 }
 
 function extractUserContent(content: unknown): string {
@@ -253,8 +259,10 @@ function parseHistoryFile(
     if (parsed.isSidechain === true) continue;
     if (typeof parsed.sessionId === "string" && parsed.sessionId !== sessionId) continue;
 
-    const fallbackTs = Date.now() + lineOrder;
-    const timestamp = parseTimestamp(parsed.timestamp, fallbackTs);
+    const parsedTs = parseTimestamp(parsed.timestamp);
+    // No usable time: keep a sort key (request time + line order) but flag it.
+    const timestamp = parsedTs ?? Date.now() + lineOrder;
+    const timeFields = parsedTs === null ? { timestamp, timestampUnknown: true } : { timestamp };
     const message = parsed.message as Record<string, unknown> | undefined;
     const role = typeof message?.role === "string" ? message.role : null;
 
@@ -276,7 +284,7 @@ function parseHistoryFile(
         id: buildMessageId(sessionId, "user", rawId),
         role: "user",
         content: userContent,
-        timestamp,
+        ...timeFields,
         order: lineOrder,
       });
       lineOrder++;
@@ -311,7 +319,7 @@ function parseHistoryFile(
           role: "assistant",
           content: nextContent,
           contentBlocks: mergedBlocks,
-          timestamp,
+          ...timeFields,
           model: typeof message?.model === "string" ? message.model : undefined,
           stopReason:
             (typeof message?.stop_reason === "string" || message?.stop_reason === null)

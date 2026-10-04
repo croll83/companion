@@ -38,4 +38,19 @@ describe("Playground", () => {
     expect(screen.getByText("Context compacted (auto, pre-tokens: 182344).")).toBeTruthy();
     expect(screen.getByText("Hook success: lint (post_tool_use) (exit 0).")).toBeTruthy();
   });
+
+  // Message times + day separators (chat timestamps feature): the dedicated
+  // section seeds a MessageFeed over three days plus a legacy message with an
+  // unknown time, so separators and bubble times are visible in the playground.
+  it("renders the day separators demo with times and separators", async () => {
+    render(<Playground />);
+    expect(screen.getByText("Day Separators")).toBeTruthy();
+    const demo = screen.getByTestId("playground-day-separators");
+    const seps = await within(demo).findAllByRole("separator");
+    // Three days with known times → three separators; the legacy message adds none.
+    expect(seps.map((s) => s.getAttribute("aria-label")).slice(1)).toEqual(["Yesterday", "Today"]);
+    expect(seps).toHaveLength(3);
+    // Six messages with a known time show it; the legacy one does not.
+    expect(demo.querySelectorAll("time")).toHaveLength(6);
+  });
 });

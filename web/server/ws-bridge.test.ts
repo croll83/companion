@@ -1338,6 +1338,36 @@ describe("Browser handlers", () => {
     expect(refusal.category).toBe("cyber");
     expect(refusal.explanation).toBe("Declined.");
     expect(refusal.model).toBe("claude-fable-5");
+    // Server send time, so the chat can show when the refusal happened.
+    expect(typeof refusal.timestamp).toBe("number");
+    expect(refusal.timestamp).toBeGreaterThan(0);
+    // The assistant frame itself also reaches the browser with a timestamp.
+    const assistant = calls.find((c: any) => c.type === "assistant");
+    expect(typeof assistant.timestamp).toBe("number");
+  });
+
+  // Messages injected server-side (Telegram bridge, cron, agents) go through
+  // the same path as typed ones: stored and broadcast with a server timestamp,
+  // so they show a send time in the chat on both backends.
+  it("stamps injected user messages in history and on the wire", () => {
+    mockExecSync.mockImplementation(() => { throw new Error("not a git repo"); });
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    browser.send.mockClear();
+
+    const before = Date.now();
+    bridge.injectUserMessage("s1", "from telegram");
+
+    const stored = bridge.getSession("s1")!.messageHistory.find((m) => m.type === "user_message") as
+      { content: string; timestamp: number } | undefined;
+    expect(stored?.content).toBe("from telegram");
+    expect(stored!.timestamp).toBeGreaterThanOrEqual(before);
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const sent = calls.find((c: any) => c.type === "user_message");
+    expect(sent.timestamp).toBe(stored!.timestamp);
   });
 
   it("does not emit a refusal for a normal assistant turn", async () => {

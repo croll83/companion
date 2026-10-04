@@ -5,7 +5,7 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ChatMessage } from "../types.js";
 
 const { getClaudeSessionHistoryMock } = vi.hoisted(() => ({
@@ -45,6 +45,7 @@ vi.mock("../store.js", () => ({
       chatTabReentryTickBySession:
         mockStoreValues.chatTabReentryTickBySession ?? new Map(),
       sdkSessions: mockStoreValues.sdkSessions ?? [],
+      timeZone: mockStoreValues.timeZone ?? "",
     };
     return selector(state);
   },
@@ -113,6 +114,7 @@ function resetStore() {
   mockStoreValues.toolActivity = new Map();
   mockStoreValues.chatTabReentryTickBySession = new Map();
   mockStoreValues.sdkSessions = [];
+  mockStoreValues.timeZone = "";
 }
 
 beforeEach(() => {
@@ -735,5 +737,217 @@ describe("MessageFeed - subagent grouping", () => {
     expect(screen.getByText(/sender: thr_main/)).toBeTruthy();
     expect(screen.getByText("thr_sub_1")).toBeTruthy();
     expect(screen.getByText("thr_sub_2")).toBeTruthy();
+  });
+});
+
+// ─── Day separators ──────────────────────────────────────────────────────────
+// Like messaging apps, the feed puts a centered "Today" / "Yesterday" / date
+// pill before the first message of each calendar day, computed in the global
+// time-zone setting (store.timeZone). Labels are produced with the same util
+// so assertions hold in any test-runner locale.
+describe("MessageFeed - day separators", () => {
+  const ROME = "Europe/Rome";
+  const at = (s: string) => Date.parse(s);
+
+  async function labelFor(ts: number, zone: string) {
+    const { formatDayLabel } = await import("../utils/message-time.js");
+    return formatDayLabel(ts, zone);
+  }
+
+  function separators() {
+    return screen.queryAllByRole("separator");
+  }
+
+  // Two days of messages: one separator per day, the first one before the
+  // very first rendered message, each with an aria-label naming the day.
+  it("inserts an accessible separator before the first message of each day", async () => {
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-basic";
+    const d1a = at("2026-03-10T09:00:00Z");
+    const d1b = at("2026-03-10T15:00:00Z");
+    const d2 = at("2026-03-11T08:00:00Z");
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "first", timestamp: d1a }),
+      makeMessage({ id: "a1", role: "assistant", content: "reply", timestamp: d1b }),
+      makeMessage({ id: "u2", role: "user", content: "next day", timestamp: d2 }),
+    ]);
+    const { container } = render(<MessageFeed sessionId={sid} />);
+
+    const seps = separators();
+    expect(seps).toHaveLength(2);
+    expect(seps[0].getAttribute("aria-label")).toBe(await labelFor(d1a, ROME));
+    expect(seps[1].getAttribute("aria-label")).toBe(await labelFor(d2, ROME));
+    expect(seps[0].textContent).toBe(await labelFor(d1a, ROME));
+
+    // Placement: separator 1 precedes "first", separator 2 sits between
+    // "reply" and "next day".
+    const text = container.textContent || "";
+    const idx = (needle: string) => text.indexOf(needle);
+    expect(idx(seps[0].textContent!)).toBeLessThan(idx("first"));
+    expect(idx("reply")).toBeLessThan(text.indexOf(seps[1].textContent!, idx("reply")));
+    expect(text.indexOf(seps[1].textContent!, idx("reply"))).toBeLessThan(idx("next day"));
+  });
+
+  // Day boundaries depend on the zone: 21:30 and 22:30 UTC on 14 June are the
+  // same day in UTC but 23:30 on the 14th and 00:30 on the 15th in Rome.
+  it("computes days in the configured zone", () => {
+    const sid = "days-zone";
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "late", timestamp: at("2026-06-14T21:30:00Z") }),
+      makeMessage({ id: "u2", role: "user", content: "later", timestamp: at("2026-06-14T22:30:00Z") }),
+    ]);
+
+    mockStoreValues.timeZone = "UTC";
+    const { rerender, unmount } = render(<MessageFeed sessionId={sid} />);
+    expect(separators()).toHaveLength(1);
+
+    // Switching the setting re-renders the open chat with Rome days.
+    mockStoreValues.timeZone = ROME;
+    rerender(<MessageFeed sessionId={sid} />);
+    expect(separators()).toHaveLength(2);
+    unmount();
+  });
+
+  // Messages whose send time is unknown (legacy history) neither open nor
+  // break a day: no separator is invented for them.
+  it("ignores messages with an unknown timestamp", () => {
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-unknown";
+    const day = at("2026-03-10T09:00:00Z");
+    setStoreMessages(sid, [
+      makeMessage({ id: "legacy", role: "user", content: "legacy", timestamp: Date.now(), timestampUnknown: true }),
+      makeMessage({ id: "u1", role: "user", content: "known", timestamp: day }),
+      makeMessage({ id: "legacy2", role: "assistant", content: "legacy reply", timestamp: Date.now(), timestampUnknown: true }),
+      makeMessage({ id: "u2", role: "user", content: "same day", timestamp: day + 60_000 }),
+    ]);
+    render(<MessageFeed sessionId={sid} />);
+    expect(separators()).toHaveLength(1);
+    // And the legacy bubbles show no time, the known ones do.
+    expect(document.querySelectorAll("time")).toHaveLength(2);
+  });
+
+  // Tool-call-only groups take the day of their first message.
+  it("opens a day with a tool-only group", async () => {
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-tools";
+    const d1 = at("2026-03-10T09:00:00Z");
+    const d2 = at("2026-03-11T09:00:00Z");
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "go", timestamp: d1 }),
+      makeMessage({
+        id: "t1",
+        role: "assistant",
+        content: "",
+        timestamp: d2,
+        contentBlocks: [{ type: "tool_use", id: "tu1", name: "Bash", input: { command: "ls" } }],
+      }),
+    ]);
+    render(<MessageFeed sessionId={sid} />);
+    const seps = separators();
+    expect(seps).toHaveLength(2);
+    expect(seps[1].getAttribute("aria-label")).toBe(await labelFor(d2, ROME));
+  });
+
+  // Loading an older history page prepends messages: the top separator moves
+  // to the new first message and the old first day keeps exactly one label.
+  it("stays correct when older history is prepended", async () => {
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-prepend";
+    const d2 = at("2026-03-11T09:00:00Z");
+    const recent = [
+      makeMessage({ id: "u2", role: "user", content: "recent", timestamp: d2 }),
+      makeMessage({ id: "a2", role: "assistant", content: "recent reply", timestamp: d2 + 1000 }),
+    ];
+    setStoreMessages(sid, recent);
+    const { rerender } = render(<MessageFeed sessionId={sid} />);
+    expect(separators().map((s) => s.getAttribute("aria-label"))).toEqual([await labelFor(d2, ROME)]);
+
+    const d1 = at("2026-03-10T09:00:00Z");
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "older", timestamp: d1 }),
+      makeMessage({ id: "u1b", role: "user", content: "older too", timestamp: d1 + 1000 }),
+      ...recent,
+    ]);
+    rerender(<MessageFeed sessionId={sid} />);
+    expect(separators().map((s) => s.getAttribute("aria-label"))).toEqual([
+      await labelFor(d1, ROME),
+      await labelFor(d2, ROME),
+    ]);
+  });
+
+  // A chat left open past midnight (in the configured zone) re-labels its
+  // separators on its own: "Today" becomes "Yesterday" without any new
+  // message or setting change triggering a re-render.
+  it("re-labels separators when the day changes while the chat is open", () => {
+    vi.useFakeTimers();
+    try {
+      mockStoreValues.timeZone = ROME;
+      // 22:00 in Rome on 10 March; the message was sent that morning.
+      vi.setSystemTime(at("2026-03-10T21:00:00Z"));
+      const sid = "days-rollover";
+      setStoreMessages(sid, [
+        makeMessage({ id: "u1", role: "user", content: "morning", timestamp: at("2026-03-10T08:00:00Z") }),
+      ]);
+      render(<MessageFeed sessionId={sid} />);
+      expect(separators().map((s) => s.getAttribute("aria-label"))).toEqual(["Today"]);
+
+      // Past midnight in Rome (00:01 on 11 March): the next check re-labels.
+      act(() => {
+        vi.setSystemTime(at("2026-03-10T23:01:00Z"));
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(separators().map((s) => s.getAttribute("aria-label"))).toEqual(["Yesterday"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Resumed CLI transcripts: a line the server flags timestampUnknown (no or
+  // unparseable time in the JSONL; its timestamp is only a sort key built from
+  // the request time) renders without a time and opens no day.
+  it("shows no time for resumed transcript lines flagged timestampUnknown", async () => {
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-resume-unknown";
+    setStoreMessages(sid, []);
+    setSdkSessions([
+      {
+        sessionId: sid,
+        state: "connected",
+        cwd: "/Users/test/repo",
+        createdAt: Date.now(),
+        backendType: "claude",
+        resumeSessionAt: "prior-unknown",
+        forkSession: true,
+      },
+    ]);
+    getClaudeSessionHistoryMock.mockResolvedValueOnce({
+      sourceFile: "/x.jsonl",
+      nextCursor: 2,
+      hasMore: false,
+      totalMessages: 2,
+      messages: [
+        { id: "r-u1", role: "user", content: "undated line", timestamp: Date.now(), timestampUnknown: true },
+        { id: "r-a1", role: "assistant", content: "dated line", timestamp: at("2026-03-10T09:00:00Z") },
+      ],
+    });
+    render(<MessageFeed sessionId={sid} />);
+    fireEvent.click(screen.getByRole("button", { name: /load previous history/i }));
+    expect(await screen.findByText("undated line")).toBeTruthy();
+    expect(await screen.findByText("dated line")).toBeTruthy();
+    // Only the dated line gets a time and a day separator.
+    expect(document.querySelectorAll("time")).toHaveLength(1);
+    expect(separators()).toHaveLength(1);
+  });
+
+  it("passes axe with day separators and message times", async () => {
+    const { axe } = await import("vitest-axe");
+    mockStoreValues.timeZone = ROME;
+    const sid = "days-axe";
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "a", timestamp: at("2026-03-10T09:00:00Z") }),
+      makeMessage({ id: "u2", role: "user", content: "b", timestamp: at("2026-03-11T09:00:00Z") }),
+    ]);
+    const { container } = render(<MessageFeed sessionId={sid} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

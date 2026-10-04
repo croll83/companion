@@ -72,6 +72,16 @@ describe("UI state", () => {
     expect(localStorage.getItem("cc-dark-mode")).toBe(String(initial));
   });
 
+  // Global chat time zone: "" (Automatic) by default, set from the server
+  // setting at startup and whenever it is saved in Settings.
+  it("setTimeZone: stores the global chat time zone", () => {
+    expect(useStore.getState().timeZone).toBe("");
+    useStore.getState().setTimeZone("Europe/Rome");
+    expect(useStore.getState().timeZone).toBe("Europe/Rome");
+    useStore.getState().setTimeZone("");
+    expect(useStore.getState().timeZone).toBe("");
+  });
+
   it("newSession: clears currentSessionId and increments homeResetKey", () => {
     useStore.getState().setCurrentSession("s1");
     const keyBefore = useStore.getState().homeResetKey;

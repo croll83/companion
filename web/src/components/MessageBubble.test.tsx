@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import type { ChatMessage, ContentBlock } from "../types.js";
 
 // Mock react-markdown to exercise custom component renderers while avoiding ESM/parsing issues.
@@ -666,5 +666,160 @@ describe("MessageBubble: backend errors", () => {
     );
     expect(container.querySelector(".bg-cc-error\\/10")).toBeNull();
     expect(container.querySelector(".font-mono-code.text-cc-error")).toBeNull();
+  });
+});
+
+// ─── Message send time ───────────────────────────────────────────────────────
+// Bubbles show their send time small and muted at the bottom-right, with the
+// full date/time/zone as a tooltip, rendered in the global time-zone setting
+// (store.timeZone; "" = the device zone). Expected strings are produced with
+// the same util so the assertions hold in any test-runner locale.
+describe("MessageBubble - send time", () => {
+  // 22:30 UTC on 14 June 2026 = 00:30 on 15 June in Rome, 07:30 in Tokyo.
+  const TS = Date.parse("2026-06-14T22:30:00Z");
+
+  beforeEach(async () => {
+    const { useStore } = await import("../store.js");
+    useStore.getState().setTimeZone("Europe/Rome");
+  });
+
+  afterEach(async () => {
+    const { useStore } = await import("../store.js");
+    useStore.getState().setTimeZone("");
+  });
+
+  async function timeIn(zone: string) {
+    const { formatMessageTime } = await import("../utils/message-time.js");
+    return formatMessageTime(TS, zone);
+  }
+
+  it("shows the time with a full-date tooltip on a user bubble", async () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "user", content: "hello", timestamp: TS })} />,
+    );
+    const time = container.querySelector("time")!;
+    expect(time).not.toBeNull();
+    expect(time.textContent).toBe(await timeIn("Europe/Rome"));
+    expect(time.getAttribute("dateTime")).toBe("2026-06-14T22:30:00.000Z");
+    // Tooltip: full date + time + zone, in the configured zone (the 15th in Rome).
+    expect(time.getAttribute("title")).toContain("2026");
+    expect(time.getAttribute("title")).toContain("15");
+    expect(time.getAttribute("title")).toContain("(Europe/Rome)");
+  });
+
+  it("shows the time on a finished assistant message with text", async () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "assistant", content: "answer", timestamp: TS })} />,
+    );
+    expect(container.querySelector("time")?.textContent).toBe(await timeIn("Europe/Rome"));
+  });
+
+  it("shows the time on an error bubble", async () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "system", isError: true, content: "boom", timestamp: TS })} />,
+    );
+    expect(screen.getByRole("alert").querySelector("time")?.textContent).toBe(await timeIn("Europe/Rome"));
+    expect(container.querySelectorAll("time")).toHaveLength(1);
+  });
+
+  // Contrast: on tinted surfaces (user bubble gradient, error plate)
+  // text-cc-muted falls below WCAG AA in light mode, so the time uses the
+  // darker text-cc-fg/70 there; on the plain feed background (assistant) it
+  // keeps text-cc-muted. jsdom has no real colours, so axe can't catch this:
+  // the class is asserted directly.
+  it("uses a contrast-safe colour for the time on tinted bubbles", () => {
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ id: "u", role: "user", content: "hello", timestamp: TS })} />
+        <MessageBubble message={makeMessage({ id: "a", role: "assistant", content: "answer", timestamp: TS })} />
+        <MessageBubble message={makeMessage({ id: "e", role: "system", isError: true, content: "boom", timestamp: TS })} />
+      </div>,
+    );
+    const [userTime, assistantTime, errorTime] = Array.from(container.querySelectorAll("time"));
+    expect(userTime.className).toContain("text-cc-fg/70");
+    expect(userTime.className).not.toContain("text-cc-muted");
+    expect(errorTime.className).toContain("text-cc-fg/70");
+    expect(errorTime.className).not.toContain("text-cc-muted");
+    expect(assistantTime.className).toContain("text-cc-muted");
+  });
+
+  // The tooltip names the short zone too, so the repeated DST hour is
+  // unambiguous (CEST vs CET in Rome on 2026-10-25).
+  it("tooltip distinguishes the two 02:30s of the DST-end day", () => {
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ id: "x", role: "user", content: "a", timestamp: Date.parse("2026-10-25T00:30:00Z") })} />
+        <MessageBubble message={makeMessage({ id: "y", role: "user", content: "b", timestamp: Date.parse("2026-10-25T01:30:00Z") })} />
+      </div>,
+    );
+    const [first, second] = Array.from(container.querySelectorAll("time"));
+    expect(first.textContent).toBe(second.textContent);
+    expect(first.getAttribute("title")).not.toBe(second.getAttribute("title"));
+  });
+
+  // Unknown send time (legacy history entry): render nothing rather than the
+  // placeholder, which would be the page-load time.
+  it("renders no time when the timestamp is unknown", () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "user", content: "legacy", timestamp: TS, timestampUnknown: true })} />,
+    );
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  it("renders no time while the assistant message is still streaming", () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "assistant", content: "partial", timestamp: TS, isStreaming: true })} />,
+    );
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  // Tool-call-only turns are not bubbles; the time belongs to text answers.
+  it("renders no time on a tool-call-only assistant message", () => {
+    const { container } = render(
+      <MessageBubble
+        message={makeMessage({
+          role: "assistant",
+          content: "",
+          timestamp: TS,
+          contentBlocks: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }],
+        })}
+      />,
+    );
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  // System hairline separators carry no time.
+  it("renders no time on a system hairline", () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "system", content: "Context compacted.", timestamp: TS })} />,
+    );
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  // Changing the global setting re-renders open bubbles in the new zone.
+  it("re-renders in a new zone when the setting changes", async () => {
+    const { useStore } = await import("../store.js");
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: "user", content: "hello", timestamp: TS })} />,
+    );
+    const tokyo = await timeIn("Asia/Tokyo");
+    act(() => useStore.getState().setTimeZone("Asia/Tokyo"));
+    expect(container.querySelector("time")?.textContent).toBe(tokyo);
+    expect(container.querySelector("time")?.getAttribute("title")).toContain("(Asia/Tokyo)");
+  });
+
+  it("passes axe with times on user, assistant and error bubbles", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ role: "user", content: "hello", timestamp: TS })} />
+        <MessageBubble message={makeMessage({ role: "assistant", content: "answer", timestamp: TS })} />
+        <MessageBubble message={makeMessage({ role: "system", isError: true, content: "boom", timestamp: TS })} />
+      </div>,
+    );
+    // The react-markdown mock at the top of this file renders a bare <li>
+    // outside any list to exercise every renderer; that artifact is not real
+    // output, so only the "listitem" rule is switched off here.
+    expect(await axe(container, { rules: { listitem: { enabled: false } } })).toHaveNoViolations();
   });
 });

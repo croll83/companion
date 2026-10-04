@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo, useState, useCallback } from "react";
+import { Fragment, useEffect, useRef, useMemo, useState, useCallback } from "react";
 import { useStore } from "../store.js";
 import { loadMoreHistory } from "../ws.js";
 import { api } from "../api.js";
@@ -14,6 +14,12 @@ import type { ToolActivityEntry } from "../store/tasks-slice.js";
 import { formatElapsed, formatTokenCount } from "../utils/format.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
+import {
+  dayKey,
+  formatDayLabel,
+  hasKnownTimestamp,
+  resolveTimeZone,
+} from "../utils/message-time.js";
 
 const FEED_PAGE_SIZE = 100;
 const RESUME_HISTORY_PAGE_SIZE = 40;
@@ -42,6 +48,8 @@ interface ToolMsgGroup {
   toolName: string;
   items: ToolItem[];
   firstId: string;
+  /** Send time of the group's first message, when known (day separators). */
+  firstTimestamp?: number;
 }
 
 interface SubagentGroup {
@@ -136,6 +144,7 @@ function groupToolMessages(messages: ChatMessage[]): FeedEntry[] {
         toolName,
         items: extractToolItems(msg),
         firstId: msg.id,
+        firstTimestamp: hasKnownTimestamp(msg) ? msg.timestamp : undefined,
       });
     } else {
       entries.push({ kind: "message", msg });
@@ -375,12 +384,101 @@ function ToolMessageGroup({ group }: { group: ToolMsgGroup }) {
   );
 }
 
-function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[] }) {
+/** Known send time of a feed entry, or null (subagent groups, unstamped history). */
+function getEntryTimestamp(entry: FeedEntry): number | null {
+  if (entry.kind === "message") return hasKnownTimestamp(entry.msg) ? entry.msg.timestamp : null;
+  if (entry.kind === "tool_msg_group") return entry.firstTimestamp ?? null;
+  return null;
+}
+
+/**
+ * For each entry, the timestamp whose day it opens — or null when it does not
+ * start a new day. Days are computed in `timeZone`. The first entry with a
+ * known time always opens a day, so the top of the feed is labelled even when
+ * older pages are not loaded yet; prepending a page just moves that label up.
+ * Entries without a known time never open (or close) a day.
+ */
+function computeDayStarts(entries: FeedEntry[], timeZone: string): (number | null)[] {
+  let currentDay: string | null = null;
+  return entries.map((entry) => {
+    const ts = getEntryTimestamp(entry);
+    if (ts === null) return null;
+    const key = dayKey(ts, timeZone);
+    if (key === currentDay) return null;
+    currentDay = key;
+    return ts;
+  });
+}
+
+/** How often an open feed checks whether the calendar day changed. */
+const DAY_ROLLOVER_CHECK_MS = 60_000;
+
+/**
+ * An instant inside the current calendar day of `timeZone`. It only changes
+ * when that day does (checked once a minute, and right away when the zone
+ * changes), so a chat left open past midnight re-labels its separators
+ * ("Today" becomes "Yesterday") without re-rendering the feed every minute.
+ */
+function useCurrentDayInstant(timeZone: string): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const check = () => {
+      const t = Date.now();
+      setNow((prev) => (dayKey(prev, timeZone) === dayKey(t, timeZone) ? prev : t));
+    };
+    check();
+    const id = setInterval(check, DAY_ROLLOVER_CHECK_MS);
+    return () => clearInterval(id);
+  }, [timeZone]);
+  return now;
+}
+
+/** Centered "Today" / "Yesterday" / date pill between messages of different days. */
+function DaySeparator({ timestamp, timeZone, now }: { timestamp: number; timeZone: string; now: number }) {
+  const label = formatDayLabel(timestamp, timeZone, now);
+  return (
+    <div role="separator" aria-label={label} className="flex items-center gap-3 select-none">
+      <div className="flex-1 h-px bg-cc-border" />
+      <span className="shrink-0 px-2.5 py-0.5 rounded-full border border-cc-border bg-cc-card text-[11px] font-medium text-cc-muted">
+        {label}
+      </span>
+      <div className="flex-1 h-px bg-cc-border" />
+    </div>
+  );
+}
+
+function FeedEntries({
+  entries,
+  toolActivity,
+  daySeparators,
+}: {
+  entries: FeedEntry[];
+  toolActivity?: ToolActivityEntry[];
+  /**
+   * Split the feed by day in `timeZone`, labelling days relative to `now`.
+   * Only the top-level feed passes this; nested subagent feeds are not split.
+   */
+  daySeparators?: { timeZone: string; now: number };
+}) {
+  const timeZone = daySeparators?.timeZone;
+  const dayStarts = useMemo(
+    () => (timeZone ? computeDayStarts(entries, timeZone) : null),
+    [entries, timeZone],
+  );
   return (
     <>
       {entries.map((entry, i) => {
+        const dayStart = dayStarts?.[i] ?? null;
+        const separator = dayStart !== null && daySeparators
+          ? <DaySeparator timestamp={dayStart} timeZone={daySeparators.timeZone} now={daySeparators.now} />
+          : null;
         if (entry.kind === "tool_msg_group") {
-          return <ToolMessageGroup key={entry.firstId || i} group={entry} />;
+          return (
+            <Fragment key={entry.firstId || i}>
+              {separator}
+              <ToolMessageGroup group={entry} />
+            </Fragment>
+          );
         }
         if (entry.kind === "subagent") {
           return <SubagentContainer key={entry.taskToolUseId} group={entry} />;
@@ -393,10 +491,13 @@ function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActi
         // Show turn summary after assistant messages with completed tool calls
         const allComplete = matchingActivity.length > 0 && matchingActivity.every((a) => a.completedAt);
         return (
-          <div key={msg.id}>
-            <MessageBubble message={msg} />
-            {allComplete && <ToolTurnSummary entries={matchingActivity} />}
-          </div>
+          <Fragment key={msg.id}>
+            {separator}
+            <div>
+              <MessageBubble message={msg} />
+              {allComplete && <ToolTurnSummary entries={matchingActivity} />}
+            </div>
+          </Fragment>
         );
       })}
     </>
@@ -598,6 +699,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const toolProgress = useStore((s) => s.toolProgress.get(sessionId));
   const toolActivity = useStore((s) => s.toolActivity.get(sessionId));
   const historyWindow = useStore((s) => s.historyWindow?.get(sessionId));
+  const timeZoneSetting = useStore((s) => s.timeZone);
+  const timeZone = resolveTimeZone(timeZoneSetting);
+  const dayNow = useCurrentDayInstant(timeZone);
+  const daySeparators = useMemo(() => ({ timeZone, now: dayNow }), [timeZone, dayNow]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
@@ -720,7 +825,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
             content: msg.content,
             contentBlocks:
               msg.role === "assistant" ? msg.contentBlocks : undefined,
+            // No recorded time (missing, or the server flagged its value as
+            // a fallback sort key): order by it, never show it.
             timestamp: msg.timestamp || Date.now(),
+            ...(!msg.timestamp || msg.timestampUnknown ? { timestampUnknown: true } : {}),
             model: msg.role === "assistant" ? msg.model : undefined,
             stopReason: msg.role === "assistant" ? msg.stopReason : undefined,
           }),
@@ -1011,7 +1119,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} daySeparators={daySeparators} />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (

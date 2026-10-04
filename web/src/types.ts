@@ -34,6 +34,12 @@ export interface ChatMessage {
    * separators and were easy to scroll straight past.
    */
   isError?: boolean;
+  /**
+   * Set when the server never recorded when this message was sent (history
+   * entries written before timestamps were stamped). `timestamp` then holds a
+   * placeholder that only serves ordering; the UI must not show it as a time.
+   */
+  timestampUnknown?: boolean;
 }
 
 export interface TaskItem {

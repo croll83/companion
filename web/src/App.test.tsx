@@ -379,6 +379,23 @@ describe("App", () => {
     });
   });
 
+  describe("settings loaded at startup", () => {
+    // The chat time zone is a global server setting; App loads it into the
+    // store once authenticated so every MessageBubble/MessageFeed renders in it.
+    it("loads the time-zone setting into the store", async () => {
+      const setTimeZone = vi.fn();
+      setStoreValues({ isAuthenticated: true, setTimeZone, setPublicUrl: vi.fn() });
+      const { api } = await import("./api.js");
+      (api.getSettings as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        publicUrl: "",
+        onboardingCompleted: true,
+        timeZone: "Europe/Rome",
+      });
+      render(<App />);
+      await waitFor(() => expect(setTimeZone).toHaveBeenCalledWith("Europe/Rome"));
+    });
+  });
+
   describe("dark mode", () => {
     it("toggles dark class on document element based on darkMode state", () => {
       // The App applies/removes the "dark" class on <html> via an effect.
