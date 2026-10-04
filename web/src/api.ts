@@ -1,5 +1,6 @@
 import type { SdkSessionInfo } from "./types.js";
 import type { ContentBlock } from "./types.js";
+import type { CliBridgeMode } from "../server/cli-bridge-mode.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -416,7 +417,7 @@ export interface AppSettings {
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
-  cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
+  cliBridgeMode: CliBridgeMode;
   telegramBotTokenConfigured: boolean;
   /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
   timeZone: string;
@@ -1009,7 +1010,7 @@ export const api = {
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
-    cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
+    cliBridgeMode?: CliBridgeMode;
     telegramBotToken?: string;
     timeZone?: string;
   }) => put<AppSettings>("/settings", data),

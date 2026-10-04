@@ -2095,6 +2095,37 @@ describe("PUT /api/settings", () => {
     const json = await res.json();
     expect(json).toEqual({ error: "timeZone must be a string" });
   });
+
+  // ── cliBridgeMode ───────────────────────────────────────────────────────
+  // Regression: the route only allowed loopback/jsonHandoff/tlsLoopback, so
+  // PUT {cliBridgeMode:"stdio"} returned 400 and the UI silently reverted.
+  // "stdio" must reach updateSettings unchanged.
+  it("forwards cliBridgeMode=stdio to updateSettings", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cliBridgeMode: "stdio" }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ cliBridgeMode: "stdio" }),
+    );
+  });
+
+  // An unknown mode is a 400 whose message lists every valid mode (from the
+  // shared CLI_BRIDGE_MODES list), and nothing is saved.
+  it("returns 400 listing all valid modes for an unknown cliBridgeMode", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cliBridgeMode: "wormhole" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "cliBridgeMode must be one of: 'loopback', 'jsonHandoff', 'tlsLoopback', 'stdio'",
+    });
+    expect(settingsManager.updateSettings).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/settings/anthropic/verify", () => {

@@ -7,31 +7,16 @@ import {
 import { join, dirname } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { isValidTimeZoneSetting } from "./time-zone.js";
+import { DEFAULT_CLI_BRIDGE_MODE, isCliBridgeMode, type CliBridgeMode } from "./cli-bridge-mode.js";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 export type UpdateChannel = "stable" | "prerelease";
 
-/**
- * How the companion hands the bridge URL to the spawned Claude Code CLI.
- * - "loopback" (default): pass `--sdk-url ws://127.0.0.1:PORT/...` on argv.
- *   Works on Claude Code v1.2.1+ which rejects the literal "localhost".
- *   BROKEN on Claude Code v2.1.142+ which restricts --sdk-url to a hardcoded
- *   list of Anthropic hostnames.
- * - "jsonHandoff": write a temp JSON descriptor and pass its path via the
- *   CLAUDE_BRIDGE_CONFIG env var, mirroring just-every/code's v0.6.98
- *   approach. Also broken on 2.1.142+ for the same allowlist reason.
- * - "tlsLoopback": spawn the CLI with `--sdk-url wss://<allowlisted-host>:PORT/...`
- *   where the hostname is mapped to 127.0.0.1 via /etc/hosts and served by
- *   an embedded Bun.serve TLS proxy with a self-signed cert trusted via
- *   NODE_EXTRA_CA_CERTS. Works on 2.1.142+ but breaks on builds where
- *   --sdk-url drives the Remote Control SSE/worker transport (e.g. 2.1.175).
- * - "stdio": spawn the CLI WITHOUT --sdk-url and exchange the same NDJSON
- *   protocol over the child's stdin/stdout. This is the supported Agent SDK
- *   "streaming input" transport — immune to the --sdk-url allowlist changes —
- *   and is the recommended mode for host Claude sessions.
- */
-export type CliBridgeMode = "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
+// The CLI bridge modes (see the per-mode docs in ./cli-bridge-mode.ts) are
+// defined ONCE in that browser-safe module so the frontend can share them;
+// re-exported here so `settings-manager` stays the settings import surface.
+export { CLI_BRIDGE_MODES, type CliBridgeMode } from "./cli-bridge-mode.js";
 
 export interface CompanionSettings {
   anthropicApiKey: string;
@@ -141,14 +126,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     publicUrl: typeof raw?.publicUrl === "string" ? raw.publicUrl.trim().replace(/\/+$/, "") : "",
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
-    cliBridgeMode:
-      raw?.cliBridgeMode === "jsonHandoff"
-        ? "jsonHandoff"
-        : raw?.cliBridgeMode === "tlsLoopback"
-          ? "tlsLoopback"
-          : raw?.cliBridgeMode === "stdio"
-            ? "stdio"
-            : "loopback",
+    cliBridgeMode: isCliBridgeMode(raw?.cliBridgeMode) ? raw.cliBridgeMode : DEFAULT_CLI_BRIDGE_MODE,
     telegramBotToken: typeof raw?.telegramBotToken === "string" ? raw.telegramBotToken : "",
     timeZone:
       typeof raw?.timeZone === "string" && isValidTimeZoneSetting(raw.timeZone.trim())

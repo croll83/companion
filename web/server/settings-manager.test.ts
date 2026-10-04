@@ -325,6 +325,14 @@ describe("settings-manager", () => {
     expect(getSettings().cliBridgeMode).toBe("loopback");
   });
 
+  // "stdio" (the recommended mode) must persist and reload like the other
+  // modes — normalization uses the shared CLI_BRIDGE_MODES list.
+  it("persists stdio and reloads it from disk", () => {
+    expect(updateSettings({ cliBridgeMode: "stdio" }).cliBridgeMode).toBe("stdio");
+    _resetForTest(settingsPath);
+    expect(getSettings().cliBridgeMode).toBe("stdio");
+  });
+
   // ── timeZone (chat message times / day separators) ───────────────────────
 
   // Default is "" = Automatic: each viewing device renders in its own zone.
