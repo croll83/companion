@@ -50,7 +50,7 @@ export interface CompanionSettings {
   publicUrl: string;
   updateChannel: UpdateChannel;
   dockerAutoUpdate: boolean;
-  /** See CliBridgeMode. Defaults to "loopback". Optional in fixtures; normalize() applies the default. */
+  /** See CliBridgeMode. Defaults to DEFAULT_CLI_BRIDGE_MODE ("loopback"). Optional in fixtures; normalize() applies the default. */
   cliBridgeMode?: CliBridgeMode;
   /** Telegram bot token (single bot bridging sessions to Telegram groups/topics). */
   telegramBotToken: string;
@@ -92,7 +92,7 @@ let settings: CompanionSettings = {
   publicUrl: "",
   updateChannel: "stable",
   dockerAutoUpdate: false,
-  cliBridgeMode: "loopback",
+  cliBridgeMode: DEFAULT_CLI_BRIDGE_MODE,
   telegramBotToken: "",
   timeZone: "",
   updatedAt: 0,

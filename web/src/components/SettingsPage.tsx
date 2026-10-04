@@ -59,6 +59,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [dockerAutoUpdate, setDockerAutoUpdate] = useState(false);
   const [cliBridgeMode, setCliBridgeMode] = useState<CliBridgeMode>(DEFAULT_CLI_BRIDGE_MODE);
   const [cliBridgeModeError, setCliBridgeModeError] = useState("");
+  // Monotonic id of the latest bridge-mode save; only its response is applied.
+  const bridgeModeReq = useRef(0);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updatingApp, setUpdatingApp] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
@@ -411,14 +413,19 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                         const v = e.target.value;
                         const next = isCliBridgeMode(v) ? v : DEFAULT_CLI_BRIDGE_MODE;
                         const prev = cliBridgeMode;
+                        // Tag this save so a slower, older response can't
+                        // overwrite a newer choice made in the meantime.
+                        const req = ++bridgeModeReq.current;
                         setCliBridgeMode(next);
                         setCliBridgeModeError("");
                         try {
                           const res = await api.updateSettings({ cliBridgeMode: next });
+                          if (req !== bridgeModeReq.current) return;
                           // Trust the server's echo: if it stored something else,
                           // show that instead of the optimistic choice.
                           if (isCliBridgeMode(res?.cliBridgeMode)) setCliBridgeMode(res.cliBridgeMode);
                         } catch (err: unknown) {
+                          if (req !== bridgeModeReq.current) return;
                           // Roll back AND tell the user — a rejected save must not
                           // look like a silent revert.
                           setCliBridgeMode(prev);

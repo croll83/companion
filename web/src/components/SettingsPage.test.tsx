@@ -1460,6 +1460,48 @@ describe("SettingsPage – extended behaviour", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("offline");
   });
 
+  // Race guard: two quick changes whose responses arrive out of order. The
+  // older save (stdio) resolving AFTER the newer one (jsonHandoff) must not
+  // overwrite the select — the last choice/write wins.
+  it("ignores a stale bridge mode response that resolves after a newer one", async () => {
+    let resolveA!: (v: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    mockApi.updateSettings
+      .mockImplementationOnce(() => new Promise((r) => { resolveA = r; }))
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = r; }));
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: "stdio" } });
+    fireEvent.change(select, { target: { value: "jsonHandoff" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(2));
+
+    await act(async () => { resolveB({ ...baseSettings, cliBridgeMode: "jsonHandoff" }); });
+    await act(async () => { resolveA({ ...baseSettings, cliBridgeMode: "stdio" }); });
+    expect(select.value).toBe("jsonHandoff");
+  });
+
+  // Same race on the failure path: a stale save that rejects after a newer
+  // one succeeded must neither roll the select back nor show an error.
+  it("ignores a stale bridge mode rejection that arrives after a newer save", async () => {
+    let rejectA!: (e: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    mockApi.updateSettings
+      .mockImplementationOnce(() => new Promise((_r, j) => { rejectA = j; }))
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = r; }));
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: "stdio" } });
+    fireEvent.change(select, { target: { value: "jsonHandoff" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(2));
+
+    await act(async () => { resolveB({ ...baseSettings, cliBridgeMode: "jsonHandoff" }); });
+    await act(async () => { rejectA(new Error("stale failure")); });
+    expect(select.value).toBe("jsonHandoff");
+    expect(screen.queryByText("stale failure")).not.toBeInTheDocument();
+  });
+
   // The select offers exactly one option per mode, stdio (recommended) first.
   it("renders one option per bridge mode with stdio first", async () => {
     await renderLoaded();
