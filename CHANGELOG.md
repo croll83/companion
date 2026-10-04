@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.0](https://github.com/croll83/companion/compare/the-companion-v1.1.0...the-companion-v1.2.0) (2026-10-04)
+
+
+### Features
+
+* **system:** warn when Companion runs on Bun older than 1.4.0 ([a36479a](https://github.com/croll83/companion/commit/a36479ade0bd62364e170fc0bfb2cadbbc8956f1))
+* **system:** warn when Companion runs on Bun older than 1.4.0 ([7097cac](https://github.com/croll83/companion/commit/7097cac7147f603b51878ce35f1ab5e445bbc4c1))
+
+
+### Bug Fixes
+
+* **playground:** isolate Bun runtime alert sample dismissals from the app banner ([b6e0716](https://github.com/croll83/companion/commit/b6e0716753ec02dca3540c6c2ea754d677b513fd))
+* **settings:** accept and persist cliBridgeMode "stdio" end to end ([776d881](https://github.com/croll83/companion/commit/776d881d1cb03a5c62876e0dd57832372b762634))
+* **settings:** accept and persist cliBridgeMode "stdio" end to end ([164b61e](https://github.com/croll83/companion/commit/164b61e3eca49afe433e07f71b787d2ac5ee051c))
+* **settings:** ignore stale bridge-mode saves and share the default mode ([a69abad](https://github.com/croll83/companion/commit/a69abad657500b9a7da08bba28c48886c0b0804a))
+
 ## [1.1.0](https://github.com/croll83/companion/compare/the-companion-v1.0.0...the-companion-v1.1.0) (2026-10-04)
 
 
