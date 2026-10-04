@@ -1559,6 +1559,7 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telegramBotTokenConfigured: false,
+      timeZone: "",
     });
   });
 
@@ -1617,6 +1618,7 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telegramBotTokenConfigured: false,
+      timeZone: "",
     });
   });
 
@@ -1655,6 +1657,19 @@ describe("GET /api/settings", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.publicUrl).toBe("https://example.com");
+  });
+
+  // The chat time zone is a plain (non-secret) value: GET returns it as is so
+  // App.tsx can load it into the store at startup.
+  it("includes the configured timeZone in the response", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValueOnce({
+      ...settingsManager.getSettings(),
+      timeZone: "America/New_York",
+    });
+    const res = await app.request("/api/settings", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.timeZone).toBe("America/New_York");
   });
 });
 
@@ -1736,6 +1751,7 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telegramBotTokenConfigured: false,
+      timeZone: "",
     });
   });
 
@@ -2012,6 +2028,72 @@ describe("PUT /api/settings", () => {
     expect(res.status).toBe(400);
     const json = await res.json();
     expect(json).toEqual({ error: "dockerAutoUpdate must be a boolean" });
+  });
+
+  // ── timeZone (chat message times / day separators) ──────────────────────
+  // The real validator (server/time-zone.ts) runs here: only settings-manager
+  // is mocked, so these exercise the actual IANA check.
+
+  // A valid IANA zone is trimmed, handed to updateSettings, and echoed back so
+  // the browser can push it into the store and re-render open chats.
+  it("accepts and saves a valid IANA timeZone", async () => {
+    vi.mocked(settingsManager.updateSettings).mockImplementationOnce((patch) => ({
+      ...settingsManager.getSettings(),
+      timeZone: patch.timeZone ?? "",
+    }));
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeZone: "  Europe/Rome " }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ timeZone: "Europe/Rome" }),
+    );
+    const json = await res.json();
+    expect(json.timeZone).toBe("Europe/Rome");
+  });
+
+  // "" means Automatic (device zone) and must be accepted — it is how the
+  // user goes back to the default after picking a zone.
+  it("accepts an empty timeZone (Automatic)", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeZone: "" }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ timeZone: "" }),
+    );
+    const json = await res.json();
+    expect(json.timeZone).toBe("");
+  });
+
+  // An unknown zone would make every browser's Intl.DateTimeFormat throw, so it
+  // is rejected with 400 and never reaches updateSettings.
+  it("returns 400 for an invalid timeZone", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeZone: "Mars/Olympus_Mons" }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "timeZone must be empty (automatic) or a valid IANA time zone" });
+    expect(settingsManager.updateSettings).not.toHaveBeenCalled();
+  });
+
+  // Type check: a non-string timeZone is rejected like other string fields.
+  it("returns 400 for a non-string timeZone", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeZone: 2 }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "timeZone must be a string" });
   });
 });
 

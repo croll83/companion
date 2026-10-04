@@ -12,6 +12,21 @@ import { sequenceEvent } from "./ws-bridge-replay.js";
 export const EVENT_BUFFER_LIMIT = 600;
 
 /**
+ * Chat-visible notices (errors, refusals) are produced all over the server —
+ * adapters, the orchestrator, the bridge itself — without a send time. Stamp
+ * them here, the one place every broadcast passes through, so the browser
+ * shows when they happened and an event_replay after a reconnect does not
+ * re-date them to the reconnect time. Other frames are returned untouched
+ * (assistant / user_message / system_event are stamped where they are built).
+ */
+export function withServerTimestamp(msg: BrowserIncomingMessage, now: number = Date.now()): BrowserIncomingMessage {
+  if ((msg.type === "error" || msg.type === "refusal") && !msg.timestamp) {
+    return { ...msg, timestamp: now };
+  }
+  return msg;
+}
+
+/**
  * Broadcast a message to all connected browsers for a session.
  * Assigns a monotonic sequence number via sequenceEvent, records the
  * outgoing message, and sends to every browser socket (removing broken ones).
@@ -44,7 +59,7 @@ export function broadcastToBrowsers(
   }
 
   const json = JSON.stringify(
-    sequenceEvent(session, msg, opts.eventBufferLimit, opts.persistFn),
+    sequenceEvent(session, withServerTimestamp(msg), opts.eventBufferLimit, opts.persistFn),
   );
 
   // Record raw outgoing browser message

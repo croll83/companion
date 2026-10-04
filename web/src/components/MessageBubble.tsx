@@ -7,6 +7,12 @@ import { CopyButton } from "./CopyButton.js";
 import { RefusalBanner } from "./RefusalBanner.js";
 import { useStore } from "../store.js";
 import { parseLocalFileLink } from "../utils/local-file-link.js";
+import {
+  formatMessageTime,
+  formatMessageTooltip,
+  hasKnownTimestamp,
+  resolveTimeZone,
+} from "../utils/message-time.js";
 
 /**
  * A link in an assistant message.
@@ -42,6 +48,26 @@ function SmartLink({ href, children }: { href?: string; children?: React.ReactNo
   );
 }
 
+/**
+ * Small muted send time ("14:05") with the full date, time and zone in the
+ * tooltip. Renders nothing while the message is still streaming or when the
+ * server never recorded when it was sent — an invented time is worse than none.
+ */
+export function MessageTime({ message, className = "" }: { message: ChatMessage; className?: string }) {
+  const timeZoneSetting = useStore((s) => s.timeZone);
+  if (message.isStreaming || !hasKnownTimestamp(message)) return null;
+  const zone = resolveTimeZone(timeZoneSetting);
+  return (
+    <time
+      dateTime={new Date(message.timestamp).toISOString()}
+      title={formatMessageTooltip(message.timestamp, zone)}
+      className={`text-[10px] leading-none text-cc-muted tabular-nums select-none whitespace-nowrap ${className}`}
+    >
+      {formatMessageTime(message.timestamp, zone)}
+    </time>
+  );
+}
+
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.refusal) {
     return <RefusalBanner refusal={message.refusal} />;
@@ -62,6 +88,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           <span className="text-[12px] text-cc-error font-mono-code min-w-0 break-words">
             {message.content}
           </span>
+          <MessageTime message={message} className="self-end shrink-0 ml-1" />
         </div>
       </div>
     );
@@ -97,6 +124,9 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           )}
           <div className="text-[13px] sm:text-[14px] leading-relaxed break-words">
             <MarkdownContent text={message.content} />
+          </div>
+          <div className="mt-1 -mb-0.5 flex justify-end">
+            <MessageTime message={message} />
           </div>
         </div>
       </div>
@@ -194,7 +224,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           ) : (
             <MarkdownContent text={message.content} showCursor={!!message.isStreaming} />
           )}
-          {showCopy && <MessageActions text={copyText} />}
+          {showCopy && <MessageActions text={copyText} message={message} />}
         </div>
       </div>
     );
@@ -216,7 +246,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           // Grouped tool_uses
           return <ToolGroupBlock key={i} name={group.name} items={group.items} />;
         })}
-        {showCopy && <MessageActions text={copyText} />}
+        {showCopy && <MessageActions text={copyText} message={message} />}
       </div>
     </div>
   );
@@ -226,8 +256,10 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
  * Action bar shown at the bottom of a completed assistant message.
  * Always visible on mobile (no hover state); subtle on desktop and brightens
  * when the surrounding message is hovered (via the `group` class on parent).
+ * The send time sits at its right end. It shares the copy button's condition
+ * (finished, has text), so tool-call-only turns and streaming drafts get none.
  */
-function MessageActions({ text }: { text: string }) {
+function MessageActions({ text, message }: { text: string; message: ChatMessage }) {
   return (
     <div className="mt-1 -ml-2 flex items-center gap-1">
       <CopyButton
@@ -236,6 +268,7 @@ function MessageActions({ text }: { text: string }) {
         label="Copy message"
         className="opacity-100 sm:opacity-60 sm:hover:opacity-100"
       />
+      <MessageTime message={message} className="ml-auto" />
     </div>
   );
 }

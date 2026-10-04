@@ -368,8 +368,9 @@ export type BrowserIncomingMessageBase =
   /** The CLI's own turn state: authoritative where the phase is only inferred. */
   | { type: "cli_session_state"; state: "idle" | "running" | "requires_action" }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
-  | { type: "error"; message: string }
-  | { type: "refusal"; category?: string; explanation?: string; model?: string }
+  /** `timestamp`: server send time, stamped on broadcast (see ws-bridge-publish.ts). */
+  | { type: "error"; message: string; timestamp?: number }
+  | { type: "refusal"; category?: string; explanation?: string; model?: string; timestamp?: number }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
   | { type: "user_message"; content: string; timestamp: number; id?: string }

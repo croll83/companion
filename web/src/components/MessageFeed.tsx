@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo, useState, useCallback } from "react";
+import { Fragment, useEffect, useRef, useMemo, useState, useCallback } from "react";
 import { useStore } from "../store.js";
 import { loadMoreHistory } from "../ws.js";
 import { api } from "../api.js";
@@ -14,6 +14,12 @@ import type { ToolActivityEntry } from "../store/tasks-slice.js";
 import { formatElapsed, formatTokenCount } from "../utils/format.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
+import {
+  dayKey,
+  formatDayLabel,
+  hasKnownTimestamp,
+  resolveTimeZone,
+} from "../utils/message-time.js";
 
 const FEED_PAGE_SIZE = 100;
 const RESUME_HISTORY_PAGE_SIZE = 40;
@@ -42,6 +48,8 @@ interface ToolMsgGroup {
   toolName: string;
   items: ToolItem[];
   firstId: string;
+  /** Send time of the group's first message, when known (day separators). */
+  firstTimestamp?: number;
 }
 
 interface SubagentGroup {
@@ -136,6 +144,7 @@ function groupToolMessages(messages: ChatMessage[]): FeedEntry[] {
         toolName,
         items: extractToolItems(msg),
         firstId: msg.id,
+        firstTimestamp: hasKnownTimestamp(msg) ? msg.timestamp : undefined,
       });
     } else {
       entries.push({ kind: "message", msg });
@@ -375,12 +384,74 @@ function ToolMessageGroup({ group }: { group: ToolMsgGroup }) {
   );
 }
 
-function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[] }) {
+/** Known send time of a feed entry, or null (subagent groups, unstamped history). */
+function getEntryTimestamp(entry: FeedEntry): number | null {
+  if (entry.kind === "message") return hasKnownTimestamp(entry.msg) ? entry.msg.timestamp : null;
+  if (entry.kind === "tool_msg_group") return entry.firstTimestamp ?? null;
+  return null;
+}
+
+/**
+ * For each entry, the timestamp whose day it opens — or null when it does not
+ * start a new day. Days are computed in `timeZone`. The first entry with a
+ * known time always opens a day, so the top of the feed is labelled even when
+ * older pages are not loaded yet; prepending a page just moves that label up.
+ * Entries without a known time never open (or close) a day.
+ */
+function computeDayStarts(entries: FeedEntry[], timeZone: string): (number | null)[] {
+  let currentDay: string | null = null;
+  return entries.map((entry) => {
+    const ts = getEntryTimestamp(entry);
+    if (ts === null) return null;
+    const key = dayKey(ts, timeZone);
+    if (key === currentDay) return null;
+    currentDay = key;
+    return ts;
+  });
+}
+
+/** Centered "Today" / "Yesterday" / date pill between messages of different days. */
+function DaySeparator({ timestamp, timeZone }: { timestamp: number; timeZone: string }) {
+  const label = formatDayLabel(timestamp, timeZone);
+  return (
+    <div role="separator" aria-label={label} className="flex items-center gap-3 select-none">
+      <div className="flex-1 h-px bg-cc-border" />
+      <span className="shrink-0 px-2.5 py-0.5 rounded-full border border-cc-border bg-cc-card text-[11px] font-medium text-cc-muted">
+        {label}
+      </span>
+      <div className="flex-1 h-px bg-cc-border" />
+    </div>
+  );
+}
+
+function FeedEntries({
+  entries,
+  toolActivity,
+  showDaySeparators = false,
+}: {
+  entries: FeedEntry[];
+  toolActivity?: ToolActivityEntry[];
+  /** Only the top-level feed is split by day; nested subagent feeds are not. */
+  showDaySeparators?: boolean;
+}) {
+  const timeZoneSetting = useStore((s) => s.timeZone);
+  const timeZone = resolveTimeZone(timeZoneSetting);
+  const dayStarts = useMemo(
+    () => (showDaySeparators ? computeDayStarts(entries, timeZone) : null),
+    [showDaySeparators, entries, timeZone],
+  );
   return (
     <>
       {entries.map((entry, i) => {
+        const dayStart = dayStarts?.[i] ?? null;
+        const separator = dayStart !== null ? <DaySeparator timestamp={dayStart} timeZone={timeZone} /> : null;
         if (entry.kind === "tool_msg_group") {
-          return <ToolMessageGroup key={entry.firstId || i} group={entry} />;
+          return (
+            <Fragment key={entry.firstId || i}>
+              {separator}
+              <ToolMessageGroup group={entry} />
+            </Fragment>
+          );
         }
         if (entry.kind === "subagent") {
           return <SubagentContainer key={entry.taskToolUseId} group={entry} />;
@@ -393,10 +464,13 @@ function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActi
         // Show turn summary after assistant messages with completed tool calls
         const allComplete = matchingActivity.length > 0 && matchingActivity.every((a) => a.completedAt);
         return (
-          <div key={msg.id}>
-            <MessageBubble message={msg} />
-            {allComplete && <ToolTurnSummary entries={matchingActivity} />}
-          </div>
+          <Fragment key={msg.id}>
+            {separator}
+            <div>
+              <MessageBubble message={msg} />
+              {allComplete && <ToolTurnSummary entries={matchingActivity} />}
+            </div>
+          </Fragment>
         );
       })}
     </>
@@ -720,7 +794,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
             content: msg.content,
             contentBlocks:
               msg.role === "assistant" ? msg.contentBlocks : undefined,
-            timestamp: msg.timestamp || Date.now(),
+            // No recorded time: a placeholder for ordering, never shown.
+            ...(msg.timestamp
+              ? { timestamp: msg.timestamp }
+              : { timestamp: Date.now(), timestampUnknown: true }),
             model: msg.role === "assistant" ? msg.model : undefined,
             stopReason: msg.role === "assistant" ? msg.stopReason : undefined,
           }),
@@ -1011,7 +1088,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} showDaySeparators />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (

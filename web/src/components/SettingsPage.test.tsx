@@ -31,6 +31,7 @@ interface MockStoreState {
   setNotificationDesktop: ReturnType<typeof vi.fn>;
   setDiffBase: ReturnType<typeof vi.fn>;
   setPublicUrl: ReturnType<typeof vi.fn>;
+  setTimeZone: ReturnType<typeof vi.fn>;
   setUpdateInfo: ReturnType<typeof vi.fn>;
   setUpdateOverlayActive: ReturnType<typeof vi.fn>;
   setEditorTabEnabled: ReturnType<typeof vi.fn>;
@@ -52,6 +53,7 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     setNotificationDesktop: vi.fn(),
     setDiffBase: vi.fn(),
     setPublicUrl: vi.fn(),
+    setTimeZone: vi.fn(),
     setUpdateInfo: vi.fn(),
     setUpdateOverlayActive: vi.fn(),
     setEditorTabEnabled: vi.fn(),
@@ -1718,5 +1720,117 @@ describe("SettingsPage – extended behaviour", () => {
     await renderLoaded({ updateChannel: "prerelease" });
     fireEvent.click(screen.getByRole("radio", { name: "Prerelease" }));
     expect(mockApi.updateSettings).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Time zone (chat message times and day separators) ───────────────────────
+// A global setting: "" = Automatic (each device's own zone) or an IANA zone.
+// Saving pushes the value into the store so open chats re-render immediately.
+describe("SettingsPage – time zone", () => {
+  const loaded = {
+    anthropicApiKeyConfigured: true,
+    anthropicModel: "claude-sonnet-4-6",
+    updateChannel: "stable",
+    publicUrl: "",
+  };
+
+  async function renderWithZone(timeZone: string) {
+    mockApi.getSettings.mockResolvedValueOnce({ ...loaded, timeZone });
+    const utils = render(<SettingsPage />);
+    await screen.findByText(/Anthropic key (not )?configured/);
+    return utils;
+  }
+
+  function zoneSelect() {
+    return screen.getByLabelText("Time zone") as HTMLSelectElement;
+  }
+
+  // Render: Automatic first (naming the resolved device zone), then the IANA list.
+  it("renders Automatic (with the device zone) followed by IANA zones", async () => {
+    await renderWithZone("");
+    const select = zoneSelect();
+    const device = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(select.options[0].value).toBe("");
+    expect(select.options[0].textContent).toBe(`Automatic (device: ${device})`);
+    expect(Array.from(select.options).map((o) => o.value)).toContain("Europe/Rome");
+    expect(select.value).toBe("");
+  });
+
+  // The saved zone is selected and loaded into the store on open.
+  it("reflects the saved zone and loads it into the store", async () => {
+    await renderWithZone("Asia/Tokyo");
+    expect(zoneSelect().value).toBe("Asia/Tokyo");
+    expect(mockState.setTimeZone).toHaveBeenCalledWith("Asia/Tokyo");
+  });
+
+  // Interaction: picking a zone saves it and updates the store with the
+  // server's answer, so open chats re-render in the new zone.
+  it("saves a picked zone and pushes it into the store", async () => {
+    await renderWithZone("");
+    mockApi.updateSettings.mockResolvedValueOnce({ ...loaded, timeZone: "Europe/Rome" });
+    fireEvent.change(zoneSelect(), { target: { value: "Europe/Rome" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ timeZone: "Europe/Rome" }));
+    await waitFor(() => expect(mockState.setTimeZone).toHaveBeenLastCalledWith("Europe/Rome"));
+    expect(zoneSelect().value).toBe("Europe/Rome");
+  });
+
+  // Going back to Automatic saves "" (not the device zone).
+  it("saves an empty value when Automatic is picked", async () => {
+    await renderWithZone("Europe/Rome");
+    mockApi.updateSettings.mockResolvedValueOnce({ ...loaded, timeZone: "" });
+    fireEvent.change(zoneSelect(), { target: { value: "" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ timeZone: "" }));
+    await waitFor(() => expect(mockState.setTimeZone).toHaveBeenLastCalledWith(""));
+  });
+
+  // Older servers may not echo timeZone back: keep the picked value.
+  it("keeps the picked zone when the response omits it", async () => {
+    await renderWithZone("");
+    mockApi.updateSettings.mockResolvedValueOnce({ ...loaded });
+    fireEvent.change(zoneSelect(), { target: { value: "UTC" } });
+    await waitFor(() => expect(mockState.setTimeZone).toHaveBeenLastCalledWith("UTC"));
+  });
+
+  // A rejected save (e.g. 400 for an unknown zone) rolls the select back,
+  // shows the error, and leaves the store alone.
+  it("reverts and shows the error when saving fails", async () => {
+    await renderWithZone("Europe/Rome");
+    mockState.setTimeZone.mockClear();
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("timeZone must be empty (automatic) or a valid IANA time zone"));
+    fireEvent.change(zoneSelect(), { target: { value: "Asia/Tokyo" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("valid IANA time zone");
+    expect(zoneSelect().value).toBe("Europe/Rome");
+    expect(mockState.setTimeZone).not.toHaveBeenCalled();
+  });
+
+  // A saved zone missing from this browser's list stays selectable instead
+  // of silently showing another option.
+  it("keeps a saved zone that the browser list does not contain", async () => {
+    const original = (Intl as { supportedValuesOf?: unknown }).supportedValuesOf;
+    (Intl as { supportedValuesOf?: unknown }).supportedValuesOf = undefined;
+    try {
+      await renderWithZone("Asia/Calcutta");
+      const values = Array.from(zoneSelect().options).map((o) => o.value);
+      expect(values).toEqual(["", "UTC", "Asia/Calcutta"]);
+      expect(zoneSelect().value).toBe("Asia/Calcutta");
+    } finally {
+      (Intl as { supportedValuesOf?: unknown }).supportedValuesOf = original;
+    }
+  });
+
+  it("passes axe accessibility checks for the General section", async () => {
+    const { axe } = await import("vitest-axe");
+    // axe walks every <option>; with the full ~400-zone IANA list that takes
+    // seconds under coverage instrumentation. A short list has the same markup.
+    const original = (Intl as { supportedValuesOf?: unknown }).supportedValuesOf;
+    (Intl as { supportedValuesOf?: unknown }).supportedValuesOf = () => ["Europe/Rome", "Asia/Tokyo"];
+    try {
+      await renderWithZone("");
+      const general = document.getElementById("general");
+      expect(general).toBeInTheDocument();
+      expect(await axe(general!)).toHaveNoViolations();
+    } finally {
+      (Intl as { supportedValuesOf?: unknown }).supportedValuesOf = original;
+    }
   });
 });

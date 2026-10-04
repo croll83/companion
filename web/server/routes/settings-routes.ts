@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
 import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel, type CliBridgeMode } from "../settings-manager.js";
+import { isValidTimeZoneSetting } from "../time-zone.js";
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
 import { hasContainerCodexAuth } from "../codex-container-auth.js";
@@ -32,6 +33,7 @@ export function registerSettingsRoutes(api: Hono): void {
       dockerAutoUpdate: settings.dockerAutoUpdate,
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
+      timeZone: settings.timeZone ?? "",
     });
   });
 
@@ -103,6 +105,14 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.telegramBotToken !== undefined && typeof body.telegramBotToken !== "string") {
       return c.json({ error: "telegramBotToken must be a string" }, 400);
     }
+    if (body.timeZone !== undefined) {
+      if (typeof body.timeZone !== "string") {
+        return c.json({ error: "timeZone must be a string" }, 400);
+      }
+      if (!isValidTimeZoneSetting(body.timeZone.trim())) {
+        return c.json({ error: "timeZone must be empty (automatic) or a valid IANA time zone" }, 400);
+      }
+    }
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
@@ -132,7 +142,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.updateChannel !== undefined
       || body.dockerAutoUpdate !== undefined
       || body.cliBridgeMode !== undefined
-      || body.telegramBotToken !== undefined;
+      || body.telegramBotToken !== undefined
+      || body.timeZone !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -236,6 +247,10 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.telegramBotToken === "string"
           ? body.telegramBotToken.trim()
           : undefined,
+      timeZone:
+        typeof body.timeZone === "string"
+          ? body.timeZone.trim()
+          : undefined,
     });
 
     // Token added/changed/cleared → spawn or stop the bridge child accordingly.
@@ -265,6 +280,7 @@ export function registerSettingsRoutes(api: Hono): void {
       dockerAutoUpdate: settings.dockerAutoUpdate,
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
+      timeZone: settings.timeZone ?? "",
     });
   });
 

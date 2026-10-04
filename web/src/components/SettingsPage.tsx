@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { api } from "../api.js";
 import { useStore } from "../store.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
+import { getDeviceTimeZone, listTimeZones } from "../utils/message-time.js";
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -55,6 +56,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
   const [aiValidationAutoDeny, setAiValidationAutoDeny] = useState(false);
   const [publicUrl, setPublicUrl] = useState("");
+  const [timeZone, setTimeZone] = useState("");
+  const [timeZoneError, setTimeZoneError] = useState("");
   const [activeSection, setActiveSection] = useState<CategoryId>("general");
   const [apiKeyFocused, setApiKeyFocused] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -155,6 +158,10 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
           setPublicUrl(s.publicUrl);
           useStore.getState().setPublicUrl(s.publicUrl);
         }
+        if (typeof s.timeZone === "string") {
+          setTimeZone(s.timeZone);
+          useStore.getState().setTimeZone(s.timeZone);
+        }
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -206,6 +213,22 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
       if (field === "aiValidationEnabled") setAiValidationEnabled(current);
       else if (field === "aiValidationAutoApprove") setAiValidationAutoApprove(current);
       else setAiValidationAutoDeny(current);
+    }
+  }
+
+  async function onTimeZoneChange(next: string) {
+    const prev = timeZone;
+    setTimeZone(next);
+    setTimeZoneError("");
+    try {
+      const res = await api.updateSettings({ timeZone: next });
+      const saved = typeof res.timeZone === "string" ? res.timeZone : next;
+      setTimeZone(saved);
+      // Open chats read the zone from the store, so they re-render right away.
+      useStore.getState().setTimeZone(saved);
+    } catch (err: unknown) {
+      setTimeZone(prev);
+      setTimeZoneError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -353,6 +376,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 <p className="text-xs text-cc-muted px-1">
                   Last commit shows only uncommitted changes. Default branch shows all changes since diverging from main.
                 </p>
+
+                <TimeZoneSelect value={timeZone} error={timeZoneError} onChange={onTimeZoneChange} />
 
                 <div className="pt-3 border-t border-cc-border">
                   <div className="flex items-center justify-between">
@@ -1193,6 +1218,55 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Global time zone for chat message times and day separators. "" means
+ * Automatic: every device shows times in its own zone.
+ */
+function TimeZoneSelect({
+  value,
+  error,
+  onChange,
+}: {
+  value: string;
+  error: string;
+  onChange: (zone: string) => void;
+}) {
+  const zones = useMemo(() => {
+    const list = listTimeZones();
+    // supportedValuesOf omits "UTC" on some engines; a saved zone the list
+    // lacks (alias, older browser) must stay selectable or the select lies.
+    const extra = ["UTC", value].filter((z) => z && !list.includes(z));
+    return [...extra, ...list];
+  }, [value]);
+
+  return (
+    <div className="pt-3 border-t border-cc-border">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <label htmlFor="settings-time-zone" className="block text-sm font-medium">Time zone</label>
+          <p className="mt-0.5 text-xs text-cc-muted">
+            Used for message times and day separators in chats. Automatic follows each device&apos;s own zone.
+          </p>
+        </div>
+        <select
+          id="settings-time-zone"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="ml-3 max-w-[50%] px-2 py-1.5 text-xs bg-cc-bg rounded-lg border border-cc-border text-cc-fg focus:outline-none focus:ring-1 focus:ring-cc-primary"
+        >
+          <option value="">{`Automatic (device: ${getDeviceTimeZone()})`}</option>
+          {zones.map((zone) => (
+            <option key={zone} value={zone}>{zone}</option>
+          ))}
+        </select>
+      </div>
+      {error && (
+        <p role="alert" className="mt-1 text-xs text-cc-error">{error}</p>
+      )}
     </div>
   );
 }

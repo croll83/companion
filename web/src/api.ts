@@ -416,6 +416,8 @@ export interface AppSettings {
   dockerAutoUpdate: boolean;
   cliBridgeMode: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
   telegramBotTokenConfigured: boolean;
+  /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
+  timeZone: string;
 }
 
 export interface HostsCheckResult {
@@ -1007,6 +1009,7 @@ export const api = {
     dockerAutoUpdate?: boolean;
     cliBridgeMode?: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio";
     telegramBotToken?: string;
+    timeZone?: string;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

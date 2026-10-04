@@ -50,6 +50,7 @@ describe("settings-manager", () => {
       dockerAutoUpdate: false,
       telegramBotToken: "",
       cliBridgeMode: "loopback",
+      timeZone: "",
       updatedAt: 0,
     });
   });
@@ -107,6 +108,7 @@ describe("settings-manager", () => {
       dockerAutoUpdate: false,
       telegramBotToken: "",
       cliBridgeMode: "loopback",
+      timeZone: "",
       updatedAt: 123,
     });
   });
@@ -188,6 +190,7 @@ describe("settings-manager", () => {
       dockerAutoUpdate: false,
       telegramBotToken: "",
       cliBridgeMode: "loopback",
+      timeZone: "",
       updatedAt: 0,
     });
   });
@@ -320,5 +323,41 @@ describe("settings-manager", () => {
     );
     _resetForTest(settingsPath);
     expect(getSettings().cliBridgeMode).toBe("loopback");
+  });
+
+  // ── timeZone (chat message times / day separators) ───────────────────────
+
+  // Default is "" = Automatic: each viewing device renders in its own zone.
+  it("defaults timeZone to empty (Automatic)", () => {
+    expect(getSettings().timeZone).toBe("");
+  });
+
+  // A chosen zone is saved, persisted to disk and survives a reload.
+  it("saves and persists a valid timeZone", () => {
+    const updated = updateSettings({ timeZone: "Europe/Rome" });
+    expect(updated.timeZone).toBe("Europe/Rome");
+    expect(JSON.parse(readFileSync(settingsPath, "utf-8")).timeZone).toBe("Europe/Rome");
+
+    _resetForTest(settingsPath);
+    expect(getSettings().timeZone).toBe("Europe/Rome");
+  });
+
+  // Updating another field must not reset the zone, and "" switches back to Automatic.
+  it("keeps timeZone across unrelated updates and can clear it", () => {
+    updateSettings({ timeZone: "Asia/Tokyo" });
+    expect(updateSettings({ publicUrl: "https://x.example" }).timeZone).toBe("Asia/Tokyo");
+    expect(updateSettings({ timeZone: "" }).timeZone).toBe("");
+  });
+
+  // A hand-edited / corrupt settings file with an unknown zone (or a non-string)
+  // falls back to Automatic instead of shipping a zone browsers would throw on.
+  it("normalizes an invalid timeZone on disk to Automatic", () => {
+    writeFileSync(settingsPath, JSON.stringify({ timeZone: "Mars/Olympus_Mons" }), "utf-8");
+    _resetForTest(settingsPath);
+    expect(getSettings().timeZone).toBe("");
+
+    writeFileSync(settingsPath, JSON.stringify({ timeZone: 42 }), "utf-8");
+    _resetForTest(settingsPath);
+    expect(getSettings().timeZone).toBe("");
   });
 });
