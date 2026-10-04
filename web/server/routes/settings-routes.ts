@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
-import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel, type CliBridgeMode } from "../settings-manager.js";
+import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel } from "../settings-manager.js";
+import { CLI_BRIDGE_MODE_ERROR, isCliBridgeMode } from "../cli-bridge-mode.js";
 import { isValidTimeZoneSetting } from "../time-zone.js";
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
@@ -119,13 +120,10 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.dockerAutoUpdate !== undefined && typeof body.dockerAutoUpdate !== "boolean") {
       return c.json({ error: "dockerAutoUpdate must be a boolean" }, 400);
     }
-    if (
-      body.cliBridgeMode !== undefined
-      && body.cliBridgeMode !== "loopback"
-      && body.cliBridgeMode !== "jsonHandoff"
-      && body.cliBridgeMode !== "tlsLoopback"
-    ) {
-      return c.json({ error: "cliBridgeMode must be 'loopback', 'jsonHandoff', or 'tlsLoopback'" }, 400);
+    // Valid modes come from the single CLI_BRIDGE_MODES list (cli-bridge-mode.ts)
+    // so a new mode can never be silently rejected here again.
+    if (body.cliBridgeMode !== undefined && !isCliBridgeMode(body.cliBridgeMode)) {
+      return c.json({ error: CLI_BRIDGE_MODE_ERROR }, 400);
     }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
@@ -237,12 +235,7 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.dockerAutoUpdate === "boolean"
           ? body.dockerAutoUpdate
           : undefined,
-      cliBridgeMode:
-        body.cliBridgeMode === "loopback"
-        || body.cliBridgeMode === "jsonHandoff"
-        || body.cliBridgeMode === "tlsLoopback"
-          ? (body.cliBridgeMode as CliBridgeMode)
-          : undefined,
+      cliBridgeMode: isCliBridgeMode(body.cliBridgeMode) ? body.cliBridgeMode : undefined,
       telegramBotToken:
         typeof body.telegramBotToken === "string"
           ? body.telegramBotToken.trim()

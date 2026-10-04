@@ -15,14 +15,31 @@ vi.mock("./path-resolver.js", () => ({ resolveBinary: mockResolveBinary, getEnri
 
 // Mock settings-manager so cliBridgeMode can be flipped per-test. By default
 // we return the safe "loopback" mode so existing tests are unaffected.
+// cliBridgeMode is optional so the launcher's "nothing stored" fallback can be
+// exercised (see "cliBridgeMode fallback" below).
 type MockBridgeMode = "loopback" | "jsonHandoff" | "tlsLoopback";
 const mockGetSettings = vi.hoisted(() =>
-  vi.fn((): { cliBridgeMode: MockBridgeMode } => ({ cliBridgeMode: "loopback" })),
+  vi.fn((): { cliBridgeMode?: MockBridgeMode } => ({ cliBridgeMode: "loopback" })),
 );
 vi.mock("./settings-manager.js", () => ({
   DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
   getSettings: mockGetSettings,
 }));
+
+// The shared bridge-mode default, overridable per test through a getter so the
+// launcher's fallback can be proven to read DEFAULT_CLI_BRIDGE_MODE (live
+// binding) rather than a hard-coded "loopback". Reset to the real value in
+// beforeEach so every other test sees the production default.
+const mockBridgeDefault = vi.hoisted(() => ({ value: undefined as string | undefined }));
+vi.mock("./cli-bridge-mode.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./cli-bridge-mode.js")>();
+  return {
+    ...actual,
+    get DEFAULT_CLI_BRIDGE_MODE() {
+      return mockBridgeDefault.value ?? actual.DEFAULT_CLI_BRIDGE_MODE;
+    },
+  };
+});
 
 // Mock container-manager for container validation in relaunch
 const mockIsContainerAlive = vi.hoisted(() => vi.fn((): "running" | "stopped" | "missing" => "running"));
@@ -175,6 +192,7 @@ beforeEach(() => {
   mockResolveBinary.mockReturnValue("/usr/bin/claude");
   mockGetContainerById.mockReturnValue(undefined);
   mockGetSettings.mockReturnValue({ cliBridgeMode: "loopback" });
+  mockBridgeDefault.value = undefined;
 });
 
 afterEach(() => {
@@ -1512,6 +1530,36 @@ describe("isCmdScript platform guard", () => {
     // On non-Windows, .cmd files should be spawned directly (no cmd.exe wrapping)
     expect(cmdAndArgs[0]).toBe("/usr/local/bin/claude.cmd");
     expect(cmdAndArgs[0]).not.toBe("cmd.exe");
+  });
+});
+
+// ─── cliBridgeMode fallback ─────────────────────────────────────────────────
+
+describe("cliBridgeMode fallback", () => {
+  // With no bridge mode stored, the launcher uses the production default
+  // (loopback): a plain ws://127.0.0.1 --sdk-url.
+  it("uses the shared default (loopback) when no bridge mode is stored", () => {
+    mockGetSettings.mockReturnValue({});
+
+    launcher.launch({ cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const sdkUrl = cmdAndArgs[cmdAndArgs.indexOf("--sdk-url") + 1];
+    expect(sdkUrl).toMatch(/^ws:\/\/127\.0\.0\.1:3456\/ws\/cli\//);
+  });
+
+  // Regression guard for a second source of truth: the fallback must follow
+  // DEFAULT_CLI_BRIDGE_MODE. With the shared default switched to tlsLoopback,
+  // a hard-coded `?? "loopback"` would still produce ws://127.0.0.1.
+  it("follows DEFAULT_CLI_BRIDGE_MODE when no bridge mode is stored", () => {
+    mockGetSettings.mockReturnValue({});
+    mockBridgeDefault.value = "tlsLoopback";
+
+    launcher.launch({ cwd: "/tmp" });
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const sdkUrl = cmdAndArgs[cmdAndArgs.indexOf("--sdk-url") + 1];
+    expect(sdkUrl).toMatch(/^wss:\/\/beacon\.claude-ai\.staging\.ant\.dev:8443\/ws\/cli\//);
   });
 });
 

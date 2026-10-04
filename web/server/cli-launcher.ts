@@ -27,6 +27,7 @@ import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import { markClaudeCliRuntimeIncompatible, parseClaudeVersion } from "./claude-cli-check.js";
 import { getSettings } from "./settings-manager.js";
+import { DEFAULT_CLI_BRIDGE_MODE } from "./cli-bridge-mode.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -595,7 +596,7 @@ export class CliLauncher {
     // hostname back to 127.0.0.1, and `NODE_EXTRA_CA_CERTS` is propagated
     // so the spawned CLI trusts our self-signed cert.
     const settings = getSettings();
-    const bridgeMode = settings.cliBridgeMode ?? "loopback";
+    const bridgeMode = settings.cliBridgeMode ?? DEFAULT_CLI_BRIDGE_MODE;
     const tlsBridgeHost = (process.env.COMPANION_SDK_BRIDGE_HOST
       || "beacon.claude-ai.staging.ant.dev").trim() || "beacon.claude-ai.staging.ant.dev";
     const tlsBridgePort = Number(process.env.COMPANION_SDK_BRIDGE_PORT) || 8443;

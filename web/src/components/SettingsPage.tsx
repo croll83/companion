@@ -4,6 +4,7 @@ import { useStore } from "../store.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import { getDeviceTimeZone, listTimeZones } from "../utils/message-time.js";
+import { DEFAULT_CLI_BRIDGE_MODE, isCliBridgeMode, type CliBridgeMode } from "../../server/cli-bridge-mode.js";
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -23,6 +24,16 @@ const CATEGORIES = [
 ] as const;
 
 type CategoryId = (typeof CATEGORIES)[number]["id"];
+
+// One option per bridge mode, in display order (recommended first). Typed as a
+// Record over CliBridgeMode so adding a mode to CLI_BRIDGE_MODES without a
+// label here is a compile error instead of a missing/unselectable option.
+const CLI_BRIDGE_MODE_LABELS: Record<CliBridgeMode, string> = {
+  stdio: "Stdio (recommended — no --sdk-url, works on all CLI versions)",
+  tlsLoopback: "TLS loopback (Claude Code v2.1.142+, breaks on builds using SSE worker)",
+  loopback: "Loopback (default, broken on v2.1.142+)",
+  jsonHandoff: "JSON handoff (experimental)",
+};
 
 export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
@@ -46,7 +57,10 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const notificationApiAvailable = typeof Notification !== "undefined";
   const [updateChannel, setUpdateChannel] = useState<"stable" | "prerelease">("stable");
   const [dockerAutoUpdate, setDockerAutoUpdate] = useState(false);
-  const [cliBridgeMode, setCliBridgeMode] = useState<"loopback" | "jsonHandoff" | "tlsLoopback" | "stdio">("loopback");
+  const [cliBridgeMode, setCliBridgeMode] = useState<CliBridgeMode>(DEFAULT_CLI_BRIDGE_MODE);
+  const [cliBridgeModeError, setCliBridgeModeError] = useState("");
+  // Monotonic id of the latest bridge-mode save; only its response is applied.
+  const bridgeModeReq = useRef(0);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updatingApp, setUpdatingApp] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
@@ -149,11 +163,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
         if (s.updateChannel === "stable" || s.updateChannel === "prerelease") setUpdateChannel(s.updateChannel);
         if (typeof s.dockerAutoUpdate === "boolean") setDockerAutoUpdate(s.dockerAutoUpdate);
-        if (
-          s.cliBridgeMode === "loopback"
-          || s.cliBridgeMode === "jsonHandoff"
-          || s.cliBridgeMode === "tlsLoopback"
-        ) setCliBridgeMode(s.cliBridgeMode);
+        if (isCliBridgeMode(s.cliBridgeMode)) setCliBridgeMode(s.cliBridgeMode);
         if (typeof s.publicUrl === "string") {
           setPublicUrl(s.publicUrl);
           useStore.getState().setPublicUrl(s.publicUrl);
@@ -401,27 +411,37 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                       value={cliBridgeMode}
                       onChange={async (e) => {
                         const v = e.target.value;
-                        const next: "loopback" | "jsonHandoff" | "tlsLoopback" | "stdio" =
-                          v === "jsonHandoff" ? "jsonHandoff"
-                          : v === "tlsLoopback" ? "tlsLoopback"
-                          : v === "stdio" ? "stdio"
-                          : "loopback";
+                        const next = isCliBridgeMode(v) ? v : DEFAULT_CLI_BRIDGE_MODE;
                         const prev = cliBridgeMode;
+                        // Tag this save so a slower, older response can't
+                        // overwrite a newer choice made in the meantime.
+                        const req = ++bridgeModeReq.current;
                         setCliBridgeMode(next);
+                        setCliBridgeModeError("");
                         try {
-                          await api.updateSettings({ cliBridgeMode: next });
-                        } catch {
+                          const res = await api.updateSettings({ cliBridgeMode: next });
+                          if (req !== bridgeModeReq.current) return;
+                          // Trust the server's echo: if it stored something else,
+                          // show that instead of the optimistic choice.
+                          if (isCliBridgeMode(res?.cliBridgeMode)) setCliBridgeMode(res.cliBridgeMode);
+                        } catch (err: unknown) {
+                          if (req !== bridgeModeReq.current) return;
+                          // Roll back AND tell the user — a rejected save must not
+                          // look like a silent revert.
                           setCliBridgeMode(prev);
+                          setCliBridgeModeError(err instanceof Error ? err.message : String(err));
                         }
                       }}
                       className="ml-3 px-2 py-1.5 text-xs bg-cc-bg rounded-lg border border-cc-border text-cc-fg focus:outline-none focus:ring-1 focus:ring-cc-primary"
                     >
-                      <option value="stdio">Stdio (recommended — no --sdk-url, works on all CLI versions)</option>
-                      <option value="tlsLoopback">TLS loopback (Claude Code v2.1.142+, breaks on builds using SSE worker)</option>
-                      <option value="loopback">Loopback (default, broken on v2.1.142+)</option>
-                      <option value="jsonHandoff">JSON handoff (experimental)</option>
+                      {(Object.keys(CLI_BRIDGE_MODE_LABELS) as CliBridgeMode[]).map((mode) => (
+                        <option key={mode} value={mode}>{CLI_BRIDGE_MODE_LABELS[mode]}</option>
+                      ))}
                     </select>
                   </div>
+                  {cliBridgeModeError && (
+                    <p role="alert" className="mt-1 text-xs text-cc-error">{cliBridgeModeError}</p>
+                  )}
                 </div>
               </div>
             </section>

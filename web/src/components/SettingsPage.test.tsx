@@ -1402,6 +1402,126 @@ describe("SettingsPage – extended behaviour", () => {
     await waitFor(() => expect(select.value).toBe("jsonHandoff"));
   });
 
+  // Regression: the load path only accepted loopback/jsonHandoff/tlsLoopback,
+  // so a server that had "stdio" saved rendered the select as "loopback" —
+  // reopening Settings looked like the choice had reverted.
+  it("loads a saved stdio bridge mode into the select", async () => {
+    await renderLoaded({ cliBridgeMode: "stdio" });
+    expect((screen.getByLabelText("CLI bridge mode") as HTMLSelectElement).value).toBe("stdio");
+  });
+
+  // End-to-end from the UI's perspective: choosing "Stdio (recommended)" sends
+  // exactly {cliBridgeMode:"stdio"} as the saved payload, the server's echo is
+  // applied, and a fresh mount (reopening Settings) shows stdio again.
+  it("saves stdio as the payload and still shows it after reopening Settings", async () => {
+    mockApi.updateSettings.mockResolvedValueOnce({ ...baseSettings, cliBridgeMode: "stdio" });
+    const { unmount } = await renderLoaded({ cliBridgeMode: "loopback" });
+    fireEvent.change(screen.getByLabelText("CLI bridge mode"), { target: { value: "stdio" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateSettings.mock.calls[0][0]).toEqual({ cliBridgeMode: "stdio" });
+    expect((screen.getByLabelText("CLI bridge mode") as HTMLSelectElement).value).toBe("stdio");
+    unmount();
+
+    await renderLoaded({ cliBridgeMode: "stdio" });
+    expect((screen.getByLabelText("CLI bridge mode") as HTMLSelectElement).value).toBe("stdio");
+  });
+
+  // If the server stores something other than what was picked, the select
+  // follows the server's echo instead of keeping the optimistic value.
+  it("follows the bridge mode echoed back by the server", async () => {
+    mockApi.updateSettings.mockResolvedValueOnce({ ...baseSettings, cliBridgeMode: "tlsLoopback" });
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "stdio" } });
+    await waitFor(() => expect(select.value).toBe("tlsLoopback"));
+  });
+
+  // A rejected save (e.g. the old 400 "cliBridgeMode must be ...") rolls the
+  // select back AND surfaces the server message in an alert, so the revert is
+  // no longer silent. The alert is cleared on the next successful change.
+  it("shows the server error when the bridge mode is rejected, then clears it", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("cliBridgeMode must be one of: 'loopback'"));
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "stdio" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("cliBridgeMode must be one of: 'loopback'");
+    expect(select.value).toBe("loopback");
+
+    fireEvent.change(select, { target: { value: "jsonHandoff" } });
+    await waitFor(() => expect(screen.queryByText(/cliBridgeMode must be one of/)).not.toBeInTheDocument());
+    expect(select.value).toBe("jsonHandoff");
+  });
+
+  // Non-Error rejections are stringified rather than dropped.
+  it("stringifies a non-Error bridge mode rejection", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce("offline");
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    fireEvent.change(screen.getByLabelText("CLI bridge mode"), { target: { value: "stdio" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("offline");
+  });
+
+  // Race guard: two quick changes whose responses arrive out of order. The
+  // older save (stdio) resolving AFTER the newer one (jsonHandoff) must not
+  // overwrite the select — the last choice/write wins.
+  it("ignores a stale bridge mode response that resolves after a newer one", async () => {
+    let resolveA!: (v: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    mockApi.updateSettings
+      .mockImplementationOnce(() => new Promise((r) => { resolveA = r; }))
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = r; }));
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: "stdio" } });
+    fireEvent.change(select, { target: { value: "jsonHandoff" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(2));
+
+    await act(async () => { resolveB({ ...baseSettings, cliBridgeMode: "jsonHandoff" }); });
+    await act(async () => { resolveA({ ...baseSettings, cliBridgeMode: "stdio" }); });
+    expect(select.value).toBe("jsonHandoff");
+  });
+
+  // Same race on the failure path: a stale save that rejects after a newer
+  // one succeeded must neither roll the select back nor show an error.
+  it("ignores a stale bridge mode rejection that arrives after a newer save", async () => {
+    let rejectA!: (e: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    mockApi.updateSettings
+      .mockImplementationOnce(() => new Promise((_r, j) => { rejectA = j; }))
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = r; }));
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    const select = screen.getByLabelText("CLI bridge mode") as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: "stdio" } });
+    fireEvent.change(select, { target: { value: "jsonHandoff" } });
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledTimes(2));
+
+    await act(async () => { resolveB({ ...baseSettings, cliBridgeMode: "jsonHandoff" }); });
+    await act(async () => { rejectA(new Error("stale failure")); });
+    expect(select.value).toBe("jsonHandoff");
+    expect(screen.queryByText("stale failure")).not.toBeInTheDocument();
+  });
+
+  // The select offers exactly one option per mode, stdio (recommended) first.
+  it("renders one option per bridge mode with stdio first", async () => {
+    await renderLoaded();
+    const options = Array.from((screen.getByLabelText("CLI bridge mode") as HTMLSelectElement).options);
+    expect(options.map((o) => o.value)).toEqual(["stdio", "tlsLoopback", "loopback", "jsonHandoff"]);
+    expect(options[0].textContent).toMatch(/recommended/);
+  });
+
+  // Accessibility: the bridge-mode block (select + error alert) has no axe
+  // violations. Scoped to that block rather than the whole General section,
+  // whose ~400-option time zone list makes axe slow (covered separately).
+  it("has no accessibility violations with a bridge mode error shown", async () => {
+    mockApi.updateSettings.mockRejectedValueOnce(new Error("nope"));
+    await renderLoaded({ cliBridgeMode: "loopback" });
+    fireEvent.change(screen.getByLabelText("CLI bridge mode"), { target: { value: "stdio" } });
+    const alert = await screen.findByRole("alert");
+    const { axe } = await import("vitest-axe");
+    expect(await axe(alert.parentElement!)).toHaveNoViolations();
+  });
+
   // ─── Webhooks / public URL ─────────────────────────────────────────
 
   it("shows the server error when saving the public URL fails", async () => {
