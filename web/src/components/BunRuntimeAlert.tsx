@@ -17,11 +17,18 @@ const RESTART_COMMAND = "the-companion restart";
 interface Props {
   /** Inject a custom fetcher for tests / the Playground. Defaults to api.getBunRuntimeCheck. */
   fetcher?: () => Promise<BunRuntimeCheckResult>;
+  /**
+   * localStorage key for the per-version dismissal. Defaults to
+   * BUN_RUNTIME_DISMISS_KEY (the app-wide banner). The Playground passes its
+   * own key so dismissing a sample card (which may show a real outdated
+   * version like 1.3.9) never suppresses the real banner on the same origin.
+   */
+  storageKey?: string;
 }
 
-function readDismissedVersion(): string | null {
+function readDismissedVersion(storageKey: string): string | null {
   try {
-    return localStorage.getItem(BUN_RUNTIME_DISMISS_KEY);
+    return localStorage.getItem(storageKey);
   } catch {
     return null;
   }
@@ -69,9 +76,11 @@ function CopyableCommand({ command, label }: { command: string; label: string })
  * then restart Companion. Nothing is shown when the check passes, when the
  * version is unparseable (reason "unknown"), or when the request fails.
  */
-export function BunRuntimeAlert({ fetcher }: Props) {
+export function BunRuntimeAlert({ fetcher, storageKey = BUN_RUNTIME_DISMISS_KEY }: Props) {
   const [check, setCheck] = useState<BunRuntimeCheckResult | null>(null);
-  const [dismissedVersion, setDismissedVersion] = useState<string | null>(readDismissedVersion);
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(() =>
+    readDismissedVersion(storageKey),
+  );
 
   const fetchCheck = useCallback(async () => {
     try {
@@ -93,7 +102,7 @@ export function BunRuntimeAlert({ fetcher }: Props) {
 
   const handleDismiss = () => {
     try {
-      localStorage.setItem(BUN_RUNTIME_DISMISS_KEY, check.version!);
+      localStorage.setItem(storageKey, check.version!);
     } catch {
       // Storage may be unavailable (private mode); dismiss for this view only.
     }

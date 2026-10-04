@@ -176,6 +176,32 @@ describe("BunRuntimeAlert", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Bun 1.3.9");
   });
 
+  // A custom storageKey (used by the Playground) isolates the dismissal: it is
+  // written under that key only, and the default app-wide key stays untouched,
+  // so a banner rendered with the default key still shows for the same version.
+  it("stores dismissals under a custom storageKey without affecting the default key", async () => {
+    const customKey = "test_custom_bun_dismiss_key";
+    localStorage.removeItem(customKey);
+    const first = render(<BunRuntimeAlert fetcher={makeFetcher(outdatedResult)} storageKey={customKey} />);
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByLabelText("Dismiss Bun runtime alert"));
+    expect(localStorage.getItem(customKey)).toBe("1.3.9");
+    expect(localStorage.getItem(BUN_RUNTIME_DISMISS_KEY)).toBeNull();
+    first.unmount();
+
+    // Remounting with the custom key respects the dismissal...
+    const fetcher = makeFetcher(outdatedResult);
+    const second = render(<BunRuntimeAlert fetcher={fetcher} storageKey={customKey} />);
+    await waitFor(() => expect(fetcher).toHaveBeenCalled());
+    expect(second.container.innerHTML).toBe("");
+    second.unmount();
+
+    // ...but the default-key banner still shows for the same version.
+    render(<BunRuntimeAlert fetcher={makeFetcher(outdatedResult)} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Bun 1.3.9");
+    localStorage.removeItem(customKey);
+  });
+
   // If localStorage throws (e.g. disabled storage), the banner still renders
   // and dismissing still hides it for the current view.
   it("tolerates unavailable localStorage", async () => {
