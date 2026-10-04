@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0](https://github.com/croll83/companion/compare/the-companion-v1.0.0...the-companion-v1.1.0) (2026-10-04)
+
+
+### Features
+
+* **chat:** show message times and day separators with a global time-zone setting ([687d265](https://github.com/croll83/companion/commit/687d265b48737268b9f9034f424b7e16dbfd1274))
+* **chat:** show message times and day separators with a global time-zone setting ([c29e066](https://github.com/croll83/companion/commit/c29e0661dead541960fb9b6ec111741acbe1c85a))
+
+
+### Bug Fixes
+
+* **chat:** keep unstamped history in place and harden message times ([a4c1182](https://github.com/croll83/companion/commit/a4c11827e60f5a95f3142229ee7dc0e0be96f06e))
+* **github-pr:** drain gh stdout while it runs and stop piping unread stderr ([e2bf912](https://github.com/croll83/companion/commit/e2bf91228128bab54b6f082cbfd06820cbf17e71))
+* **github-pr:** drain gh stdout while it runs and stop piping unread stderr ([d971cc2](https://github.com/croll83/companion/commit/d971cc214e89e0321a03749b53a1d0b22384f216))
+
 ## [1.0.0](https://github.com/croll83/companion/compare/the-companion-v0.103.0...the-companion-v1.0.0) (2026-10-03)
 
 
