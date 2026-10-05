@@ -594,9 +594,9 @@ describe("log cleanup vs. live stdio files", () => {
       }
     });
 
-    it("rotates a file shared by stdout and stderr only once", () => {
-      // StandardOutput and StandardError may point at the same file. A second
-      // copy-truncate in the same pass would overwrite .1 with the empty file.
+    it("rotates a file shared by stdout and stderr once per pass, keeping its content in .1", () => {
+      // StandardOutput and StandardError may point at the same file: one name,
+      // so one rotation, and .1 must hold the content rather than an empty copy.
       const file = join(tmpDir, "companion.log");
       const out = openAppend(file);
       const err = openAppend(file);

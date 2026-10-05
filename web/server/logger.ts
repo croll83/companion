@@ -10,7 +10,9 @@
 //   COMPANION_LOG_MAX_LINES. The service's stdout/stderr files in that dir
 //   (companion.log / companion.error.log) are never deleted; past
 //   COMPANION_LOG_STDIO_MAX_MB (default 100, 0 = off) they are copy-truncated
-//   into <name>.1.
+//   into <name>.1. That bound runs as part of this writer's cleanup, so it only
+//   applies while the log-file writer is on (COMPANION_LOG_FILE not 0) and its
+//   dir is the one systemd writes to.
 //
 // Usage:
 //   import { log } from "./logger.js";
@@ -282,7 +284,9 @@ export class LogFileWriter {
     // would make it keep writing at its old offset (a sparse file of zeros).
     const appendTargets = stdio.filter((t) => t.append === true);
     if (appendTargets.length === 0) return;
-    const rotated = new Set<string>(); // stdout and stderr may share one file
+    // Iterating directory names (not fds) visits a file shared by stdout and
+    // stderr once; a second name for the same inode re-stats at size 0 after
+    // the first truncate and is skipped by the size check.
     for (const name of names) {
       const fullPath = join(this.logsDir, name);
       let st;
@@ -293,9 +297,6 @@ export class LogFileWriter {
       }
       if (!st.isFile() || st.size <= this.stdioMaxBytes) continue;
       if (!appendTargets.some((t) => t.dev === st.dev && t.ino === st.ino)) continue;
-      const key = `${st.dev}:${st.ino}`;
-      if (rotated.has(key)) continue;
-      rotated.add(key);
       if (copyTruncate(fullPath, `${fullPath}.1`)) {
         // Lands at the top of the freshly truncated stdout file: a marker for readers.
         console.log(`[logger] Rotated ${name} (${st.size} bytes) to ${name}.1 (copy-truncate)`);
