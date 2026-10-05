@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, realpathSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, realpathSync, chmodSync, symlinkSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -1341,5 +1341,71 @@ describe("session-scoped config routes", () => {
     } finally {
       chmodSync(locked, 0o700);
     }
+  });
+
+  // Regression (review finding): the allow-list is lexical and reads/writes
+  // follow symlinks, so a CLAUDE.md or .claude symlink planted in a (cloned)
+  // project used to let these routes read and overwrite any file on disk,
+  // outside both the project and $HOME.
+  describe("symlinks inside the project", () => {
+    let outside: string;
+    beforeEach(() => {
+      outside = mkRealTempDir("cfg-outside-");
+      writeFileSync(join(outside, "secret.txt"), "TOP SECRET");
+    });
+    afterEach(() => rmSync(outside, { recursive: true, force: true }));
+
+    it("refuses to read or write a CLAUDE.md that links outside the project", async () => {
+      symlinkSync(join(outside, "secret.txt"), join(project, "CLAUDE.md"));
+      const read = await get(join(project, "CLAUDE.md"));
+      expect(read.status).toBe(403);
+      expect(JSON.stringify(await read.json())).not.toContain("TOP SECRET");
+      const write = await put({ sessionId: SESSION, path: join(project, "CLAUDE.md"), content: "OVERWRITTEN" });
+      expect(write.status).toBe(403);
+      expect(readFileSync(join(outside, "secret.txt"), "utf-8")).toBe("TOP SECRET");
+    });
+
+    it("refuses to write through a dangling link (it would create the target)", async () => {
+      symlinkSync(join(outside, "new.txt"), join(project, "CLAUDE.local.md"));
+      const write = await put({ sessionId: SESSION, path: join(project, "CLAUDE.local.md"), content: "x" });
+      expect(write.status).toBe(403);
+      expect(existsSync(join(outside, "new.txt"))).toBe(false);
+    });
+
+    it("refuses to create or save files through a .claude dir that links outside", async () => {
+      symlinkSync(outside, join(project, ".claude"));
+      const write = await put({ sessionId: SESSION, path: join(project, ".claude", "commands", "x.md"), content: "x" });
+      expect(write.status).toBe(403);
+      const create = await post({ sessionId: SESSION, scope: "project", type: "settings" });
+      expect(create.status).toBe(403);
+      expect(existsSync(join(outside, "commands"))).toBe(false);
+      expect(existsSync(join(outside, "settings.json"))).toBe(false);
+    });
+
+    it("still follows links that stay inside the project or the home directory", async () => {
+      writeFileSync(join(project, "docs.md"), "in project");
+      symlinkSync(join(project, "docs.md"), join(project, "CLAUDE.md"));
+      expect((await (await get(join(project, "CLAUDE.md"))).json()).content).toBe("in project");
+
+      // A project skill linked to a shared skills folder in $HOME.
+      mkdirSync(join(home, "shared", "lint"), { recursive: true });
+      writeFileSync(join(home, "shared", "lint", "SKILL.md"), "shared skill");
+      mkdirSync(join(project, ".claude", "skills"), { recursive: true });
+      symlinkSync(join(home, "shared", "lint"), join(project, ".claude", "skills", "lint"));
+      const skill = join(project, ".claude", "skills", "lint", "SKILL.md");
+      expect((await (await get(skill)).json()).content).toBe("shared skill");
+      expect((await put({ sessionId: SESSION, path: skill, content: "edited" })).status).toBe(200);
+      expect(readFileSync(join(home, "shared", "lint", "SKILL.md"), "utf-8")).toBe("edited");
+    });
+
+    it("trusts symlinks inside ~/.claude and ~/.codex (the user's own config)", async () => {
+      // e.g. ~/.codex/AGENTS.md -> a dotfiles repo, or a skill linked from elsewhere.
+      mkdirSync(join(home, ".codex"));
+      writeFileSync(join(outside, "AGENTS.md"), "shared agents");
+      symlinkSync(join(outside, "AGENTS.md"), join(home, ".codex", "AGENTS.md"));
+      const res = await get(join(home, ".codex", "AGENTS.md"));
+      expect(res.status).toBe(200);
+      expect((await res.json()).content).toBe("shared agents");
+    });
   });
 });

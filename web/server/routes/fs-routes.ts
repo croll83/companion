@@ -9,10 +9,14 @@ import {
   discoverClaudeConfig,
   planNewConfigFile,
   resolveConfigContext,
+  resolveConfigTarget,
   validateConfigContent,
   type ConfigContext,
   type NewConfigType,
 } from "../claude-config.js";
+
+/** A project config path that a symlink redirects outside the project and home. */
+const LINKS_OUTSIDE = "This config file is a symlink pointing outside the project";
 
 /** Ensure a resolved path is within one of the allowed base directories.
  *  Returns the resolved absolute path, or null if it escapes all bases. */
@@ -429,11 +433,13 @@ export function registerFsRoutes(api: Hono, opts?: FsRoutesOptions): void {
     if (!filePath) return c.json({ error: "path required" }, 400);
     const info = classifyConfigPath(filePath, ctx);
     if (!info) return c.json({ error: "Not a known config file for this session" }, 403);
+    const target = await resolveConfigTarget(filePath, ctx);
+    if (!target) return c.json({ error: LINKS_OUTSIDE }, 403);
     const absPath = resolve(filePath);
     try {
-      const st = await stat(absPath);
+      const st = await stat(target);
       if (st.size > 2 * 1024 * 1024) return c.json({ error: "File too large (>2MB)" }, 413);
-      const content = await readFile(absPath, "utf-8");
+      const content = await readFile(target, "utf-8");
       return c.json({ path: absPath, content, format: info.format, readOnly: info.readOnly });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Cannot read file" }, 404);
@@ -453,10 +459,12 @@ export function registerFsRoutes(api: Hono, opts?: FsRoutesOptions): void {
     if (info.readOnly) return c.json({ error: "This file is read-only" }, 403);
     const invalid = validateConfigContent(info.format, content);
     if (invalid) return c.json({ error: invalid }, 400);
+    const target = await resolveConfigTarget(filePath, ctx);
+    if (!target) return c.json({ error: LINKS_OUTSIDE }, 403);
     const absPath = resolve(filePath);
     try {
-      await mkdir(dirname(absPath), { recursive: true });
-      await writeFile(absPath, content, "utf-8");
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, content, "utf-8");
       return c.json({ ok: true, path: absPath });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Cannot write file" }, 500);
@@ -474,14 +482,16 @@ export function registerFsRoutes(api: Hono, opts?: FsRoutesOptions): void {
     }
     const plan = planNewConfigFile(ctx, scope, type as NewConfigType, typeof name === "string" ? name : undefined);
     if ("error" in plan) return c.json({ error: plan.error }, 400);
+    const target = await resolveConfigTarget(plan.path, ctx);
+    if (!target) return c.json({ error: LINKS_OUTSIDE }, 403);
     try {
-      await mkdir(dirname(plan.path), { recursive: true });
+      await mkdir(dirname(target), { recursive: true });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Cannot create directory" }, 500);
     }
     try {
       // "wx" fails with EEXIST instead of overwriting (it also refuses a dangling symlink).
-      await writeFile(plan.path, plan.content, { encoding: "utf-8", flag: "wx" });
+      await writeFile(target, plan.content, { encoding: "utf-8", flag: "wx" });
       return c.json({ ok: true, path: plan.path });
     } catch (e: unknown) {
       if ((e as { code?: string }).code === "EEXIST") {

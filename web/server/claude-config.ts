@@ -14,10 +14,11 @@
  * The allow-list (`classifyConfigPath`) is what the dedicated config read/write
  * routes use instead of the generic `/fs/*` guard: only these well-known config
  * files, under the session's project root or `~/.claude` / `~/.codex`, are
- * accepted, wherever the project lives on disk.
+ * accepted, wherever the project lives on disk. `resolveConfigTarget` then
+ * makes sure a symlink inside the project cannot redirect them elsewhere.
  */
 import { execSync } from "node:child_process";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export type ConfigFormat = "markdown" | "json" | "toml";
@@ -400,6 +401,54 @@ export function classifyConfigPath(rawPath: string, ctx: ConfigContext): ConfigP
   if (abs === join(codexRoot, "AGENTS.md")) return md;
   if (abs === join(codexRoot, "config.toml")) {
     return { format: "toml", readOnly: getTomlParser() === null };
+  }
+  return null;
+}
+
+/** Real path of `abs`; for a path that does not exist yet, the real path of
+ *  its nearest existing ancestor joined with the missing segments. Null for a
+ *  dangling symlink, because writing through it would create its unchecked
+ *  target. */
+async function realTarget(abs: string): Promise<string | null> {
+  const missing: string[] = [];
+  let current = abs;
+  while (true) {
+    try {
+      return join(await realpath(current), ...missing.reverse());
+    } catch {
+      if (await lstat(current).then(() => true, () => false)) return null;
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    missing.push(relative(parent, current));
+    current = parent;
+  }
+}
+
+const isUnder = (path: string, base: string) => path === base || path.startsWith(base + sep);
+
+/**
+ * Where an allow-listed config path really lands on disk, or null when it
+ * escapes the allowed locations through a symlink.
+ *
+ * `classifyConfigPath` checks only the lexical path, and reads and writes
+ * follow symlinks. Paths under `~/.claude` and `~/.codex` are the user's own
+ * config dirs, so their symlinks are trusted (symlinked skills,
+ * `~/.codex/AGENTS.md` linked to `~/.claude/CLAUDE.md`, ...). A project may be
+ * a cloned repo, though: a planted `CLAUDE.md` or `.claude` symlink must not
+ * reach files outside it. A project path must therefore resolve (link targets
+ * included, and the nearest existing parent for a file about to be created)
+ * inside the project root or the home directory. Home is already open to the
+ * generic `/fs/read` and `/fs/write` routes, so this grants nothing new.
+ */
+export async function resolveConfigTarget(rawPath: string, ctx: ConfigContext): Promise<string | null> {
+  const abs = resolve(rawPath);
+  if (isUnder(abs, join(ctx.home, ".claude")) || isUnder(abs, join(ctx.home, ".codex"))) return abs;
+  const real = await realTarget(abs);
+  if (!real) return null;
+  for (const base of [ctx.projectRoot, ctx.home]) {
+    const realBase = await realpath(base).catch(() => base);
+    if (isUnder(real, realBase)) return real;
   }
   return null;
 }

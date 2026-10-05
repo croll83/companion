@@ -3528,6 +3528,35 @@ describe("GET /api/fs/home", () => {
   });
 });
 
+// The config panel's /fs/config-file routes find a session's project through
+// the launcher. Without that wiring every call answers 404 "Unknown session"
+// while the fs-routes unit tests (which inject getSessionCwd) stay green.
+describe("GET /api/fs/config-file (launcher wiring)", () => {
+  it("reads a config file under the launcher session's cwd and 404s unknown sessions", async () => {
+    const { mkdtemp, writeFile, rm, realpath } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const cwd = await realpath(await mkdtemp(join(tmpdir(), "routes-cfg-")));
+    try {
+      await writeFile(join(cwd, "CLAUDE.md"), "# wired");
+      launcher.getSession.mockImplementation((id: string) => (id === "cfg-session" ? { sessionId: id, cwd } : undefined));
+
+      const ok = await app.request(
+        `/api/fs/config-file?sessionId=cfg-session&path=${encodeURIComponent(join(cwd, "CLAUDE.md"))}`,
+      );
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ content: "# wired", format: "markdown" });
+
+      const unknown = await app.request(
+        `/api/fs/config-file?sessionId=other&path=${encodeURIComponent(join(cwd, "CLAUDE.md"))}`,
+      );
+      expect(unknown.status).toBe(404);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("GET /api/fs/diff", () => {
   it("returns 400 when path is missing", async () => {
     const res = await app.request("/api/fs/diff", { method: "GET" });
