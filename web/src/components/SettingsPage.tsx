@@ -56,7 +56,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const setUpdateOverlayActive = useStore((s) => s.setUpdateOverlayActive);
   const notificationApiAvailable = typeof Notification !== "undefined";
   const [updateChannel, setUpdateChannel] = useState<"stable" | "prerelease">("stable");
-  const [dockerAutoUpdate, setDockerAutoUpdate] = useState(false);
   const [cliBridgeMode, setCliBridgeMode] = useState<CliBridgeMode>(DEFAULT_CLI_BRIDGE_MODE);
   const [cliBridgeModeError, setCliBridgeModeError] = useState("");
   // Monotonic id of the latest bridge-mode save; only its response is applied.
@@ -162,7 +161,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
         if (s.updateChannel === "stable" || s.updateChannel === "prerelease") setUpdateChannel(s.updateChannel);
-        if (typeof s.dockerAutoUpdate === "boolean") setDockerAutoUpdate(s.dockerAutoUpdate);
         if (isCliBridgeMode(s.cliBridgeMode)) setCliBridgeMode(s.cliBridgeMode);
         if (typeof s.publicUrl === "string") {
           setPublicUrl(s.publicUrl);
@@ -266,13 +264,10 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
     setUpdateStatus("");
     setUpdateError("");
     try {
-      // Flag so the Docker image update dialog appears after restart
-      localStorage.setItem("companion_docker_prompt_pending", "1");
       const res = await api.triggerUpdate();
       setUpdateStatus(res.message);
       setUpdateOverlayActive(true);
     } catch (err: unknown) {
-      localStorage.removeItem("companion_docker_prompt_pending");
       setUpdateError(err instanceof Error ? err.message : String(err));
       setUpdatingApp(false);
     }
@@ -455,14 +450,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   Set this to the externally-reachable address of your Companion instance.
                 </p>
                 <p className="text-xs text-cc-muted">
-                  Tip:{" "}
-                  <a
-                    href="#/integrations/tailscale"
-                    className="text-cc-primary hover:underline"
-                  >
-                    Use the Tailscale integration
-                  </a>{" "}
-                  to get an HTTPS URL automatically.
+                  Tip: put the Companion behind an HTTPS reverse proxy or tunnel and paste that URL here.
+                  Linear OAuth callbacks and webhooks are built from it.
                 </p>
                 <div>
                   <label className="block text-xs font-medium text-cc-fg mb-1.5" htmlFor="public-url">
@@ -513,7 +502,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
               <h2 className="text-sm font-semibold text-cc-fg mb-4">Authentication</h2>
               <div className="space-y-4">
                 <p className="text-xs text-cc-muted">
-                  Use the auth token or QR code to connect additional devices (e.g. mobile over Tailscale).
+                  Use the auth token or QR code to connect additional devices (e.g. a phone on your LAN or VPN).
                 </p>
 
                 {/* Token display */}
@@ -1110,38 +1099,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                       ? "Tracking prerelease channel. You will receive preview builds from the latest main branch."
                       : "Tracking stable channel. You will only receive versioned releases."}
                   </p>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="block text-sm font-medium">Auto-update Docker image</span>
-                    <p className="mt-0.5 text-xs text-cc-muted">
-                      Automatically re-pull the sandbox Docker image when updating The Companion
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={dockerAutoUpdate}
-                    onClick={async () => {
-                      const next = !dockerAutoUpdate;
-                      setDockerAutoUpdate(next);
-                      try {
-                        await api.updateSettings({ dockerAutoUpdate: next });
-                      } catch {
-                        setDockerAutoUpdate(!next);
-                      }
-                    }}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                      dockerAutoUpdate ? "bg-cc-primary" : "bg-cc-hover"
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${
-                        dockerAutoUpdate ? "translate-x-5" : "translate-x-0"
-                      }`}
-                    />
-                  </button>
                 </div>
 
                 {updateError && (

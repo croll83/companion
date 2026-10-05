@@ -27,9 +27,9 @@ All model inference happens through your own subscriptions. The Companion bridge
 ## Features
 
 - [Sessions & Permissions](#/docs/guides/sessions-and-permissions) — Run parallel sessions, approve tool calls, and recover work after restarts.
-- [Docker & Environments](#/docs/guides/docker-and-environments) — Define environment profiles with variables, Docker containers, init scripts, and port forwarding.
+- [Environments](#/docs/guides/environments) — Define reusable environment-variable profiles for sessions and agents.
 - [Git Worktrees](#/docs/guides/git-worktrees) — Isolate sessions with git worktrees so multiple agents can work on the same repo without conflicts.
-- [Agents](#/docs/guides/agents) — Build reusable agent configurations with custom prompts, triggers (webhook, schedule), and Docker/git support.
+- [Agents](#/docs/guides/agents) — Build reusable agent configurations with custom prompts, triggers (webhook, schedule), and git support.
 - [Saved Prompts](#/docs/guides/saved-prompts) — Create reusable prompts scoped globally or to specific projects. Insert them in any session with @mentions.
 - [Linear Integration](#/docs/guides/linear-integration) — Search and create Linear issues, link them to sessions, and auto-transition issue status.
 - [Deploy](#/docs/deploy/cloud-vm) — Run The Companion on cloud VMs for always-on access with secure Tailscale networking.

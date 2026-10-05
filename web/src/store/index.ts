@@ -73,7 +73,6 @@ export const useStore = create<AppState>((...args) => ({
       activeQuickTerminalTabId: null,
       quickTerminalPlacement: getInitialQuickTerminalPlacement(),
       quickTerminalNextHostIndex: 1,
-      quickTerminalNextDockerIndex: 1,
       terminalOpen: false,
       terminalCwd: null,
       terminalId: null,

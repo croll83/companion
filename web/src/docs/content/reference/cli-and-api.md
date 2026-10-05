@@ -49,7 +49,6 @@ the-companion logs
 | `COMPANION_RECORD` | Set to `0` or `false` to disable protocol recording | `true` |
 | `COMPANION_RECORDINGS_DIR` | Override recordings directory | `~/.companion/recordings/` |
 | `COMPANION_RECORDINGS_MAX_LINES` | Max total lines before recording rotation | `1,000,000` |
-| `COMPANION_INIT_SCRIPT_TIMEOUT` | Init script timeout in seconds | `120` |
 
 ## REST API
 

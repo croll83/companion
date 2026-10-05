@@ -126,9 +126,6 @@ export interface SdkSessionInfo {
   cwd: string;
   createdAt: number;
   archived?: boolean;
-  containerId?: string;
-  containerName?: string;
-  containerImage?: string;
   name?: string;
   backendType?: BackendType;
   gitBranch?: string;
@@ -146,6 +143,4 @@ export interface SdkSessionInfo {
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
   agentName?: string;
-  /** Sandbox profile slug used for this session */
-  sandboxSlug?: string;
 }

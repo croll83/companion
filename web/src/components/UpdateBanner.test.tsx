@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { UpdateInfo } from "../api.js";
 
 const mockSetUpdateInfo = vi.fn();
@@ -131,5 +131,36 @@ describe("UpdateBanner interactions", () => {
     const dismissBtn = screen.getByTitle("Dismiss");
     fireEvent.click(dismissBtn);
     expect(mockDismissUpdate).toHaveBeenCalledWith("0.23.0");
+  });
+
+  it("re-enables Update & Restart when the update request fails", async () => {
+    // A failed trigger must not leave the button stuck on "Updating...".
+    mockTriggerUpdate.mockRejectedValue(new Error("update failed"));
+    storeState.updateInfo = makeUpdateInfo({ isServiceMode: true });
+    render(<UpdateBanner />);
+
+    fireEvent.click(screen.getByText("Update & Restart"));
+    await waitFor(() => {
+      expect(screen.getByText("Update & Restart")).not.toHaveProperty("disabled", true);
+    });
+    expect(mockTriggerUpdate).toHaveBeenCalledOnce();
+  });
+});
+
+// ─── Accessibility ─────────────────────────────────────────────────────────
+
+describe("UpdateBanner accessibility", () => {
+  it("passes axe accessibility checks in service mode", async () => {
+    const { axe } = await import("vitest-axe");
+    storeState.updateInfo = makeUpdateInfo({ isServiceMode: true });
+    const { container } = render(<UpdateBanner />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("passes axe accessibility checks in foreground mode", async () => {
+    const { axe } = await import("vitest-axe");
+    storeState.updateInfo = makeUpdateInfo({ isServiceMode: false });
+    const { container } = render(<UpdateBanner />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

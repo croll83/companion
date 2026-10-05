@@ -26,7 +26,7 @@ Agents are reusable configurations that spawn sessions with specific settings, p
    - **Permission mode**: Default, Accept Edits, or Bypass
    - **Working directory**: The folder the agent operates in (or "temp" for auto-created)
    - **Branch** (optional): Git branch to check out
-   - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/docker-and-environments)
+   - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/environments)
    - **Internet access** (Codex only): Toggle network access
 
 5. Click **Save**

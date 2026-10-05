@@ -8,7 +8,6 @@ import { ArchiveLinearModal } from "./ArchiveLinearModal.js";
 const defaultProps = {
   issueIdentifier: "ENG-42",
   issueStateName: "In Progress",
-  isContainerized: false,
   archiveTransitionConfigured: false,
   archiveTransitionStateName: undefined,
   hasBacklogState: true,
@@ -62,27 +61,17 @@ describe("ArchiveLinearModal", () => {
     expect(screen.queryByText(/Move to Review/)).not.toBeInTheDocument();
   });
 
-  it("shows container warning when isContainerized is true", () => {
-    render(<ArchiveLinearModal {...defaultProps} isContainerized={true} />);
-    expect(screen.getByText(/remove the container/)).toBeInTheDocument();
-  });
-
-  it("does not show container warning when isContainerized is false", () => {
-    render(<ArchiveLinearModal {...defaultProps} isContainerized={false} />);
-    expect(screen.queryByText(/remove the container/)).not.toBeInTheDocument();
-  });
-
   it("calls onConfirm with 'none' when Archive is clicked with default selection", () => {
     render(<ArchiveLinearModal {...defaultProps} />);
     fireEvent.click(screen.getByText("Archive"));
-    expect(defaultProps.onConfirm).toHaveBeenCalledWith("none", undefined);
+    expect(defaultProps.onConfirm).toHaveBeenCalledWith("none");
   });
 
   it("calls onConfirm with 'backlog' when Backlog is selected and Archive is clicked", () => {
     render(<ArchiveLinearModal {...defaultProps} />);
     fireEvent.click(screen.getByLabelText("Move to Backlog"));
     fireEvent.click(screen.getByText("Archive"));
-    expect(defaultProps.onConfirm).toHaveBeenCalledWith("backlog", undefined);
+    expect(defaultProps.onConfirm).toHaveBeenCalledWith("backlog");
   });
 
   it("calls onConfirm with 'configured' when configured option is selected", () => {
@@ -95,13 +84,7 @@ describe("ArchiveLinearModal", () => {
     );
     fireEvent.click(screen.getByLabelText("Move to Review"));
     fireEvent.click(screen.getByText("Archive"));
-    expect(defaultProps.onConfirm).toHaveBeenCalledWith("configured", undefined);
-  });
-
-  it("passes force=true when containerized and Archive is clicked", () => {
-    render(<ArchiveLinearModal {...defaultProps} isContainerized={true} />);
-    fireEvent.click(screen.getByText("Archive"));
-    expect(defaultProps.onConfirm).toHaveBeenCalledWith("none", true);
+    expect(defaultProps.onConfirm).toHaveBeenCalledWith("configured");
   });
 
   it("calls onCancel when Cancel button is clicked", () => {
@@ -122,7 +105,7 @@ describe("ArchiveLinearModal", () => {
     }
   });
 
-  it("passes accessibility audit", async () => {
+  it("passes axe accessibility audit", async () => {
     const { axe } = await import("vitest-axe");
     // axe needs the portal content to be inside a container it can scan
     render(<ArchiveLinearModal {...defaultProps} />);

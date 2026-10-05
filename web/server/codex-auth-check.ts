@@ -3,11 +3,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * Returns true when Codex running inside a container has a plausible auth source:
+ * Returns true when Codex has a plausible auth source:
  * - explicit OpenAI auth env vars, or
- * - known auth files under ~/.codex that can be copied into the container.
+ * - a `codex login` auth file at ~/.codex/auth.json.
  */
-export function hasContainerCodexAuth(envVars?: Record<string, string>): boolean {
+export function hasCodexAuth(envVars?: Record<string, string>): boolean {
   if (
     !!envVars?.OPENAI_API_KEY
     || !!envVars?.CODEX_API_KEY

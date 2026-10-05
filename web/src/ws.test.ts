@@ -93,7 +93,6 @@ function makeSession(id: string): SessionState {
     is_compacting: false,
     git_branch: "main",
     is_worktree: false,
-    is_containerized: false,
     repo_root: "/repo",
     git_ahead: 0,
     git_behind: 0,

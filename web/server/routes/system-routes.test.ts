@@ -648,12 +648,7 @@ describe("POST /api/terminal/spawn", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.terminalId).toBe("new-terminal-id");
-    expect(terminalManager.spawn).toHaveBeenCalledWith(
-      "/workspace",
-      undefined,
-      undefined,
-      expect.objectContaining({}),
-    );
+    expect(terminalManager.spawn).toHaveBeenCalledWith("/workspace", undefined, undefined);
   });
 
   it("returns 400 when cwd is missing", async () => {

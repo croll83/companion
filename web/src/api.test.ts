@@ -73,29 +73,6 @@ describe("createSession", () => {
     });
   });
 
-  it("passes container options when provided", async () => {
-    const responseData = { sessionId: "s3", state: "starting", cwd: "/repo" };
-    mockFetch.mockResolvedValueOnce(mockResponse(responseData));
-
-    await api.createSession({
-      backend: "claude",
-      cwd: "/repo",
-      container: {
-        image: "companion-core:latest",
-        ports: [3000, 5173],
-      },
-    });
-
-    const [, opts] = mockFetch.mock.calls[0];
-    expect(JSON.parse(opts.body)).toEqual({
-      backend: "claude",
-      cwd: "/repo",
-      container: {
-        image: "companion-core:latest",
-        ports: [3000, 5173],
-      },
-    });
-  });
 });
 
 // ===========================================================================
@@ -467,10 +444,10 @@ describe("getSessionUsageLimits", () => {
 // terminal API
 // ===========================================================================
 describe("terminal API", () => {
-  it("spawnTerminal sends cwd, size, and optional containerId", async () => {
+  it("spawnTerminal sends cwd and size", async () => {
     mockFetch.mockResolvedValueOnce(mockResponse({ terminalId: "term-1" }));
 
-    const result = await api.spawnTerminal("/workspace", 120, 40, { containerId: "abc123" });
+    const result = await api.spawnTerminal("/workspace", 120, 40);
 
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toBe("/api/terminal/spawn");
@@ -479,7 +456,6 @@ describe("terminal API", () => {
       cwd: "/workspace",
       cols: 120,
       rows: 40,
-      containerId: "abc123",
     });
     expect(result).toEqual({ terminalId: "term-1" });
   });
@@ -740,99 +716,6 @@ describe("environment API", () => {
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toBe("/api/envs/old-env");
     expect(opts.method).toBe("DELETE");
-  });
-
-  it("listSandboxes sends GET to /api/sandboxes", async () => {
-    const sandboxes = [{ name: "Dev", slug: "dev", createdAt: 1, updatedAt: 1 }];
-    mockFetch.mockResolvedValueOnce(mockResponse(sandboxes));
-
-    const result = await api.listSandboxes();
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sandboxes");
-    expect(result).toEqual(sandboxes);
-  });
-
-  it("getSandbox sends GET to /api/sandboxes/:slug", async () => {
-    const sandbox = { name: "Dev", slug: "dev", createdAt: 1, updatedAt: 1 };
-    mockFetch.mockResolvedValueOnce(mockResponse(sandbox));
-
-    const result = await api.getSandbox("dev");
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sandboxes/dev");
-    expect(result).toEqual(sandbox);
-  });
-
-  it("createSandbox sends POST to /api/sandboxes with name and options", async () => {
-    const sandbox = { name: "My Sandbox", slug: "my-sandbox", initScript: "npm install", createdAt: 1, updatedAt: 1 };
-    mockFetch.mockResolvedValueOnce(mockResponse(sandbox));
-
-    const result = await api.createSandbox("My Sandbox", { initScript: "npm install" });
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sandboxes");
-    expect(opts.method).toBe("POST");
-    expect(JSON.parse(opts.body)).toEqual({ name: "My Sandbox", initScript: "npm install" });
-    expect(result).toEqual(sandbox);
-  });
-
-  it("updateSandbox sends PUT to /api/sandboxes/:slug", async () => {
-    const sandbox = { name: "Renamed", slug: "renamed", createdAt: 1, updatedAt: 2 };
-    mockFetch.mockResolvedValueOnce(mockResponse(sandbox));
-
-    await api.updateSandbox("my-sandbox", { name: "Renamed" });
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sandboxes/my-sandbox");
-    expect(opts.method).toBe("PUT");
-    expect(JSON.parse(opts.body)).toEqual({ name: "Renamed" });
-  });
-
-  it("deleteSandbox sends DELETE to /api/sandboxes/:slug", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
-
-    await api.deleteSandbox("old-sandbox");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sandboxes/old-sandbox");
-    expect(opts.method).toBe("DELETE");
-  });
-
-  it("testInitScript sends POST to /api/sandboxes/:slug/test-init with initScript", async () => {
-    const data = { success: true, exitCode: 0, output: "hello\n" };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.testInitScript("my-sandbox", "/home/user/project", "echo hi");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sandboxes/my-sandbox/test-init");
-    expect(opts.method).toBe("POST");
-    expect(JSON.parse(opts.body)).toEqual({ cwd: "/home/user/project", initScript: "echo hi" });
-    expect(result).toEqual(data);
-  });
-
-  it("buildBaseImage sends POST to /api/docker/build-base", async () => {
-    const data = { ok: true, tag: "companion-base:latest" };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.buildBaseImage();
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/docker/build-base");
-    expect(opts.method).toBe("POST");
-    expect(result).toEqual(data);
-  });
-
-  it("getBaseImageStatus sends GET to /api/docker/base-image", async () => {
-    const data = { exists: true, tag: "companion-base:latest" };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.getBaseImageStatus();
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/docker/base-image");
-    expect(result).toEqual(data);
   });
 
   it("createEnv sends name and variables only", async () => {
@@ -1115,61 +998,6 @@ describe("backends API", () => {
     const [url] = mockFetch.mock.calls[0];
     expect(url).toBe("/api/backends/claude/models");
     expect(result).toEqual(models);
-  });
-});
-
-// ===========================================================================
-// Containers API
-// ===========================================================================
-describe("containers API", () => {
-  it("getContainerStatus sends GET to /api/containers/status", async () => {
-    const data = { available: true, version: "24.0.6" };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.getContainerStatus();
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/containers/status");
-    expect(result).toEqual(data);
-  });
-
-  it("getContainerImages sends GET to /api/containers/images", async () => {
-    const images = ["node:20", "companion-core:latest"];
-    mockFetch.mockResolvedValueOnce(mockResponse(images));
-
-    const result = await api.getContainerImages();
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/containers/images");
-    expect(result).toEqual(images);
-  });
-});
-
-// ===========================================================================
-// Image pull manager
-// ===========================================================================
-describe("image pull API", () => {
-  it("getImageStatus sends GET with encoded tag", async () => {
-    const state = { image: "node:20", status: "ready", progress: [] };
-    mockFetch.mockResolvedValueOnce(mockResponse(state));
-
-    const result = await api.getImageStatus("node:20");
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe(`/api/images/${encodeURIComponent("node:20")}/status`);
-    expect(result).toEqual(state);
-  });
-
-  it("pullImage sends POST with encoded tag", async () => {
-    const data = { ok: true, state: { image: "node:20", status: "pulling", progress: [] } };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.pullImage("node:20");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe(`/api/images/${encodeURIComponent("node:20")}/pull`);
-    expect(opts.method).toBe("POST");
-    expect(result).toEqual(data);
   });
 });
 
@@ -1927,23 +1755,6 @@ describe("del() error handling", () => {
 });
 
 // ===========================================================================
-// Browser preview API
-// ===========================================================================
-describe("browser preview API", () => {
-  it("navigateBrowser sends POST with url body", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
-
-    const result = await api.navigateBrowser("sess-1", "https://example.com");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/sessions/sess-1/browser/navigate");
-    expect(opts.method).toBe("POST");
-    expect(JSON.parse(opts.body)).toEqual({ url: "https://example.com" });
-    expect(result).toEqual({ ok: true });
-  });
-});
-
-// ===========================================================================
 // Linear OAuth API (Agent Interaction SDK)
 // ===========================================================================
 describe("Linear OAuth API", () => {
@@ -2350,7 +2161,7 @@ describe("getFileBlob", () => {
 });
 
 // ===========================================================================
-// Misc endpoints: system checks, tailscale, linear connections, browser start
+// Misc endpoints: system checks, linear connections
 // ===========================================================================
 describe("system and integration endpoints", () => {
   // Each entry: [call, expected URL, expected method]
@@ -2361,9 +2172,6 @@ describe("system and integration endpoints", () => {
     ["getClaudeCliCheck(force)", () => api.getClaudeCliCheck(true), "/api/system/claude-cli-check?force=1", "GET"],
     // Bun runtime check used by the BunRuntimeAlert banner.
     ["getBunRuntimeCheck", () => api.getBunRuntimeCheck(), "/api/system/bun-runtime-check", "GET"],
-    ["getTailscaleStatus", () => api.getTailscaleStatus(), "/api/tailscale/status", "GET"],
-    ["startTailscaleFunnel", () => api.startTailscaleFunnel(), "/api/tailscale/funnel/start", "POST"],
-    ["stopTailscaleFunnel", () => api.stopTailscaleFunnel(), "/api/tailscale/funnel/stop", "POST"],
     ["listLinearConnections", () => api.listLinearConnections(), "/api/linear/connections", "GET"],
     ["createLinearConnection", () => api.createLinearConnection({ name: "n", apiKey: "k" }), "/api/linear/connections", "POST"],
     ["updateLinearConnection", () => api.updateLinearConnection("c/1", { name: "m" }), "/api/linear/connections/c%2F1", "PUT"],
@@ -2375,7 +2183,6 @@ describe("system and integration endpoints", () => {
     ["deleteLinearOAuthConnection", () => api.deleteLinearOAuthConnection("o1"), "/api/linear/oauth-connections/o1", "DELETE"],
     ["getLinearOAuthConnectionAuthorizeUrl", () => api.getLinearOAuthConnectionAuthorizeUrl("o1"), "/api/linear/oauth-connections/o1/authorize-url", "GET"],
     ["getLinearOAuthConnectionAuthorizeUrl(returnTo)", () => api.getLinearOAuthConnectionAuthorizeUrl("o1", "/settings?x=1"), "/api/linear/oauth-connections/o1/authorize-url?returnTo=%2Fsettings%3Fx%3D1", "GET"],
-    ["startBrowser", () => api.startBrowser("s1"), "/api/sessions/s1/browser/start", "POST"],
   ];
 
   it.each(cases)("%s targets the right route and verb", async (_name, call, url, method) => {
@@ -2386,12 +2193,4 @@ describe("system and integration endpoints", () => {
     expect(opts.method ?? "GET").toBe(method);
   });
 
-  it("startBrowser sends the url only when provided", async () => {
-    mockFetch.mockResolvedValue(mockResponse({ ok: true }));
-    await api.startBrowser("s1");
-    await api.startBrowser("s1", "http://localhost:3000");
-    expect(mockFetch.mock.calls[0][1].body).toBeUndefined();
-    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ url: "http://localhost:3000" });
-    mockFetch.mockReset();
-  });
 });

@@ -50,15 +50,6 @@ export interface AgentConfig {
   /** Skill slugs to attach (from ~/.claude/skills/) */
   skills?: string[];
 
-  // ── Docker ──
-  /** Optional Docker container configuration */
-  container?: {
-    image?: string;
-    ports?: number[];
-    volumes?: string[];
-    initScript?: string;
-  };
-
   // ── Git ──
   branch?: string;
   createBranch?: boolean;

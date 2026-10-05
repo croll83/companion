@@ -39,16 +39,24 @@ function generateWebhookSecret(): string {
 }
 
 /**
- * Strip the legacy `triggers.chat` block from agents loaded from disk.
- * The Chat SDK was removed but agents saved with the old schema may still
- * have chat platform credentials on disk. Stripping on load prevents
- * leaking those secrets via the API.
+ * Strip fields of removed features from agents loaded from disk:
+ * - `triggers.chat`: the Chat SDK was removed but agents saved with the old
+ *   schema may still have chat platform credentials on disk. Stripping on
+ *   load prevents leaking those secrets via the API.
+ * - `container`: Docker container sessions were removed; the old per-agent
+ *   container config is ignored so it is not shown, exported or re-saved.
  */
-function stripLegacyChatTrigger(agent: AgentConfig): AgentConfig {
-  if (!agent.triggers || !("chat" in agent.triggers)) return agent;
+function stripLegacyFields(agent: AgentConfig): AgentConfig {
+  let result = agent;
+  if ("container" in result) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { container: _container, ...rest } = result as AgentConfig & { container?: unknown };
+    result = rest;
+  }
+  if (!result.triggers || !("chat" in result.triggers)) return result;
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { chat: _chat, ...rest } = agent.triggers as Record<string, unknown>;
-  return { ...agent, triggers: rest as AgentConfig["triggers"] };
+  const { chat: _chat, ...rest } = result.triggers as Record<string, unknown>;
+  return { ...result, triggers: rest as AgentConfig["triggers"] };
 }
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
@@ -61,7 +69,7 @@ export function listAgents(): AgentConfig[] {
     for (const file of files) {
       try {
         const raw = readFileSync(join(AGENTS_DIR, file), "utf-8");
-        agents.push(stripLegacyChatTrigger(JSON.parse(raw)));
+        agents.push(stripLegacyFields(JSON.parse(raw)));
       } catch {
         // Skip corrupt files
       }
@@ -77,7 +85,7 @@ export function getAgent(id: string): AgentConfig | null {
   ensureDir();
   try {
     const raw = readFileSync(filePath(id), "utf-8");
-    return stripLegacyChatTrigger(JSON.parse(raw) as AgentConfig);
+    return stripLegacyFields(JSON.parse(raw) as AgentConfig);
   } catch {
     return null;
   }

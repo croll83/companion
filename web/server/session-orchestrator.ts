@@ -4,19 +4,13 @@ import type { SessionStore } from "./session-store.js";
 import type { WorktreeTracker } from "./worktree-tracker.js";
 import type { AgentExecutor } from "./agent-executor.js";
 import type { BackendType, CreationStepId } from "./session-types.js";
-import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
-import { containerManager } from "./container-manager.js";
-import { imagePullManager } from "./image-pull-manager.js";
 import * as envManager from "./env-manager.js";
-import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { buildLinearSystemPrompt } from "./linear-prompt-builder.js";
 import { transitionLinearIssue, fetchLinearTeamStates } from "./routes/linear-routes.js";
-import { hasContainerClaudeAuth } from "./claude-container-auth.js";
-import { hasContainerCodexAuth } from "./codex-container-auth.js";
 import { discoverCommandsAndSkills } from "./commands-discovery.js";
 import { getSettings } from "./settings-manager.js";
 import { generateSessionTitle } from "./auto-namer.js";
@@ -32,11 +26,17 @@ const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 
-const VSCODE_EDITOR_CONTAINER_PORT = 13337;
-const CODEX_APP_SERVER_CONTAINER_PORT = Number(
-  process.env.COMPANION_CODEX_CONTAINER_WS_PORT || "4502",
-);
-const NOVNC_CONTAINER_PORT = 6080;
+/**
+ * True when a create-session body uses the removed sandbox/container fields
+ * the way older versions did to start a container session:
+ * `sandboxEnabled: true` or `container: { image }`.
+ */
+function requestsRemovedSandbox(body: CreateSessionRequest): boolean {
+  const legacy = body as { sandboxEnabled?: unknown; container?: unknown };
+  if (legacy.sandboxEnabled === true) return true;
+  const container = legacy.container;
+  return typeof container === "object" && container !== null && !!(container as { image?: unknown }).image;
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,14 +64,11 @@ export interface CreateSessionRequest {
   allowedTools?: string[];
   env?: Record<string, string>;
   envSlug?: string;
-  sandboxEnabled?: boolean;
-  sandboxSlug?: string;
   linearConnectionId?: string;
   linearIssue?: unknown;
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
-  container?: { image?: string; ports?: number[]; volumes?: string[] };
   resumeSessionAt?: string;
   forkSession?: boolean;
 }
@@ -84,7 +81,6 @@ export type ProgressCallback = (
   step: CreationStepId,
   label: string,
   status: "in_progress" | "done" | "error",
-  detail?: string,
 ) => Promise<void>;
 
 export interface ArchiveSessionOptions {
@@ -308,13 +304,12 @@ export class SessionOrchestrator {
       }
     });
 
-    // Kill CLI process when idle with no browsers for 24 hours.
-    // Only kills the CLI process — containers are preserved so the session
-    // can be relaunched without recreating the container.
+    // Kill CLI process when idle with no browsers. Only the CLI process is
+    // killed, so the session can be relaunched later.
     companionBus.on("session:idle-kill", async ({ sessionId }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      log.info("orchestrator", "Idle-killing session (preserving container)", { sessionId, reason: "no browsers, no activity" });
+      log.info("orchestrator", "Idle-killing session", { sessionId, reason: "no browsers, no activity" });
       this.intentionalKills.add(sessionId);
       // Cancel the CLI disconnect debounce timer so it doesn't fire
       // session:relaunch-needed after we intentionally kill the process.
@@ -363,6 +358,16 @@ export class SessionOrchestrator {
       if (backend !== "claude" && backend !== "codex") {
         return { ok: false, error: `Invalid backend: ${String(body.backend)}`, status: 400 };
       }
+      // Sandboxed/container sessions were removed. A caller that still asks
+      // for isolation (old UI bundle, external API client) must get an error
+      // rather than a silently unsandboxed host session.
+      if (requestsRemovedSandbox(body)) {
+        return {
+          ok: false,
+          error: "Sandboxed/container sessions were removed; this session would run directly on the host",
+          status: 400,
+        };
+      }
 
       // --- Step: Resolve environment ---
       if (onProgress) await onProgress("resolving_env", "Resolving environment...", "in_progress");
@@ -380,22 +385,12 @@ export class SessionOrchestrator {
       }
 
       // Inject provider tokens from global settings (if not already set by env profile).
-      // Note: these tokens also flow into containerized sessions intentionally — the
-      // global onboarding tokens serve as defaults for all session types, including
-      // containers, so that container auth preflight checks pass automatically.
       const globalSettings = getSettings();
       if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !("CLAUDE_CODE_OAUTH_TOKEN" in (envVars ?? {}))) {
         envVars = { ...envVars, CLAUDE_CODE_OAUTH_TOKEN: globalSettings.claudeCodeOAuthToken };
       }
       if (backend === "codex" && globalSettings.openaiApiKey && !("OPENAI_API_KEY" in (envVars ?? {}))) {
         envVars = { ...envVars, OPENAI_API_KEY: globalSettings.openaiApiKey };
-      }
-
-      // Resolve sandbox configuration
-      const sandboxEnabled = body.sandboxEnabled === true;
-      const companionSandbox = body.sandboxSlug ? sandboxManager.getSandbox(body.sandboxSlug) : null;
-      if (sandboxEnabled && body.sandboxSlug && !companionSandbox) {
-        return { ok: false, error: `Sandbox "${body.sandboxSlug}" not found`, status: 404 };
       }
 
       // Inject LINEAR_API_KEY if a Linear connection is specified
@@ -408,15 +403,6 @@ export class SessionOrchestrator {
         }
       }
 
-      // Resolve Docker image early
-      let effectiveImage: string | null = null;
-      if (sandboxEnabled) {
-        effectiveImage = "the-companion:latest";
-      } else if (body.container?.image) {
-        effectiveImage = body.container.image;
-      }
-      const isDockerSession = !!effectiveImage;
-
       if (onProgress) await onProgress("resolving_env", "Environment resolved", "done");
 
       let cwd = body.cwd;
@@ -427,8 +413,8 @@ export class SessionOrchestrator {
         return { ok: false, error: "Invalid branch name", status: 400 };
       }
 
-      // --- Step: Git operations (host only) ---
-      if (!isDockerSession && body.useWorktree && body.branch && cwd) {
+      // --- Step: Git operations ---
+      if (body.useWorktree && body.branch && cwd) {
         const repoInfo = gitUtils.getRepoInfo(cwd);
         if (repoInfo) {
           if (onProgress) await onProgress("fetching_git", "Fetching from remote...", "in_progress");
@@ -454,7 +440,7 @@ export class SessionOrchestrator {
           };
         }
         if (onProgress) await onProgress("creating_worktree", "Worktree ready", "done");
-      } else if (!isDockerSession && body.branch && cwd) {
+      } else if (body.branch && cwd) {
         const repoInfo = gitUtils.getRepoInfo(cwd);
         if (repoInfo) {
           if (onProgress) await onProgress("fetching_git", "Fetching from remote...", "in_progress");
@@ -482,181 +468,6 @@ export class SessionOrchestrator {
         }
       }
 
-      let containerInfo: ContainerInfo | undefined;
-      let containerId: string | undefined;
-      let containerName: string | undefined;
-      let containerImage: string | undefined;
-
-      // Container auth pre-flight check
-      if (effectiveImage && backend === "claude" && !hasContainerClaudeAuth(envVars)) {
-        return {
-          ok: false,
-          error: "Containerized Claude requires auth available inside the container. " +
-            "Set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_AUTH_TOKEN) in the selected environment.",
-          status: 400,
-        };
-      }
-      if (effectiveImage && backend === "codex" && !hasContainerCodexAuth(envVars)) {
-        return {
-          ok: false,
-          error: "Containerized Codex requires auth available inside the container. " +
-            "Set OPENAI_API_KEY in the selected environment, or ensure ~/.codex/auth.json exists on the host.",
-          status: 400,
-        };
-      }
-
-      // --- Step: Container setup ---
-      if (effectiveImage) {
-        if (!imagePullManager.isReady(effectiveImage)) {
-          const pullState = imagePullManager.getState(effectiveImage);
-          if (pullState.status === "idle" || pullState.status === "error") {
-            imagePullManager.ensureImage(effectiveImage);
-          }
-
-          if (onProgress) {
-            await onProgress("pulling_image", "Pulling Docker image...", "in_progress");
-            const unsub = imagePullManager.onProgress(effectiveImage, (line: string) => {
-              onProgress("pulling_image", "Pulling Docker image...", "in_progress", line).catch(() => {});
-            });
-            const ready = await imagePullManager.waitForReady(effectiveImage, 300_000);
-            unsub();
-            if (ready) {
-              await onProgress("pulling_image", "Image ready", "done");
-            } else {
-              const state = imagePullManager.getState(effectiveImage);
-              return {
-                ok: false,
-                error: state.error || `Docker image ${effectiveImage} could not be pulled or built.`,
-                status: 503,
-              };
-            }
-          } else {
-            const ready = await imagePullManager.waitForReady(effectiveImage, 300_000);
-            if (!ready) {
-              const state = imagePullManager.getState(effectiveImage);
-              return {
-                ok: false,
-                error: state.error || `Docker image ${effectiveImage} could not be pulled or built.`,
-                status: 503,
-              };
-            }
-          }
-        }
-
-        // Create container
-        if (onProgress) await onProgress("creating_container", "Starting container...", "in_progress");
-        const tempId = crypto.randomUUID().slice(0, 8);
-        const requestedPorts = Array.isArray(body.container?.ports)
-          ? body.container!.ports!.map(Number).filter((n: number) => n > 0)
-          : [];
-        const containerPorts: (number | { port: number; hostIp?: string })[] = [
-          ...Array.from(new Set([
-            ...requestedPorts.filter((p: number) => p !== NOVNC_CONTAINER_PORT),
-            VSCODE_EDITOR_CONTAINER_PORT,
-            ...(backend === "codex" ? [CODEX_APP_SERVER_CONTAINER_PORT] : []),
-          ])),
-          { port: NOVNC_CONTAINER_PORT, hostIp: "127.0.0.1" },
-        ];
-        const cConfig: ContainerConfig = {
-          image: effectiveImage,
-          ports: containerPorts,
-          volumes: body.container?.volumes,
-          env: { ...(envVars ?? {}), DISPLAY: ":99" },
-          privileged: sandboxEnabled && effectiveImage === "the-companion:latest",
-        };
-        try {
-          containerInfo = containerManager.createContainer(tempId, cwd!, cConfig);
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          return {
-            ok: false,
-            error: `Docker is required to run this environment image (${effectiveImage}) but container startup failed: ${reason}`,
-            status: 503,
-          };
-        }
-        containerId = containerInfo.containerId;
-        containerName = containerInfo.name;
-        containerImage = effectiveImage;
-        if (onProgress) await onProgress("creating_container", "Container running", "done");
-
-        // Copy workspace
-        if (onProgress) await onProgress("copying_workspace", "Copying workspace files...", "in_progress");
-        try {
-          await containerManager.copyWorkspaceToContainer(containerInfo.containerId, cwd!);
-          containerManager.reseedGitAuth(containerInfo.containerId);
-          if (onProgress) await onProgress("copying_workspace", "Workspace copied", "done");
-        } catch (err) {
-          containerManager.removeContainer(tempId);
-          const reason = err instanceof Error ? err.message : String(err);
-          return { ok: false, error: `Failed to copy workspace to container: ${reason}`, status: 503 };
-        }
-
-        // Git operations inside container
-        if (body.branch) {
-          const repoInfo = cwd ? gitUtils.getRepoInfo(cwd) : null;
-          if (onProgress) await onProgress("fetching_git", "Fetching from remote (in container)...", "in_progress");
-          const gitResult = containerManager.gitOpsInContainer(containerInfo.containerId, {
-            branch: body.branch,
-            currentBranch: repoInfo?.currentBranch || "HEAD",
-            createBranch: body.createBranch,
-            defaultBranch: repoInfo?.defaultBranch,
-          });
-          if (onProgress) await onProgress("fetching_git", gitResult.fetchOk ? "Fetch complete" : "Fetch skipped", "done");
-          if (onProgress && repoInfo?.currentBranch !== body.branch) {
-            await onProgress("checkout_branch",
-              gitResult.checkoutOk ? `On branch ${body.branch}` : "Checkout failed",
-              gitResult.checkoutOk ? "done" : "error",
-            );
-          }
-          if (onProgress) await onProgress("pulling_git", gitResult.pullOk ? "Up to date" : "Pull skipped", "done");
-          if (gitResult.errors.length > 0) {
-            console.warn(`[orchestrator] In-container git ops warnings: ${gitResult.errors.join("; ")}`);
-          }
-          if (!gitResult.checkoutOk) {
-            containerManager.removeContainer(tempId);
-            return {
-              ok: false,
-              error: `Failed to checkout branch "${body.branch}" inside container: ${gitResult.errors.join("; ")}`,
-              status: 400,
-            };
-          }
-        }
-
-        // Init script
-        const initScript = companionSandbox?.initScript?.trim();
-        if (initScript) {
-          if (onProgress) await onProgress("running_init_script", "Running init script...", "in_progress");
-          try {
-            console.log(`[orchestrator] Running init script for sandbox "${companionSandbox?.name || "sandbox"}" in container ${containerInfo.name}...`);
-            const initTimeout = Number(process.env.COMPANION_INIT_SCRIPT_TIMEOUT) || 120_000;
-            const result = await containerManager.execInContainerAsync(
-              containerInfo.containerId,
-              ["sh", "-lc", initScript],
-              {
-                timeout: initTimeout,
-                onOutput: onProgress
-                  ? (line: string) => { onProgress("running_init_script", "Running init script...", "in_progress", line).catch(() => {}); }
-                  : undefined,
-              },
-            );
-            if (result.exitCode !== 0) {
-              console.error(`[orchestrator] Init script failed (exit ${result.exitCode}):\n${result.output}`);
-              containerManager.removeContainer(tempId);
-              const truncated = result.output.length > 2000
-                ? result.output.slice(0, 500) + "\n...[truncated]...\n" + result.output.slice(-1500)
-                : result.output;
-              return { ok: false, error: `Init script failed (exit ${result.exitCode}):\n${truncated}`, status: 503 };
-            }
-            if (onProgress) await onProgress("running_init_script", "Init script complete", "done");
-            console.log(`[orchestrator] Init script completed successfully for sandbox "${companionSandbox?.name || "sandbox"}"`);
-          } catch (e) {
-            containerManager.removeContainer(tempId);
-            const reason = e instanceof Error ? e.message : String(e);
-            return { ok: false, error: `Init script execution failed: ${reason}`, status: 503 };
-          }
-        }
-      }
-
       // --- Step: Launch CLI ---
       if (onProgress) await onProgress("launching_cli", `Launching ${backend === "codex" ? "Codex" : "Claude Code"}...`, "in_progress");
 
@@ -674,28 +485,16 @@ export class SessionOrchestrator {
           allowedTools: body.allowedTools,
           env: envVars,
           backendType: backend,
-          containerId,
-          containerName,
-          containerImage,
-          containerCwd: containerInfo?.containerCwd,
           resumeSessionAt,
           forkSession,
           systemPrompt: backend === "codex" ? linearSystemPrompt : undefined,
-          sandboxSlug: sandboxEnabled ? (body.sandboxSlug || undefined) : undefined,
         });
       } catch (e) {
-        // Clean up container if it was created but launch failed
-        if (containerId) containerManager.removeContainer(containerId);
         const reason = e instanceof Error ? e.message : String(e);
         return { ok: false, error: `Failed to launch CLI: ${reason}`, status: 503 };
       }
 
       // Post-launch wiring
-      if (containerInfo) {
-        containerManager.retrack(containerInfo.containerId, session.sessionId);
-        this.wsBridge.markContainerized(session.sessionId, cwd!);
-      }
-
       if (worktreeInfo) {
         this.worktreeTracker.addMapping({
           sessionId: session.sessionId,
@@ -731,9 +530,6 @@ export class SessionOrchestrator {
 
   async killSession(sessionId: string): Promise<{ ok: boolean }> {
     const killed = await this.launcher.kill(sessionId);
-    if (killed) {
-      containerManager.removeContainer(sessionId);
-    }
     return { ok: killed };
   }
 
@@ -809,7 +605,6 @@ export class SessionOrchestrator {
     this.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
-    containerManager.removeContainer(sessionId);
     this.prPoller.unwatch(sessionId);
 
     const worktreeResult = this.cleanupWorktree(sessionId, options?.force);
@@ -826,7 +621,6 @@ export class SessionOrchestrator {
     this.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
-    containerManager.removeContainer(sessionId);
     const worktreeResult = this.cleanupWorktree(sessionId, true);
     this.prPoller.unwatch(sessionId);
     sessionLinearIssues.removeLinearIssue(sessionId);
@@ -886,7 +680,7 @@ export class SessionOrchestrator {
 
     // If we've already notified the user about relaunch exhaustion, bail out
     // silently. Without this, every reconnect event from a dead session
-    // (e.g. deleted container) re-logs the "limit reached" warning endlessly.
+    // re-logs the "limit reached" warning endlessly.
     if (this.relaunchExhaustedNotified.has(sessionId)) return;
 
     this.relaunchingSet.add(sessionId);
@@ -918,19 +712,8 @@ export class SessionOrchestrator {
     // After idle-kill or explicit kill(), the PID field stays set but the
     // process is dead. If the kernel recycles the PID to a different process,
     // kill(pid, 0) would incorrectly succeed, preventing any relaunch.
-    // For containerized sessions, use container liveness instead of PID check
-    // (the PID is the `docker exec` wrapper, which exits immediately for some
-    // transports and is unreliable for container health).
-    if (!disconnectConfirmed && freshInfo && freshInfo.state !== "exited") {
-      if (freshInfo.containerId) {
-        const containerState = containerManager.isContainerAlive(freshInfo.containerId);
-        if (containerState === "running") {
-          this.relaunchingSet.delete(sessionId);
-          return;
-        }
-      } else if (freshInfo.pid) {
-        try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
-      }
+    if (!disconnectConfirmed && freshInfo && freshInfo.state !== "exited" && freshInfo.pid) {
+      try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
     }
 
     const count = this.autoRelaunchCounts.get(sessionId) ?? 0;

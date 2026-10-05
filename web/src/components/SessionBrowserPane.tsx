@@ -1,110 +1,45 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api.js";
+import { useCallback, useRef, useState } from "react";
 
 interface SessionBrowserPaneProps {
   sessionId: string;
 }
 
 export function SessionBrowserPane({ sessionId }: SessionBrowserPaneProps) {
-  const [loading, setLoading] = useState(true);
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
-  const [browserMode, setBrowserMode] = useState<"host" | "container" | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [navUrl, setNavUrl] = useState("http://localhost:3000");
   const [navError, setNavError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  // Call browser/start to determine mode and (for container sessions) start the display stack
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setBrowserMode(null);
-
-    api.startBrowser(sessionId).then((result) => {
-      if (cancelled) return;
-      if (result.mode === "host") {
-        // Host mode — no VNC, just proxy-based iframe
-        setBrowserMode("host");
-        setLoading(false);
-      } else if (result.available && result.url) {
-        // Container mode — inject auth token into noVNC WebSocket path
-        const token = localStorage.getItem("companion_auth_token") || "";
-        const url = new URL(result.url, window.location.origin);
-        const wsPath = url.searchParams.get("path");
-        if (wsPath && token) {
-          url.searchParams.set("path", `${wsPath}?token=${encodeURIComponent(token)}`);
-        }
-        setBrowserUrl(url.pathname + url.search);
-        setBrowserMode("container");
-      } else {
-        setError(result.message || "Browser preview unavailable.");
-      }
-    }).catch((err) => {
-      if (cancelled) return;
-      setError(err instanceof Error ? err.message : "Failed to start browser preview");
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-
-    return () => { cancelled = true; };
-  }, [sessionId]);
-
+  // Previews a dev server on this host: the URL is rewritten to the
+  // companion's host-proxy route so the iframe works through a single port.
   const handleNavigate = useCallback(() => {
     if (!navUrl.trim()) return;
     setNavError(null);
 
-    if (browserMode === "host") {
-      // Host mode: construct proxy URL and set iframe src directly
-      try {
-        const parsed = new URL(navUrl.trim());
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-          setNavError("Only http:// and https:// URLs are supported");
-          return;
-        }
-        if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
-          setNavError("Host mode only supports localhost URLs (e.g. http://localhost:3000)");
-          return;
-        }
-        const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-        const subPath = parsed.pathname.replace(/^\//, "");
-        const proxyUrl = `/api/sessions/${encodeURIComponent(sessionId)}/browser/host-proxy/${port}/${subPath}${parsed.search}`;
-        setBrowserUrl(proxyUrl);
-      } catch {
-        setNavError("Invalid URL");
+    try {
+      const parsed = new URL(navUrl.trim());
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        setNavError("Only http:// and https:// URLs are supported");
+        return;
       }
-    } else {
-      // Container mode: navigate via xdotool
-      api.navigateBrowser(sessionId, navUrl.trim()).catch((err) => {
-        setNavError(err instanceof Error ? err.message : "Navigation failed");
-      });
+      if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
+        setNavError("Only localhost URLs are supported (e.g. http://localhost:3000)");
+        return;
+      }
+      const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+      const subPath = parsed.pathname.replace(/^\//, "");
+      const proxyUrl = `/api/sessions/${encodeURIComponent(sessionId)}/browser/host-proxy/${port}/${subPath}${parsed.search}`;
+      setBrowserUrl(proxyUrl);
+    } catch {
+      setNavError("Invalid URL");
     }
-  }, [sessionId, navUrl, browserMode]);
+  }, [sessionId, navUrl]);
 
   const handleReload = useCallback(() => {
     if (iframeRef.current && browserUrl) {
       iframeRef.current.src = browserUrl;
     }
   }, [browserUrl]);
-
-  if (loading) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-3 p-4">
-        <div className="w-5 h-5 border-2 border-cc-primary border-t-transparent rounded-full animate-spin" />
-        <div className="text-sm text-cc-muted">Starting browser preview...</div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="h-full flex items-center justify-center p-4">
-        <div className="px-4 py-3 rounded-lg bg-cc-error/10 border border-cc-error/30 text-sm text-cc-error max-w-md text-center">
-          {error}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="h-full flex flex-col bg-cc-bg">
@@ -155,16 +90,15 @@ export function SessionBrowserPane({ sessionId }: SessionBrowserPaneProps) {
             src={browserUrl}
             className="w-full h-full border-0"
             title="Browser preview"
-            // Container mode needs allow-same-origin for noVNC WebSocket connections.
-            // This is intentional: noVNC content is trusted (our own server in the container).
-            // Host mode omits allow-same-origin to isolate proxied third-party content.
-            sandbox={browserMode === "container" ? "allow-scripts allow-same-origin allow-forms allow-popups" : "allow-scripts allow-forms allow-popups"}
+            // No allow-same-origin: the proxied dev-server content stays isolated
+            // from the companion's own origin.
+            sandbox="allow-scripts allow-forms allow-popups"
           />
-        ) : browserMode === "host" ? (
+        ) : (
           <div className="h-full flex items-center justify-center p-4 text-sm text-cc-muted">
             Enter a URL and click Go to preview.
           </div>
-        ) : null}
+        )}
       </div>
     </div>
   );

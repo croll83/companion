@@ -62,7 +62,6 @@ beforeEach(() => {
     aiValidationAutoDeny: false,
     publicUrl: "",
     updateChannel: "stable",
-    dockerAutoUpdate: false,
     telegramBotToken: "",
     updatedAt: 0,
   });
@@ -194,7 +193,6 @@ describe("linear-connections", () => {
       aiValidationAutoDeny: false,
       publicUrl: "",
       updateChannel: "stable",
-      dockerAutoUpdate: false,
       telegramBotToken: "",
       updatedAt: 0,
     });
@@ -236,7 +234,6 @@ describe("linear-connections", () => {
       aiValidationAutoDeny: false,
       publicUrl: "",
       updateChannel: "stable",
-      dockerAutoUpdate: false,
       telegramBotToken: "",
       updatedAt: 0,
     });
@@ -297,7 +294,6 @@ describe("linear-connections", () => {
       aiValidationAutoDeny: false,
       publicUrl: "",
       updateChannel: "stable",
-      dockerAutoUpdate: false,
       telegramBotToken: "",
       updatedAt: 0,
     });

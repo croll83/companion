@@ -57,7 +57,7 @@ const NAV_ITEMS: NavItem[] = [
     id: "integrations",
     label: "Integrations",
     hash: "#/integrations",
-    activePages: ["integrations", "integration-linear", "integration-linear-oauth", "integration-tailscale"],
+    activePages: ["integrations", "integration-linear", "integration-linear-oauth"],
     viewBox: "0 0 16 16",
     iconPath: "M2.5 3A1.5 1.5 0 001 4.5v2A1.5 1.5 0 002.5 8h2A1.5 1.5 0 006 6.5v-2A1.5 1.5 0 004.5 3h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zm9 0A1.5 1.5 0 0010 5.5v2A1.5 1.5 0 0011.5 9h2A1.5 1.5 0 0015 7.5v-2A1.5 1.5 0 0013.5 4h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zM2.5 10A1.5 1.5 0 001 11.5v2A1.5 1.5 0 002.5 15h2A1.5 1.5 0 006 13.5v-2A1.5 1.5 0 004.5 10h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zM8.5 12a.5.5 0 100 1h5a.5.5 0 100-1h-5zm0-2a.5.5 0 100 1h2a.5.5 0 100-1h-2z",
   },
@@ -68,14 +68,6 @@ const NAV_ITEMS: NavItem[] = [
     viewBox: "0 0 16 16",
     iconPath: "M8 1a2 2 0 012 2v1h2a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h2V3a2 2 0 012-2zm0 1.5a.5.5 0 00-.5.5v1h1V3a.5.5 0 00-.5-.5zM4 5.5a.5.5 0 00-.5.5v6a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V6a.5.5 0 00-.5-.5H4z",
     activePages: ["environments"],
-  },
-  {
-    id: "sandboxes",
-    label: "Sandboxes",
-    hash: "#/sandboxes",
-    viewBox: "0 0 16 16",
-    iconPath: "M2 2a2 2 0 012-2h8a2 2 0 012 2v12a2 2 0 01-2 2H4a2 2 0 01-2-2V2zm2-.5a.5.5 0 00-.5.5v12a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V2a.5.5 0 00-.5-.5H4zM6 4.5a.5.5 0 01.5-.5h3a.5.5 0 010 1h-3a.5.5 0 01-.5-.5zM6.5 7a.5.5 0 000 1h3a.5.5 0 000-1h-3z",
-    activePages: ["sandboxes"],
   },
   {
     id: "agents",
@@ -105,7 +97,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const NAV_SECTIONS = [
   { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"] },
-  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "agents", "settings"] },
+  { id: "workspace", label: "Workspace", itemIds: ["environments", "agents", "settings"] },
 ] as const;
 
 const NAV_ITEMS_BY_ID = new Map(NAV_ITEMS.map((item) => [item.id, item]));
@@ -114,10 +106,8 @@ export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const [archiveModalSessionId, setArchiveModalSessionId] = useState<string | null>(null);
   const [archiveModalInfo, setArchiveModalInfo] = useState<ArchiveInfo | null>(null);
-  const [archiveModalContainerized, setArchiveModalContainerized] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [telegramModalSessionId, setTelegramModalSessionId] = useState<string | null>(null);
@@ -330,9 +320,6 @@ export function Sidebar() {
 
   const handleArchiveSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
-    const sdkInfo = sdkSessions.find((s) => s.sessionId === sessionId);
-    const bridgeState = sessions.get(sessionId);
-    const isContainerized = bridgeState?.is_containerized || !!sdkInfo?.containerId || false;
 
     // Check if session has a linked non-done Linear issue
     const linkedIssue = linkedLinearIssues.get(sessionId);
@@ -346,7 +333,6 @@ export function Sidebar() {
         if (info.issueNotDone) {
           setArchiveModalSessionId(sessionId);
           setArchiveModalInfo(info);
-          setArchiveModalContainerized(isContainerized);
           return;
         }
       } catch {
@@ -354,21 +340,17 @@ export function Sidebar() {
       }
     }
 
-    // No linked non-done issue — use existing container-only confirmation or direct archive
-    if (isContainerized) {
-      setConfirmArchiveId(sessionId);
-      return;
-    }
+    // No linked non-done issue — archive directly
     doArchive(sessionId);
-  }, [sdkSessions, sessions, linkedLinearIssues]);
+  }, [linkedLinearIssues]);
 
-  const doArchive = useCallback(async (sessionId: string, force?: boolean, linearTransition?: LinearTransitionChoice) => {
+  const doArchive = useCallback(async (sessionId: string, linearTransition?: LinearTransitionChoice) => {
     try {
       disconnectSession(sessionId);
-      const opts: { force?: boolean; linearTransition?: LinearTransitionChoice } = {};
-      if (force) opts.force = true;
-      if (linearTransition && linearTransition !== "none") opts.linearTransition = linearTransition;
-      await api.archiveSession(sessionId, Object.keys(opts).length > 0 ? opts : undefined);
+      await api.archiveSession(
+        sessionId,
+        linearTransition && linearTransition !== "none" ? { linearTransition } : undefined,
+      );
     } catch {
       // best-effort
     }
@@ -384,20 +366,9 @@ export function Sidebar() {
     }
   }, []);
 
-  const confirmArchive = useCallback(() => {
-    if (confirmArchiveId) {
-      doArchive(confirmArchiveId, true);
-      setConfirmArchiveId(null);
-    }
-  }, [confirmArchiveId, doArchive]);
-
-  const cancelArchive = useCallback(() => {
-    setConfirmArchiveId(null);
-  }, []);
-
-  const handleArchiveModalConfirm = useCallback((choice: LinearTransitionChoice, force?: boolean) => {
+  const handleArchiveModalConfirm = useCallback((choice: LinearTransitionChoice) => {
     if (archiveModalSessionId) {
-      doArchive(archiveModalSessionId, force, choice);
+      doArchive(archiveModalSessionId, choice);
       setArchiveModalSessionId(null);
       setArchiveModalInfo(null);
     }
@@ -436,7 +407,6 @@ export function Sidebar() {
       model: bridgeState?.model || sdkInfo?.model || "",
       cwd: bridgeState?.cwd || sdkInfo?.cwd || "",
       gitBranch: bridgeState?.git_branch || sdkInfo?.gitBranch || "",
-      isContainerized: bridgeState?.is_containerized || !!sdkInfo?.containerId || false,
       gitAhead: bridgeState?.git_ahead || sdkInfo?.gitAhead || 0,
       gitBehind: bridgeState?.git_behind || sdkInfo?.gitBehind || 0,
       linesAdded: bridgeState?.total_lines_added || sdkInfo?.totalLinesAdded || 0,
@@ -546,36 +516,6 @@ export function Sidebar() {
           </button>
         </div>
       </div>
-
-      {/* Container archive confirmation */}
-      {confirmArchiveId && (
-        <div className="mx-2 mb-1 p-2.5 rounded-[10px] bg-cc-warning/10 border border-cc-warning/20">
-          <div className="flex items-start gap-2">
-            <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4 text-cc-warning shrink-0 mt-0.5">
-              <path d="M8.982 1.566a1.13 1.13 0 00-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 01-1.1 0L7.1 5.995A.905.905 0 018 5zm.002 6a1 1 0 110 2 1 1 0 010-2z" />
-            </svg>
-            <div className="flex-1 min-w-0">
-              <p className="text-[11px] text-cc-fg leading-snug">
-                Archiving will <strong>remove the container</strong> and any uncommitted changes.
-              </p>
-              <div className="flex gap-2 mt-2">
-                <button
-                  onClick={cancelArchive}
-                  className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-cc-hover text-cc-muted hover:text-cc-fg transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={confirmArchive}
-                  className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-cc-error/10 text-cc-error hover:bg-cc-error/20 transition-colors cursor-pointer"
-                >
-                  Archive
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Session list */}
       <div className="flex-1 overflow-y-auto px-2.5 pb-2">
@@ -852,7 +792,6 @@ export function Sidebar() {
         <ArchiveLinearModal
           issueIdentifier={archiveModalInfo.issue?.identifier || ""}
           issueStateName={archiveModalInfo.issue?.stateName || ""}
-          isContainerized={archiveModalContainerized}
           archiveTransitionConfigured={archiveModalInfo.archiveTransitionConfigured || false}
           archiveTransitionStateName={archiveModalInfo.archiveTransitionStateName}
           hasBacklogState={archiveModalInfo.hasBacklogState || false}

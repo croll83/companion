@@ -932,11 +932,10 @@ describe("CodexAdapter", () => {
     expect(errors.some((e) => e.includes("protocol drift") && e.includes("thread/teleport/engaged"))).toBe(true);
   });
 
-  it("uses executionCwd for turn/start when receiving user_message", async () => {
+  it("uses the session cwd for turn/start when receiving user_message", async () => {
     const adapter = new CodexAdapter(proc as never, "test-session", {
       model: "o4-mini",
-      cwd: "/Users/stan/Dev/myproject",
-      executionCwd: "/workspace",
+      cwd: "/workspace",
     });
 
     await new Promise((r) => setTimeout(r, 50));
@@ -1394,31 +1393,6 @@ describe("CodexAdapter", () => {
     expect(allWritten).toContain('"cwd":"/workspace/app"');
   });
 
-  it("uses executionCwd for thread/start while preserving session cwd in session_init", async () => {
-    const messages: BrowserIncomingMessage[] = [];
-    const adapter = new CodexAdapter(proc as never, "test-session", {
-      model: "gpt-5.2-codex",
-      cwd: "/Users/stan/Dev/myproject",
-      executionCwd: "/workspace",
-    });
-    adapter.onBrowserMessage((msg) => messages.push(msg));
-
-    await new Promise((r) => setTimeout(r, 50));
-    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
-    await new Promise((r) => setTimeout(r, 20));
-    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
-    await new Promise((r) => setTimeout(r, 50));
-
-    const allWritten = stdin.chunks.join("");
-    expect(allWritten).toContain('"method":"thread/start"');
-    expect(allWritten).toContain('"cwd":"/workspace"');
-
-    const initMsg = messages.find((m) => m.type === "session_init");
-    expect(initMsg).toBeDefined();
-    const session = (initMsg as unknown as { session: { cwd: string } }).session;
-    expect(session.cwd).toBe("/Users/stan/Dev/myproject");
-  });
-
   // ── Init error handling ────────────────────────────────────────────────────
 
   it("calls onInitError when initialization fails", async () => {
@@ -1498,13 +1472,12 @@ describe("CodexAdapter", () => {
     expect(allWritten).not.toContain('"method":"thread/start"');
   });
 
-  it("uses executionCwd for thread/resume when provided", async () => {
+  it("uses the session cwd for thread/resume", async () => {
     const mock = createMockProcess();
 
     new CodexAdapter(mock.proc as never, "test-session", {
       model: "gpt-5.3-codex",
-      cwd: "/Users/stan/Dev/myproject",
-      executionCwd: "/workspace",
+      cwd: "/workspace",
       threadId: "thr_existing_456",
     });
 
@@ -2532,12 +2505,11 @@ describe("CodexAdapter", () => {
     expect(perm.request.description).toBe("Installing dependencies");
   });
 
-  it("falls back to executionCwd for execCommandApproval when params.cwd is missing", async () => {
+  it("falls back to the session cwd for execCommandApproval when params.cwd is missing", async () => {
     const messages: BrowserIncomingMessage[] = [];
     const adapter = new CodexAdapter(proc as never, "test-session", {
       model: "o4-mini",
-      cwd: "/Users/stan/Dev/myproject",
-      executionCwd: "/workspace",
+      cwd: "/workspace",
     });
     adapter.onBrowserMessage((msg) => messages.push(msg));
 

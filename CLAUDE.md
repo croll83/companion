@@ -18,7 +18,6 @@ Messages flow browser <-> `/ws/browser/:id` <-> server <-> CLI process.
   - `cliBridgeMode` (`server/cli-bridge-mode.ts`) picks the transport.
   - This host runs `"stdio"`, set in `~/.companion/settings.json`. The CLI is spawned without `--sdk-url`, and the protocol runs over its stdin/stdout. Keep this host on stdio.
   - The code default is still `"loopback"` (`--sdk-url` to `/ws/cli/:id`), which current Claude CLIs reject.
-  - Containerized sessions never use stdio.
 - Codex speaks JSON-RPC to `codex app-server`. `COMPANION_CODEX_TRANSPORT` picks the transport (default `ws`). Mapping notes are in `web/CODEX_MAPPING.md`.
 - To add a Claude model, add it to `CLAUDE_MODELS` (`src/utils/backends.ts`).
   - Add it to `MODEL_EFFORT_LEVELS` (`server/effort.ts`) only if it accepts `--effort`. Models missing from that map never receive the flag.

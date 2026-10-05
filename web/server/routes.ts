@@ -4,8 +4,7 @@ import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import type { SessionOrchestrator } from "./session-orchestrator.js";
 import type { CliLauncher } from "./cli-launcher.js";
@@ -13,11 +12,9 @@ import type { WsBridge } from "./ws-bridge.js";
 import type { TerminalManager } from "./terminal-manager.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
-import { containerManager } from "./container-manager.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
-import { registerSandboxRoutes } from "./routes/sandbox-routes.js";
 import { registerCronRoutes } from "./routes/cron-routes.js";
 import { registerAgentRoutes } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
@@ -25,7 +22,6 @@ import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } f
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
 import { registerSettingsRoutes } from "./routes/settings-routes.js";
 import { registerTelegramRoutes } from "./routes/telegram-routes.js";
-import { registerTailscaleRoutes } from "./routes/tailscale-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
@@ -39,11 +35,8 @@ import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
 import QRCode from "qrcode";
-import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
-const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
-const WEB_DIR = dirname(ROUTES_DIR);
 const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "13338");
 
 function shellEscapeArg(value: string): string {
@@ -199,10 +192,10 @@ export function createRoutes(
     return streamSSE(c, async (stream) => {
       const result = await orchestrator.createSessionStreaming(
         body,
-        async (step, label, status, detail) => {
+        async (step, label, status) => {
           await stream.writeSSE({
             event: "progress",
-            data: JSON.stringify({ step, label, status, detail }),
+            data: JSON.stringify({ step, label, status }),
           });
         },
       );
@@ -238,8 +231,7 @@ export function createRoutes(
       const bridge = bridgeMap.get(s.sessionId);
       return {
         ...s,
-        // Bridge state is the source of truth for runtime cwd updates
-        // (notably containerized sessions mapped back to host paths).
+        // Bridge state is the source of truth for runtime cwd updates.
         cwd: bridge?.cwd || s.cwd,
         name: names[s.sessionId] ?? s.name,
         gitBranch: bridge?.git_branch || "",
@@ -289,85 +281,6 @@ export function createRoutes(
     const session = launcher.getSession(id);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
-    // For container sessions, try code-server inside the container first.
-    // If unavailable, fall through to host code-server with the host-mapped cwd.
-    let hostFallbackCwd = session.cwd;
-
-    if (session.containerId) {
-      const container = containerManager.getContainer(id);
-      const hasContainerCodeServer = container
-        && containerManager.hasBinaryInContainer(container.containerId, "code-server");
-
-      if (container && hasContainerCodeServer) {
-        const editorPathSuffix = `?folder=${encodeURIComponent("/workspace")}`;
-        const portMapping = container.portMappings.find(
-          (p) => p.containerPort === VSCODE_EDITOR_CONTAINER_PORT,
-        );
-        if (!portMapping) {
-          return c.json({
-            available: false,
-            installed: true,
-            mode: "container",
-            message: "Container editor port is missing. Start a new session to enable the VS Code editor.",
-          });
-        }
-
-        try {
-          const alive = containerManager.isContainerAlive(container.containerId);
-          if (alive === "stopped") {
-            containerManager.startContainer(container.containerId);
-          } else if (alive === "missing") {
-            return c.json({
-              available: false,
-              installed: true,
-              mode: "container",
-              message: "Session container no longer exists. Start a new session to use the editor.",
-            });
-          }
-
-          const startCmd = [
-            `if ! pgrep -f ${shellEscapeArg(`code-server.*--bind-addr 0.0.0.0:${VSCODE_EDITOR_CONTAINER_PORT}`)} >/dev/null 2>&1; then`,
-            `nohup code-server --auth none --disable-telemetry --bind-addr 0.0.0.0:${VSCODE_EDITOR_CONTAINER_PORT} /workspace >/tmp/companion-code-server.log 2>&1 &`,
-            "fi",
-          ].join(" ");
-          containerManager.execInContainer(container.containerId, ["sh", "-lc", startCmd], 10_000);
-
-          // Wait for code-server to be ready (up to 5s)
-          const containerEditorUrl = `http://localhost:${portMapping.hostPort}${editorPathSuffix}`;
-          for (let i = 0; i < 25; i++) {
-            try {
-              const res = await fetch(`http://127.0.0.1:${portMapping.hostPort}/healthz`);
-              if (res.ok || res.status === 302 || res.status === 200) break;
-            } catch {
-              // not ready yet
-            }
-            await new Promise((r) => setTimeout(r, 200));
-          }
-
-          return c.json({
-            available: true,
-            installed: true,
-            mode: "container",
-            url: containerEditorUrl,
-          });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          return c.json({
-            available: false,
-            installed: true,
-            mode: "container",
-            message: `Failed to start VS Code editor in container: ${message}`,
-          });
-        }
-      }
-
-      // Container doesn't have code-server — fall through to host code-server
-      // using the host-mapped workspace path
-      if (container) {
-        hostFallbackCwd = container.hostCwd;
-      }
-    }
-
     const hostCodeServer = resolveBinary("code-server");
     if (!hostCodeServer) {
       return c.json({
@@ -378,13 +291,13 @@ export function createRoutes(
       });
     }
 
-    const editorPathSuffix = `?folder=${encodeURIComponent(hostFallbackCwd)}`;
+    const editorPathSuffix = `?folder=${encodeURIComponent(session.cwd)}`;
 
     try {
       const logFile = join(COMPANION_HOME, "code-server-host.log");
       const startCmd = [
         `if ! pgrep -f ${shellEscapeArg(`code-server.*--bind-addr 127.0.0.1:${VSCODE_EDITOR_HOST_PORT}`)} >/dev/null 2>&1; then`,
-        `nohup ${shellEscapeArg(hostCodeServer)} --auth none --disable-telemetry --bind-addr 127.0.0.1:${VSCODE_EDITOR_HOST_PORT} ${shellEscapeArg(hostFallbackCwd)} >> ${shellEscapeArg(logFile)} 2>&1 &`,
+        `nohup ${shellEscapeArg(hostCodeServer)} --auth none --disable-telemetry --bind-addr 127.0.0.1:${VSCODE_EDITOR_HOST_PORT} ${shellEscapeArg(session.cwd)} >> ${shellEscapeArg(logFile)} 2>&1 &`,
         "fi",
       ].join(" ");
       const startHostCmd = `mkdir -p ${shellEscapeArg(COMPANION_HOME)} && ${startCmd}`;
@@ -420,247 +333,6 @@ export function createRoutes(
   });
 
   // ── Browser preview ──────────────────────────────────────────────────────
-
-  api.post("/sessions/:id/browser/start", async (c) => {
-    const id = c.req.param("id");
-    const body = await c.req.json().catch(() => ({} as { url?: string }));
-    const session = launcher.getSession(id);
-    if (!session) return c.json({ error: "Session not found" }, 404);
-
-    if (!session.containerId) {
-      return c.json({
-        available: true,
-        mode: "host" as const,
-      });
-    }
-
-    const container = containerManager.getContainer(id);
-    if (!container) {
-      return c.json({
-        available: false,
-        mode: "container" as const,
-        message: "Container not found for this session.",
-      });
-    }
-
-    const alive = containerManager.isContainerAlive(container.containerId);
-    if (alive === "stopped") {
-      containerManager.startContainer(container.containerId);
-    } else if (alive === "missing") {
-      return c.json({
-        available: false,
-        mode: "container" as const,
-        message: "Session container no longer exists.",
-      });
-    }
-
-    const portMapping = container.portMappings.find(
-      (p) => p.containerPort === NOVNC_CONTAINER_PORT,
-    );
-    if (!portMapping) {
-      return c.json({
-        available: false,
-        mode: "container" as const,
-        message: "Browser preview port not mapped. Start a new session to enable browser preview.",
-      });
-    }
-
-    const hasXvfb = containerManager.hasBinaryInContainer(container.containerId, "Xvfb");
-    const hasWebsockify = containerManager.hasBinaryInContainer(container.containerId, "websockify");
-    if (!hasXvfb || !hasWebsockify) {
-      return c.json({
-        available: false,
-        mode: "container" as const,
-        message: "Browser preview requires Xvfb and noVNC in the container image. Rebuild with the latest the-companion image.",
-      });
-    }
-
-    try {
-      // Start display stack (idempotent — guarded by pgrep)
-      const startScript = [
-        "export DISPLAY=:99",
-        'if ! pgrep -f "Xvfb :99" >/dev/null 2>&1; then',
-        "  Xvfb :99 -screen 0 1280x720x24 -ac -nolisten tcp &",
-        "  sleep 0.5",
-        "  fluxbox -display :99 &>/dev/null &",
-        "  sleep 0.3",
-        "  x11vnc -display :99 -forever -shared -nopw -rfbport 5900 -noxdamage -wait 20 &>/dev/null &",
-        "  sleep 0.3",
-        "  websockify --web /usr/share/novnc/ 6080 localhost:5900 &>/dev/null &",
-        "  sleep 1.0",
-        "fi",
-      ].join("\n");
-
-      await containerManager.execInContainerAsync(
-        container.containerId,
-        ["sh", "-c", startScript],
-        { timeout: 15_000 },
-      );
-
-      // Optionally launch Chromium to a URL (validate scheme if provided)
-      let targetUrl = "about:blank";
-      if (body.url && typeof body.url === "string") {
-        try {
-          const parsed = new URL(body.url);
-          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-            return c.json({
-              available: false,
-              mode: "container" as const,
-              message: "Only http:// and https:// URLs are allowed.",
-            });
-          }
-          targetUrl = body.url;
-        } catch {
-          return c.json({
-            available: false,
-            mode: "container" as const,
-            message: "Invalid URL provided.",
-          });
-        }
-      }
-      const launchChrome = [
-        "export DISPLAY=:99",
-        'if ! pgrep -f "chromium.*--user-data-dir=/tmp/companion-chrome" >/dev/null 2>&1; then',
-        `  nohup chromium --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/companion-chrome --window-size=1280,720 --window-position=0,0 ${shellEscapeArg(targetUrl)} &>/dev/null &`,
-        "fi",
-      ].join("\n");
-
-      await containerManager.execInContainerAsync(
-        container.containerId,
-        ["sh", "-c", launchChrome],
-        { timeout: 10_000 },
-      );
-
-      // Wait for noVNC to be ready (up to 10s)
-      let noVncReady = false;
-      for (let i = 0; i < 50; i++) {
-        try {
-          const res = await fetch(`http://127.0.0.1:${portMapping.hostPort}/`);
-          if (res.ok || res.status === 200) {
-            noVncReady = true;
-            break;
-          }
-        } catch {
-          // not ready yet
-        }
-        await new Promise((r) => setTimeout(r, 200));
-      }
-
-      if (!noVncReady) {
-        return c.json({
-          available: false,
-          mode: "container" as const,
-          message: "Browser preview timed out waiting for noVNC to start.",
-        });
-      }
-
-      const proxyBase = `/api/sessions/${encodeURIComponent(id)}/browser/proxy`;
-      const noVncUrl = `${proxyBase}/vnc.html?autoconnect=true&resize=scale&path=ws/novnc/${encodeURIComponent(id)}`;
-
-      return c.json({
-        available: true,
-        mode: "container" as const,
-        url: noVncUrl,
-      });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      return c.json({
-        available: false,
-        mode: "container" as const,
-        message: `Failed to start browser preview: ${message}`,
-      });
-    }
-  });
-
-  api.post("/sessions/:id/browser/navigate", async (c) => {
-    const id = c.req.param("id");
-    const body = await c.req.json().catch(() => ({} as { url?: string }));
-    const session = launcher.getSession(id);
-    if (!session) return c.json({ error: "Session not found" }, 404);
-    if (!session.containerId) return c.json({ error: "Not a container session" }, 400);
-
-    const url = body.url;
-    if (!url || typeof url !== "string") return c.json({ error: "url is required" }, 400);
-
-    // Validate URL scheme — only allow http/https to prevent file:// access
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return c.json({ error: "Only http:// and https:// URLs are allowed" }, 400);
-      }
-    } catch {
-      return c.json({ error: "Invalid URL" }, 400);
-    }
-
-    const container = containerManager.getContainer(id);
-    if (!container) return c.json({ error: "Container not found" }, 404);
-
-    try {
-      // Use xdotool to send the URL to the existing Chromium window's address bar
-      // instead of spawning a new Chromium process each time
-      const navScript = [
-        "export DISPLAY=:99",
-        // Focus the Chromium window and navigate via keyboard shortcut
-        'xdotool search --onlyvisible --name "Chromium" windowactivate --sync key --clearmodifiers ctrl+l',
-        "sleep 0.1",
-        `xdotool type --clearmodifiers ${shellEscapeArg(url)}`,
-        "xdotool key --clearmodifiers Return",
-      ].join(" && ");
-      await containerManager.execInContainerAsync(
-        container.containerId,
-        ["sh", "-c", navScript],
-        { timeout: 10_000 },
-      );
-      return c.json({ ok: true, url });
-    } catch {
-      return c.json({ error: "Navigation failed" }, 500);
-    }
-  });
-
-  // HTTP proxy for noVNC static files — serves through the companion's port
-  api.get("/sessions/:id/browser/proxy/*", async (c) => {
-    const id = c.req.param("id");
-    const session = launcher.getSession(id);
-    if (!session) return c.json({ error: "Session not found" }, 404);
-    if (!session.containerId) return c.json({ error: "Not a container session" }, 400);
-
-    const container = containerManager.getContainer(id);
-    if (!container) return c.json({ error: "Container not found" }, 404);
-
-    const portMapping = container.portMappings.find(
-      (p) => p.containerPort === NOVNC_CONTAINER_PORT,
-    );
-    if (!portMapping) return c.json({ error: "Browser preview port not mapped" }, 400);
-
-    // Extract the wildcard path after /browser/proxy/
-    const fullPath = c.req.path;
-    const proxyPrefix = `/api/sessions/${id}/browser/proxy/`;
-    const subPath = fullPath.startsWith(proxyPrefix) ? fullPath.slice(proxyPrefix.length) : "";
-
-    // Block path traversal (defense-in-depth)
-    if (subPath.includes("..")) {
-      return c.json({ error: "Invalid path" }, 400);
-    }
-
-    const queryString = new URL(c.req.url).search;
-
-    try {
-      const targetUrl = `http://127.0.0.1:${portMapping.hostPort}/${subPath}${queryString}`;
-      const upstream = await fetch(targetUrl);
-      const headers = new Headers();
-      const ct = upstream.headers.get("content-type");
-      if (ct) headers.set("Content-Type", ct);
-      const cl = upstream.headers.get("content-length");
-      if (cl) headers.set("Content-Length", cl);
-      return new Response(upstream.body, {
-        status: upstream.status,
-        headers,
-      });
-    } catch {
-      return c.json({ error: "Proxy failed: upstream unreachable" }, 502);
-    }
-  });
-
 
   // HTTP proxy for host browser preview — proxies localhost requests through the companion’s port
   const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection", "te", "trailer"]);
@@ -774,21 +446,13 @@ export function createRoutes(
       // so pkill -f matches it reliably.
       // Use execFileSync (array form) to avoid shell injection — taskId is passed
       // as an argument, never interpolated into a shell string.
-      if (session.containerId) {
-        containerManager.execInContainer(
-          session.containerId,
-          ["pkill", "-f", taskId],
-          5_000,
-        );
-      } else {
-        try {
-          execFileSync("pkill", ["-f", taskId], {
-            timeout: 5_000,
-            encoding: "utf-8",
-          });
-        } catch {
-          // pkill returns non-zero when no processes matched — that's fine
-        }
+      try {
+        execFileSync("pkill", ["-f", taskId], {
+          timeout: 5_000,
+          encoding: "utf-8",
+        });
+      } catch {
+        // pkill returns non-zero when no processes matched — that's fine
       }
       return c.json({ ok: true, taskId });
     } catch (e) {
@@ -816,18 +480,10 @@ export function createRoutes(
         continue;
       }
       try {
-        if (session.containerId) {
-          containerManager.execInContainer(
-            session.containerId,
-            ["sh", "-c", `pkill -f ${shellEscapeArg(taskId)} 2>/dev/null; true`],
-            5_000,
-          );
-        } else {
-          execSync(`pkill -f ${shellEscapeArg(taskId)} 2>/dev/null; true`, {
-            timeout: 5_000,
-            encoding: "utf-8",
-          });
-        }
+        execSync(`pkill -f ${shellEscapeArg(taskId)} 2>/dev/null; true`, {
+          timeout: 5_000,
+          encoding: "utf-8",
+        });
         results.push({ taskId, ok: true });
       } catch (e) {
         results.push({ taskId, ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -883,19 +539,10 @@ export function createRoutes(
     if (!session) return c.json({ error: "Session not found" }, 404);
 
     try {
-      let raw: string;
-      if (session.containerId) {
-        raw = containerManager.execInContainer(
-          session.containerId,
-          ["sh", "-c", "lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || ss -tlnp 2>/dev/null || true"],
-          5_000,
-        );
-      } else {
-        raw = execSync("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true", {
-          timeout: 5_000,
-          encoding: "utf-8",
-        });
-      }
+      const raw = execSync("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true", {
+        timeout: 5_000,
+        encoding: "utf-8",
+      });
 
       // Parse lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
       const lines = raw.trim().split("\n").slice(1); // skip header
@@ -946,56 +593,30 @@ export function createRoutes(
         let cwd: string | undefined;
         let startedAt: number | undefined;
         try {
-          if (session.containerId) {
-            fullCommand = containerManager.execInContainer(
-              session.containerId,
-              ["ps", "-p", String(pid), "-o", "args="],
-              2_000,
-            ).trim();
-          } else {
-            fullCommand = execSync(`ps -p ${pid} -o args= 2>/dev/null || true`, {
-              timeout: 2_000,
-              encoding: "utf-8",
-            }).trim();
-          }
+          fullCommand = execSync(`ps -p ${pid} -o args= 2>/dev/null || true`, {
+            timeout: 2_000,
+            encoding: "utf-8",
+          }).trim();
         } catch {
           // Fall back to short command name
         }
 
         try {
-          if (session.containerId) {
-            const cwdRaw = containerManager.execInContainer(
-              session.containerId,
-              ["sh", "-c", `readlink /proc/${pid}/cwd 2>/dev/null || true`],
-              2_000,
-            ).trim();
-            cwd = cwdRaw || undefined;
-          } else {
-            const cwdRaw = execSync(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null || true`, {
-              timeout: 2_000,
-              encoding: "utf-8",
-            });
-            cwd = parseLsofCwd(cwdRaw);
-          }
+          const cwdRaw = execSync(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null || true`, {
+            timeout: 2_000,
+            encoding: "utf-8",
+          });
+          cwd = parseLsofCwd(cwdRaw);
         } catch {
           // Best-effort only
         }
 
         try {
-          if (session.containerId) {
-            const startRaw = containerManager.execInContainer(
-              session.containerId,
-              ["sh", "-c", `ps -p ${pid} -o lstart= 2>/dev/null || true`],
-              2_000,
-            );
-            startedAt = parsePsStartTime(startRaw);
-          } else {
-            const startRaw = execSync(`ps -p ${pid} -o lstart= 2>/dev/null || true`, {
-              timeout: 2_000,
-              encoding: "utf-8",
-            });
-            startedAt = parsePsStartTime(startRaw);
-          }
+          const startRaw = execSync(`ps -p ${pid} -o lstart= 2>/dev/null || true`, {
+            timeout: 2_000,
+            encoding: "utf-8",
+          });
+          startedAt = parsePsStartTime(startRaw);
         } catch {
           // Best-effort only
         }
@@ -1042,15 +663,7 @@ export function createRoutes(
     }
 
     try {
-      if (session.containerId) {
-        containerManager.execInContainer(
-          session.containerId,
-          ["kill", "-TERM", String(pid)],
-          5_000,
-        );
-      } else {
-        process.kill(pid, "SIGTERM");
-      }
+      process.kill(pid, "SIGTERM");
       return c.json({ ok: true, pid });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1201,30 +814,12 @@ export function createRoutes(
     return c.json({ error: "Use frontend defaults for this backend" }, 404);
   });
 
-  // ─── Containers ─────────────────────────────────────────────────
-
-  api.get("/containers/status", (c) => {
-    const available = containerManager.checkDocker();
-    const version = available ? containerManager.getDockerVersion() : null;
-    return c.json({ available, version });
-  });
-
-  api.get("/containers/images", (c) => {
-    const images = containerManager.listImages();
-    return c.json(images);
-  });
-
   registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
-  registerEnvRoutes(api, { webDir: WEB_DIR });
-  registerSandboxRoutes(api);
+  registerEnvRoutes(api);
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api);
   registerTelegramRoutes(api);
-
-  // ─── Tailscale ──────────────────────────────────────────────────────
-
-  if (port !== undefined) registerTailscaleRoutes(api, port);
 
   // ─── Linear ────────────────────────────────────────────────────────
 

@@ -67,7 +67,6 @@ interface MockStoreState {
     total_lines_added?: number;
     total_lines_removed?: number;
     repo_root?: string;
-    is_containerized?: boolean;
     codex_token_details?: CodexTokenDetails;
     codex_rate_limits?: CodexRateLimits;
     context_used_percent?: number;
@@ -652,19 +651,6 @@ describe("GitBranchSection", () => {
     render(<TaskPanel sessionId="s1" />);
     expect(screen.getByText("+150")).toBeInTheDocument();
     expect(screen.getByText("-30")).toBeInTheDocument();
-  });
-
-  it("shows container badge when session is containerized", () => {
-    // Containerized sessions should display a "container" badge
-    resetStore({
-      sessions: new Map([["s1", {
-        backend_type: "claude",
-        git_branch: "main",
-        is_containerized: true,
-      }]]),
-    });
-    render(<TaskPanel sessionId="s1" />);
-    expect(screen.getByText("container")).toBeInTheDocument();
   });
 
   it("shows Pull button when behind and cwd is available", () => {

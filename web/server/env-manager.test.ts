@@ -245,9 +245,6 @@ describe("updateEnv", () => {
   });
 });
 
-// Docker-related tests (getEffectiveImage, updateBuildStatus, createEnv with docker options)
-// have been moved to sandbox-manager.test.ts as part of the sandbox/environment separation.
-
 // ===========================================================================
 // deleteEnv
 // ===========================================================================

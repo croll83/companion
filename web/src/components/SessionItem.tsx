@@ -253,15 +253,10 @@ export function SessionItem({
           </div>
         )}
 
-        {/* Badges: backend type + Docker + Cron */}
+        {/* Badges: backend type + Cron */}
         {!isEditing && (
           <span className="flex items-center gap-1 shrink-0">
             <BackendBadge type={s.backendType} />
-            {s.isContainerized && (
-              <span className="flex items-center px-1 py-0.5 rounded bg-blue-400/10" title="Docker">
-                <img src="/logo-docker.svg" alt="Docker logo" className="w-3 h-3" />
-              </span>
-            )}
             {s.cronJobId && (
               <span className="flex items-center px-1 py-0.5 rounded bg-cc-primary/10" title="Scheduled">
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 text-cc-primary">

@@ -64,10 +64,6 @@ The agent editor has the same branch and worktree controls. When an agent runs:
 
 Worktrees are tracked in `~/.companion/worktrees.json`. When you archive a session, its worktree can be cleaned up. Worktrees with uncommitted changes are flagged before deletion.
 
-## Docker sessions
-
-> **Note:** Worktrees are not used with Docker sessions. Containers already provide full filesystem isolation — the host workspace is copied into `/workspace` inside the container.
-
 ## REST API
 
 | Method | Endpoint | Description |

@@ -59,25 +59,6 @@ COMPANION_AUTH_TOKEN="my-token" the-companion
 
 Check server logs: `the-companion logs`
 
-## Docker not detected
-
-**Symptom**: Environments page shows amber "No Docker" badge. Docker sessions fail to create.
-
-**Fix**:
-- Ensure Docker is installed and the daemon is running: `docker ps`
-- On Linux, make sure your user is in the `docker` group: `sudo usermod -aG docker $USER`
-- On macOS, ensure Docker Desktop is running
-
-## Docker image pull fails
-
-**Symptom**: Image pull shows error state in the Environments Docker tab.
-
-**Fix**:
-- Check your internet connection
-- Verify the image name is correct
-- Try pulling manually: `docker pull the-companion:latest`
-- Check Docker Hub rate limits if pulling many images
-
 ## Worktree conflicts
 
 **Symptom**: Error creating a worktree for a branch.
@@ -96,6 +77,16 @@ Check server logs: `the-companion logs`
 - Ensure your API key starts with `lin_api_`
 - Check that the key hasn't been revoked in [Linear Settings > API](https://linear.app/settings/api)
 - Try generating a new API key
+
+## Tailscale Funnel still on after upgrading
+
+**Symptom**: Older versions had a Tailscale Funnel button under Integrations. That integration has been removed, but a Funnel it started keeps running in `tailscaled`, so the Companion can still be reachable from the public internet. The server logs a `[tailscale] ... tailscale-state.json exists` warning at startup.
+
+**Fix**:
+- Check what is exposed: `tailscale funnel status`
+- Turn Funnel off: `sudo tailscale funnel reset`
+- Delete `~/.companion/tailscale-state.json` to silence the warning
+- For Linear OAuth and webhooks, set **Settings > Webhooks > Public URL** to the HTTPS address of your own reverse proxy or tunnel
 
 ## Session not recovering after restart
 

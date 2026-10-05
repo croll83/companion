@@ -97,7 +97,6 @@ export class WsBridge {
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
-    "is_containerized",
     "repo_root",
     "git_ahead",
     "git_behind",
@@ -120,17 +119,6 @@ export class WsBridge {
       }
     }
     return mappings;
-  }
-
-  /**
-   * Pre-populate a session with container info so that handleSystemMessage
-   * preserves the host cwd instead of overwriting it with /workspace.
-   * Call this right after launcher.launch() for containerized sessions.
-   */
-  markContainerized(sessionId: string, hostCwd: string): void {
-    const session = this.getOrCreateSession(sessionId);
-    session.state.is_containerized = true;
-    session.state.cwd = hostCwd;
   }
 
   /**
@@ -217,7 +205,7 @@ export class WsBridge {
       };
       session.state.backend_type = session.backendType;
       // Resolve git info for restored sessions (may have been persisted without it)
-      resolveSessionGitInfo(session.id, session.state);
+      resolveSessionGitInfo(session.state);
       this.sessions.set(p.id, session);
       // Restored sessions with completed turns don't need auto-naming re-triggered
       if (session.state.num_turns > 0) {
@@ -243,13 +231,12 @@ export class WsBridge {
     const before = {
       git_branch: session.state.git_branch,
       is_worktree: session.state.is_worktree,
-      is_containerized: session.state.is_containerized,
       repo_root: session.state.repo_root,
       git_ahead: session.state.git_ahead,
       git_behind: session.state.git_behind,
     };
 
-    resolveSessionGitInfo(session.id, session.state);
+    resolveSessionGitInfo(session.state);
 
     let changed = false;
     for (const key of WsBridge.GIT_SESSION_KEYS) {
@@ -266,7 +253,6 @@ export class WsBridge {
           session: {
             git_branch: session.state.git_branch,
             is_worktree: session.state.is_worktree,
-            is_containerized: session.state.is_containerized,
             repo_root: session.state.repo_root,
             git_ahead: session.state.git_ahead,
             git_behind: session.state.git_behind,
@@ -462,16 +448,12 @@ export class WsBridge {
         // it to overwrite session.state.session_id causes the browser to key
         // the session under the wrong ID, producing duplicate sidebar entries.
         const { slash_commands, skills, session_id: _cliSessionId, ...rest } = msg.session;
-        // For containerized sessions, the CLI reports /workspace as its cwd.
-        // Keep the host path (set by markContainerized()) for correct project grouping.
-        const cwdOverride = session.state.is_containerized ? { cwd: session.state.cwd } : {};
         session.state = {
           ...session.state,
           ...rest,
           // Preserve pre-populated commands/skills when adapter sends empty arrays
           ...(slash_commands?.length ? { slash_commands } : {}),
           ...(skills?.length ? { skills } : {}),
-          ...cwdOverride,
           backend_type: session.backendType,
         };
         // Codex effort levels are per-model and only readable server-side, so
@@ -689,9 +671,7 @@ export class WsBridge {
         companionBus.emit("session:cli-id-received", { sessionId: session.id, cliSessionId: meta.cliSessionId });
       }
       if (meta.model) session.state.model = meta.model;
-      // For containerized sessions, the CLI reports the container's cwd (e.g. /workspace).
-      // Keep the host path (set by markContainerized()) for correct project grouping.
-      if (meta.cwd && !session.state.is_containerized) {
+      if (meta.cwd) {
         session.state.cwd = meta.cwd;
       }
       session.state.backend_type = session.backendType;

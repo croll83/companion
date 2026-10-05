@@ -35,7 +35,7 @@ interface RawCredentials {
   sourcePath?: string;
 }
 
-// Credential file candidates - matches claude-container-auth.ts
+// Credential file candidates for the Claude CLI's OAuth login
 const CREDENTIAL_FILE_NAMES = [
   ".credentials.json",
   "auth.json",

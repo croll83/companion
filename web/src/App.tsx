@@ -15,7 +15,6 @@ import { UpdateBanner } from "./components/UpdateBanner.js";
 import { BunRuntimeAlert } from "./components/BunRuntimeAlert.js";
 import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { UpdateOverlay } from "./components/UpdateOverlay.js";
-import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
 import { FileViewerModal } from "./components/FileViewerModal.js";
 
@@ -26,10 +25,8 @@ const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) 
 const IntegrationsPage = lazy(() => import("./components/IntegrationsPage.js").then((m) => ({ default: m.IntegrationsPage })));
 const LinearSettingsPage = lazy(() => import("./components/LinearSettingsPage.js").then((m) => ({ default: m.LinearSettingsPage })));
 const LinearOAuthSettingsPage = lazy(() => import("./components/LinearOAuthSettingsPage.js").then((m) => ({ default: m.LinearOAuthSettingsPage })));
-const TailscalePage = lazy(() => import("./components/TailscalePage.js").then((m) => ({ default: m.TailscalePage })));
 const PromptsPage = lazy(() => import("./components/PromptsPage.js").then((m) => ({ default: m.PromptsPage })));
 const EnvManager = lazy(() => import("./components/EnvManager.js").then((m) => ({ default: m.EnvManager })));
-const SandboxManager = lazy(() => import("./components/SandboxManager.js").then((m) => ({ default: m.SandboxManager })));
 const CronManager = lazy(() => import("./components/CronManager.js").then((m) => ({ default: m.CronManager })));
 const AgentsPage = lazy(() => import("./components/AgentsPage.js").then((m) => ({ default: m.AgentsPage })));
 const RunsPage = lazy(() => import("./components/RunsPage.js").then((m) => ({ default: m.RunsPage })));
@@ -70,9 +67,7 @@ export default function App() {
   const isIntegrationsPage = route.page === "integrations";
   const isLinearIntegrationPage = route.page === "integration-linear";
   const isLinearOAuthIntegrationPage = route.page === "integration-linear-oauth";
-  const isTailscaleIntegrationPage = route.page === "integration-tailscale";
   const isEnvironmentsPage = route.page === "environments";
-  const isSandboxesPage = route.page === "sandboxes";
   const isScheduledPage = route.page === "scheduled";
   const isAgentsPage = route.page === "agents" || route.page === "agent-detail";
   const isRunsPage = route.page === "runs";
@@ -172,14 +167,6 @@ export default function App() {
     }).catch(() => {});
   }, [isAuthenticated]);
 
-  // Show Docker image update dialog if an app update just completed
-  useEffect(() => {
-    if (localStorage.getItem("companion_docker_prompt_pending") === "1") {
-      localStorage.removeItem("companion_docker_prompt_pending");
-      useStore.getState().setDockerUpdateDialogOpen(true);
-    }
-  }, []);
-
   // Auth gate: show login page when not authenticated
   if (!isAuthenticated) {
     return <LoginPage />;
@@ -252,22 +239,9 @@ export default function App() {
             </div>
           )}
 
-          {isTailscaleIntegrationPage && (
-            <div className="absolute inset-0">
-              <Suspense fallback={<LazyFallback />}><TailscalePage embedded /></Suspense>
-            </div>
-          )}
-
           {isEnvironmentsPage && (
             <div className="absolute inset-0">
               <Suspense fallback={<LazyFallback />}><EnvManager embedded /></Suspense>
-            </div>
-          )}
-
-
-          {isSandboxesPage && (
-            <div className="absolute inset-0">
-              <Suspense fallback={<LazyFallback />}><SandboxManager embedded /></Suspense>
             </div>
           )}
 
@@ -353,7 +327,6 @@ export default function App() {
         </>
       )}
       <UpdateOverlay active={updateOverlayActive} />
-      <DockerUpdateDialog />
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
       <FileViewerModal />
     </div>

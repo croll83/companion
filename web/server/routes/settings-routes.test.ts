@@ -15,7 +15,7 @@ import { join } from "node:path";
 const managerMock = vi.hoisted(() => ({ sync: vi.fn(), reload: vi.fn(), isRunning: vi.fn(() => false) }));
 vi.mock("../telegram-bridge-manager.js", () => ({ telegramBridgeManager: managerMock }));
 vi.mock("../linear-connections.js", () => ({ listConnections: () => [] }));
-vi.mock("../codex-container-auth.js", () => ({ hasContainerCodexAuth: () => false }));
+vi.mock("../codex-auth-check.js", () => ({ hasCodexAuth: () => false }));
 
 import { registerSettingsRoutes } from "./settings-routes.js";
 import { _resetForTest, getSettings } from "../settings-manager.js";

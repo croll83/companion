@@ -23,7 +23,7 @@ Treat WebSocket message shapes and event semantics as a compatibility contract. 
 Session persistence must remain backward compatible across restart and resume flows. New persisted fields need safe defaults, and old persisted data must still load.
 
 # Security Baseline
-@scope web/server/routes.ts web/server/cli-launcher.ts web/server/container-manager.ts web/server/path-resolver.ts web/server/git-utils.ts
+@scope web/server/routes.ts web/server/cli-launcher.ts web/server/path-resolver.ts web/server/git-utils.ts
 Flag command injection, path traversal, unsafe shell interpolation, or unvalidated filesystem writes. Prefer explicit allowlists, path normalization, and argument-array process spawning.
 
 # Codex and Claude Compatibility

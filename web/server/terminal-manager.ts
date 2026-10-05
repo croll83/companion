@@ -13,7 +13,6 @@ interface BunTerminalHandle {
 interface TerminalInstance {
   id: string;
   cwd: string;
-  containerId?: string;
   proc: ReturnType<typeof Bun.spawn>;
   terminal: BunTerminalHandle;
   browserSockets: Set<ServerWebSocket<SocketData>>;
@@ -31,29 +30,14 @@ function resolveShell(): string {
 export class TerminalManager {
   private instances = new Map<string, TerminalInstance>();
 
-  /** Spawn a terminal in the given directory (host or container). */
-  spawn(cwd: string, cols = 80, rows = 24, options?: { containerId?: string }): string {
+  /** Spawn a login shell in the given directory. */
+  spawn(cwd: string, cols = 80, rows = 24): string {
     const id = randomUUID();
-    const containerId = options?.containerId?.trim() || undefined;
     const sockets = new Set<ServerWebSocket<SocketData>>();
     const shell = resolveShell();
-    const cmd = containerId
-      ? [
-          "docker",
-          "exec",
-          "-i",
-          "-t",
-          "-w",
-          cwd,
-          containerId,
-          "sh",
-          "-lc",
-          "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi",
-        ]
-      : [shell, "-l"];
 
-    const proc = Bun.spawn(cmd, {
-      cwd: containerId ? undefined : cwd,
+    const proc = Bun.spawn([shell, "-l"], {
+      cwd,
       env: { ...process.env, TERM: "xterm-256color", CLAUDECODE: undefined },
       terminal: {
         cols,
@@ -90,7 +74,6 @@ export class TerminalManager {
     this.instances.set(id, {
       id,
       cwd,
-      containerId,
       proc,
       terminal,
       browserSockets: sockets,
@@ -99,7 +82,7 @@ export class TerminalManager {
       orphanTimer: null,
     });
     console.log(
-      `[terminal] Spawned terminal ${id} in ${cwd}${containerId ? ` (container ${containerId.slice(0, 12)})` : ""} (${containerId ? "docker-shell" : shell}, ${cols}x${rows})`,
+      `[terminal] Spawned terminal ${id} in ${cwd} (${shell}, ${cols}x${rows})`,
     );
 
     // Handle process exit
@@ -190,15 +173,15 @@ export class TerminalManager {
   }
 
   /** Get current terminal info */
-  getInfo(terminalId?: string): { id: string; cwd: string; containerId?: string } | null {
+  getInfo(terminalId?: string): { id: string; cwd: string } | null {
     if (terminalId) {
       const inst = this.instances.get(terminalId);
       if (!inst) return null;
-      return { id: inst.id, cwd: inst.cwd, containerId: inst.containerId };
+      return { id: inst.id, cwd: inst.cwd };
     }
     const first = this.instances.values().next().value as TerminalInstance | undefined;
     if (!first) return null;
-    return { id: first.id, cwd: first.cwd, containerId: first.containerId };
+    return { id: first.id, cwd: first.cwd };
   }
 
   /** Attach a browser WebSocket to the terminal */

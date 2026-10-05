@@ -36,7 +36,6 @@ beforeEach(() => {
     aiValidationAutoDeny: false,
     publicUrl: "",
     updateChannel: "stable",
-    dockerAutoUpdate: false,
     telegramBotToken: "",
     updatedAt: 0,
   });
@@ -80,7 +79,6 @@ describe("generateSessionTitle", () => {
       aiValidationAutoDeny: false,
       publicUrl: "",
       updateChannel: "stable",
-      dockerAutoUpdate: false,
       telegramBotToken: "",
       updatedAt: 0,
     });
@@ -131,7 +129,6 @@ describe("generateSessionTitle", () => {
       aiValidationAutoDeny: false,
       publicUrl: "",
       updateChannel: "stable",
-      dockerAutoUpdate: false,
       telegramBotToken: "",
       updatedAt: 0,
     });
@@ -211,7 +208,6 @@ describe("generateSessionTitle", () => {
       aiValidationAutoDeny: false,
       publicUrl: "",
       updateChannel: "stable",
-      dockerAutoUpdate: false,
       telegramBotToken: "",
       updatedAt: 0,
     });

@@ -27,12 +27,7 @@ export interface TerminalSocketData {
   terminalId: string;
 }
 
-export interface NoVncSocketData {
-  kind: "novnc";
-  sessionId: string;
-}
-
-export type SocketData = CLISocketData | BrowserSocketData | TerminalSocketData | NoVncSocketData;
+export type SocketData = CLISocketData | BrowserSocketData | TerminalSocketData;
 
 /** Tracks a pending control_request sent to CLI that expects a control_response. */
 export interface PendingControlRequest {
@@ -83,7 +78,6 @@ export interface Session {
 export type GitSessionKey =
   | "git_branch"
   | "is_worktree"
-  | "is_containerized"
   | "repo_root"
   | "git_ahead"
   | "git_behind";
@@ -110,7 +104,6 @@ export function makeDefaultState(
     is_compacting: false,
     git_branch: "",
     is_worktree: false,
-    is_containerized: false,
     repo_root: "",
     git_ahead: 0,
     git_behind: 0,
