@@ -41,6 +41,7 @@ import { ensureTlsCerts, TLS_BRIDGE_HOSTNAME } from "./tls-manager.js";
 import { checkHostsEntry } from "./hosts-check.js";
 import { checkClaudeCli } from "./claude-cli-check.js";
 import { warnIfBunOutdated } from "./bun-runtime-check.js";
+import { warnIfLegacyTailscaleFunnel } from "./legacy-tailscale-funnel.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -328,6 +329,9 @@ if (!cliCheck.ok) {
 
 // ── Bun runtime diagnostic — Bun < 1.4 can drop live sessions (bun#32743) ──
 warnIfBunOutdated();
+
+// ── Leftover Tailscale Funnel — the integration was removed, Funnel may persist ──
+warnIfLegacyTailscaleFunnel();
 
 const authToken = getToken();
 console.log(`Server running on http://${host}:${server.port}`);

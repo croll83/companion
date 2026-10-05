@@ -78,6 +78,16 @@ Check server logs: `the-companion logs`
 - Check that the key hasn't been revoked in [Linear Settings > API](https://linear.app/settings/api)
 - Try generating a new API key
 
+## Tailscale Funnel still on after upgrading
+
+**Symptom**: Older versions had a Tailscale Funnel button under Integrations. That integration has been removed, but a Funnel it started keeps running in `tailscaled`, so the Companion can still be reachable from the public internet. The server logs a `[tailscale] ... tailscale-state.json exists` warning at startup.
+
+**Fix**:
+- Check what is exposed: `tailscale funnel status`
+- Turn Funnel off: `sudo tailscale funnel reset`
+- Delete `~/.companion/tailscale-state.json` to silence the warning
+- For Linear OAuth and webhooks, set **Settings > Webhooks > Public URL** to the HTTPS address of your own reverse proxy or tunnel
+
 ## Session not recovering after restart
 
 **Symptom**: Sessions appear after restart but the agent doesn't resume.
