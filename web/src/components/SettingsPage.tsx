@@ -455,14 +455,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   Set this to the externally-reachable address of your Companion instance.
                 </p>
                 <p className="text-xs text-cc-muted">
-                  Tip:{" "}
-                  <a
-                    href="#/integrations/tailscale"
-                    className="text-cc-primary hover:underline"
-                  >
-                    Use the Tailscale integration
-                  </a>{" "}
-                  to get an HTTPS URL automatically.
+                  Tip: put the Companion behind an HTTPS reverse proxy or tunnel and paste that URL here.
+                  Linear OAuth callbacks and webhooks are built from it.
                 </p>
                 <div>
                   <label className="block text-xs font-medium text-cc-fg mb-1.5" htmlFor="public-url">
@@ -513,7 +507,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
               <h2 className="text-sm font-semibold text-cc-fg mb-4">Authentication</h2>
               <div className="space-y-4">
                 <p className="text-xs text-cc-muted">
-                  Use the auth token or QR code to connect additional devices (e.g. mobile over Tailscale).
+                  Use the auth token or QR code to connect additional devices (e.g. a phone on your LAN or VPN).
                 </p>
 
                 {/* Token display */}

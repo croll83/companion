@@ -2313,7 +2313,7 @@ describe("getFileBlob", () => {
 });
 
 // ===========================================================================
-// Misc endpoints: system checks, tailscale, linear connections, browser start
+// Misc endpoints: system checks, linear connections, browser start
 // ===========================================================================
 describe("system and integration endpoints", () => {
   // Each entry: [call, expected URL, expected method]
@@ -2324,9 +2324,6 @@ describe("system and integration endpoints", () => {
     ["getClaudeCliCheck(force)", () => api.getClaudeCliCheck(true), "/api/system/claude-cli-check?force=1", "GET"],
     // Bun runtime check used by the BunRuntimeAlert banner.
     ["getBunRuntimeCheck", () => api.getBunRuntimeCheck(), "/api/system/bun-runtime-check", "GET"],
-    ["getTailscaleStatus", () => api.getTailscaleStatus(), "/api/tailscale/status", "GET"],
-    ["startTailscaleFunnel", () => api.startTailscaleFunnel(), "/api/tailscale/funnel/start", "POST"],
-    ["stopTailscaleFunnel", () => api.stopTailscaleFunnel(), "/api/tailscale/funnel/stop", "POST"],
     ["listLinearConnections", () => api.listLinearConnections(), "/api/linear/connections", "GET"],
     ["createLinearConnection", () => api.createLinearConnection({ name: "n", apiKey: "k" }), "/api/linear/connections", "POST"],
     ["updateLinearConnection", () => api.updateLinearConnection("c/1", { name: "m" }), "/api/linear/connections/c%2F1", "PUT"],

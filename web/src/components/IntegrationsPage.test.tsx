@@ -7,7 +7,6 @@
  * - Linear OAuth Apps card renders with connection/agent counts
  * - Back button navigation (home vs session)
  * - Back button hidden when embedded
- * - Tailscale card with various statuses (checking, active, not installed, error)
  * - Settings button navigation for each card
  * - Accessibility
  */
@@ -23,7 +22,6 @@ let mockState: MockStoreState;
 const mockApi = {
   getSettings: vi.fn(),
   getLinearConnection: vi.fn(),
-  getTailscaleStatus: vi.fn(),
   listAgents: vi.fn(),
   listLinearOAuthConnections: vi.fn(),
 };
@@ -32,7 +30,6 @@ vi.mock("../api.js", () => ({
   api: {
     getSettings: (...args: unknown[]) => mockApi.getSettings(...args),
     getLinearConnection: (...args: unknown[]) => mockApi.getLinearConnection(...args),
-    getTailscaleStatus: (...args: unknown[]) => mockApi.getTailscaleStatus(...args),
     listAgents: (...args: unknown[]) => mockApi.listAgents(...args),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
   },
@@ -74,15 +71,6 @@ beforeEach(() => {
     viewerEmail: "ada@example.com",
     teamName: "Engineering",
     teamKey: "ENG",
-  });
-  mockApi.getTailscaleStatus.mockResolvedValue({
-    installed: false,
-    binaryPath: null,
-    connected: false,
-    dnsName: null,
-    funnelActive: false,
-    funnelUrl: null,
-    error: null,
   });
   mockApi.listAgents.mockResolvedValue([]);
   mockApi.listLinearOAuthConnections.mockResolvedValue({ connections: [] });
@@ -210,74 +198,25 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
   });
 
-  // ─── Tailscale card ──────────────────────────────────────────────────────
+  // ─── Linear-only page ──────────────────────────────────────────────────────
 
-  it("renders Tailscale card with 'Checking...' while status loads", async () => {
-    // getTailscaleStatus returns a pending promise that never resolves during this test
-    mockApi.getTailscaleStatus.mockReturnValue(new Promise(() => {}));
-
+  it("lists only the Linear integrations (Tailscale was removed)", async () => {
+    // The Tailscale Funnel integration was removed; the page must not render a
+    // card or settings button for it, and must not call a status endpoint.
     render(<IntegrationsPage />);
 
     await screen.findByText("Linear Tickets");
-
-    // Tailscale card should show "Checking..." while status is loading
-    expect(screen.getByText("Tailscale")).toBeInTheDocument();
-    expect(screen.getByText("Checking...")).toBeInTheDocument();
+    expect(screen.getByText("Linear OAuth Apps")).toBeInTheDocument();
+    expect(screen.queryByText(/tailscale/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /tailscale/i })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(2);
   });
 
-  it("renders Tailscale card with funnel active status", async () => {
-    // Tailscale is connected with funnel active
-    mockApi.getTailscaleStatus.mockResolvedValue({
-      installed: true,
-      binaryPath: "/usr/bin/tailscale",
-      connected: true,
-      dnsName: "my-machine.ts.net",
-      funnelActive: true,
-      funnelUrl: "https://my-machine.ts.net",
-      error: null,
-    });
-
-    render(<IntegrationsPage />);
-
-    await screen.findByText("Linear Tickets");
-
-    // Should show the funnel URL and the active indicator
-    expect(screen.getByText("https://my-machine.ts.net")).toBeInTheDocument();
-    expect(screen.getByLabelText("Funnel active")).toBeInTheDocument();
-  });
-
-  it("renders Tailscale card with 'Not installed' when tailscale is absent", async () => {
-    // Default mock already returns installed: false — just verify it renders
-    render(<IntegrationsPage />);
-
-    await screen.findByText("Linear Tickets");
-
-    // Wait for the Tailscale status to resolve
-    await screen.findByText("Not installed");
-    expect(screen.getByText("HTTPS access in one click")).toBeInTheDocument();
-  });
-
-  it("shows fallback status when getTailscaleStatus fails", async () => {
-    mockApi.getTailscaleStatus.mockRejectedValue(new Error("Network error"));
-
-    render(<IntegrationsPage />);
-
-    await screen.findByText("Linear Tickets");
-
-    // Should show "Not installed" (fallback status) instead of staying on "Checking..."
-    await screen.findByText("Not installed");
-  });
-
-  it("navigates to Tailscale settings page when gear button is clicked", async () => {
-    render(<IntegrationsPage />);
-
-    await screen.findByText("Linear Tickets");
-
-    const tailscaleSettingsBtn = screen.getByRole("button", { name: "Open Tailscale settings" });
-    fireEvent.click(tailscaleSettingsBtn);
-
-    await waitFor(() => {
-      expect(window.location.hash).toBe("#/integrations/tailscale");
-    });
+  it("passes axe accessibility checks", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<IntegrationsPage />);
+    await screen.findByLabelText("Connected");
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 });

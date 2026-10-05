@@ -1078,6 +1078,19 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("button", { name: "Save Public URL" })).toBeInTheDocument();
   });
 
+  // The Tailscale integration was removed, so the Webhooks tip must explain how
+  // to get a public URL without linking to the deleted #/integrations/tailscale page.
+  it("explains the Public URL without pointing to a Tailscale integration", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    const webhooksSection = document.getElementById("webhooks")!;
+    expect(webhooksSection).toHaveTextContent(/HTTPS reverse proxy or tunnel/);
+    expect(webhooksSection).toHaveTextContent(/Linear OAuth callbacks and webhooks/);
+    expect(webhooksSection).not.toHaveTextContent(/tailscale/i);
+    expect(webhooksSection.querySelector('a[href="#/integrations/tailscale"]')).toBeNull();
+  });
+
   // When a publicUrl is set (returned from getSettings), the status text should
   // show "Using: {url}" instead of the fallback origin.
   it("shows 'Using: {url}' status when publicUrl is set", async () => {

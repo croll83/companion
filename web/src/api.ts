@@ -383,19 +383,6 @@ export interface BrowserStartResult {
   message?: string;
 }
 
-/** Keep in sync with web/server/tailscale-manager.ts TailscaleStatus */
-export interface TailscaleStatus {
-  installed: boolean;
-  binaryPath: string | null;
-  connected: boolean;
-  dnsName: string | null;
-  funnelActive: boolean;
-  funnelUrl: string | null;
-  error: string | null;
-  needsOperatorMode?: boolean;
-  warning?: string;
-}
-
 export interface AppSettings {
   anthropicApiKeyConfigured: boolean;
   anthropicModel: string;
@@ -1039,11 +1026,6 @@ export const api = {
 
   // Bun runtime version check — drives the BunRuntimeAlert banner.
   getBunRuntimeCheck: () => get<BunRuntimeCheckResult>("/system/bun-runtime-check"),
-
-  // Tailscale
-  getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),
-  startTailscaleFunnel: () => post<TailscaleStatus>("/tailscale/funnel/start"),
-  stopTailscaleFunnel: () => post<TailscaleStatus>("/tailscale/funnel/stop"),
 
   // Linear connections CRUD
   listLinearConnections: () =>

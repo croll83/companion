@@ -41,7 +41,7 @@ export function WizardStepIntro({ onNext }: WizardStepIntroProps) {
             <p className="text-xs text-cc-muted mt-0.5 leading-relaxed">
               {hasPublicUrl
                 ? <><code className="px-1 py-0.5 rounded bg-cc-hover text-[10px] font-mono-code">{publicUrl}</code></>
-                : <>Not set. Linear needs to reach your instance. Configure in <a href="#/integrations/tailscale" className="text-cc-primary hover:underline">Tailscale</a> or <a href="#/settings" className="text-cc-primary hover:underline">Settings</a>.</>
+                : <>Not set. Linear needs to reach your instance. Set it in <a href="#/settings" className="text-cc-primary hover:underline">Settings</a>.</>
               }
             </p>
           </div>
