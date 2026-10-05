@@ -253,7 +253,7 @@ export class WsBridge {
           session: {
             git_branch: session.state.git_branch,
             is_worktree: session.state.is_worktree,
-                  repo_root: session.state.repo_root,
+            repo_root: session.state.repo_root,
             git_ahead: session.state.git_ahead,
             git_behind: session.state.git_behind,
           },
