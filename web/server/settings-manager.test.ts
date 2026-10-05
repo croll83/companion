@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -23,6 +23,17 @@ afterEach(() => {
 });
 
 describe("settings-manager", () => {
+  // Review finding: settings.json holds claudeCodeOAuthToken/openaiApiKey but
+  // was written with the default umask. It is 0600 now, also when an older
+  // version had left it readable.
+  it("writes the settings file owner-only", () => {
+    writeFileSync(settingsPath, "{}");
+    chmodSync(settingsPath, 0o644);
+    _resetForTest(settingsPath);
+    updateSettings({ openaiApiKey: "sk-secret" });
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+  });
+
   it("returns defaults when file is missing", () => {
     expect(getSettings()).toEqual({
       anthropicApiKey: "",

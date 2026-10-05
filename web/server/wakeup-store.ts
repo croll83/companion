@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { ensurePrivateDir, writePrivateFile } from "./private-file.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -44,8 +45,6 @@ export interface SessionWakeup {
   lastResult?: string;
 }
 
-const DIR_MODE = 0o700;
-const FILE_MODE = 0o600;
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /**
@@ -92,11 +91,8 @@ export class WakeupStore {
   }
 
   save(wakeup: SessionWakeup): void {
-    mkdirSync(this.dir, { recursive: true, mode: DIR_MODE });
-    try { chmodSync(this.dir, DIR_MODE); } catch { /* best effort */ }
-    const path = this.path(wakeup.id);
-    writeFileSync(path, JSON.stringify(wakeup, null, 2), { encoding: "utf-8", mode: FILE_MODE });
-    chmodSync(path, FILE_MODE);
+    ensurePrivateDir(this.dir);
+    writePrivateFile(this.path(wakeup.id), JSON.stringify(wakeup, null, 2));
   }
 
   remove(id: string): boolean {

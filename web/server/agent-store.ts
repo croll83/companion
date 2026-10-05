@@ -2,12 +2,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
   unlinkSync,
   existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { ensurePrivateDir, PRIVATE_DIR_MODE, writePrivateFile } from "./private-file.js";
 import { randomBytes } from "node:crypto";
 import type { AgentConfig, AgentConfigCreateInput } from "./agent-types.js";
 
@@ -16,7 +16,15 @@ import type { AgentConfig, AgentConfigCreateInput } from "./agent-types.js";
 const AGENTS_DIR = join(COMPANION_HOME, "agents");
 
 function ensureDir(): void {
-  mkdirSync(AGENTS_DIR, { recursive: true });
+  mkdirSync(AGENTS_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+}
+
+/**
+ * Agents hold env values and webhook secrets: owner-only directory and
+ * files. Each write also repairs the modes of files older versions wrote.
+ */
+function ensureDirForWrite(): void {
+  ensurePrivateDir(AGENTS_DIR, { fileSuffix: ".json" });
 }
 
 function filePath(id: string): string {
@@ -102,7 +110,7 @@ export function createAgent(data: AgentConfigCreateInput): AgentConfig {
   const id = slugify(data.name.trim());
   if (!id) throw new Error("Agent name must contain alphanumeric characters");
 
-  ensureDir();
+  ensureDirForWrite();
   if (existsSync(filePath(id))) {
     throw new Error(`An agent with a similar name already exists ("${id}")`);
   }
@@ -127,7 +135,7 @@ export function createAgent(data: AgentConfigCreateInput): AgentConfig {
     totalRuns: 0,
     consecutiveFailures: 0,
   };
-  writeFileSync(filePath(id), JSON.stringify(agent, null, 2), "utf-8");
+  writePrivateFile(filePath(id), JSON.stringify(agent, null, 2));
   return agent;
 }
 
@@ -135,7 +143,7 @@ export function updateAgent(
   id: string,
   updates: Partial<AgentConfig>,
 ): AgentConfig | null {
-  ensureDir();
+  ensureDirForWrite();
   const existing = getAgent(id);
   if (!existing) return null;
 
@@ -178,7 +186,7 @@ export function updateAgent(
     }
   }
 
-  writeFileSync(filePath(newId), JSON.stringify(agent, null, 2), "utf-8");
+  writePrivateFile(filePath(newId), JSON.stringify(agent, null, 2));
   return agent;
 }
 

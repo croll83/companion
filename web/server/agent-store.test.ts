@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -603,6 +603,24 @@ describe("edge cases", () => {
     // Should not throw — slot is now free
     const agent = agentStore.createAgent(makeAgentInput({ name: "Recyclable Agent" }));
     expect(agent.id).toBe("recyclable-agent");
+  });
+
+  // Review finding: agent files hold inline env values and webhook secrets
+  // but were written 0644 in a group-writable dir. They are owner-only now,
+  // and a write repairs files older versions left readable.
+  it("writes agent files 0600 in a 0700 dir and repairs older files on write", () => {
+    const mode = (p: string) => statSync(p).mode & 0o777;
+    agentStore.createAgent(makeAgentInput({ name: "Secret Agent", env: { TOKEN: "x" } }));
+    expect(mode(agentsDir())).toBe(0o700);
+    expect(mode(join(agentsDir(), "secret-agent.json"))).toBe(0o600);
+
+    chmodSync(agentsDir(), 0o775);
+    writeFileSync(join(agentsDir(), "legacy.json"), JSON.stringify({ ...makeAgentInput({ name: "Legacy" }), id: "legacy" }));
+    chmodSync(join(agentsDir(), "legacy.json"), 0o644);
+    agentStore.updateAgent("secret-agent", { prompt: "changed" });
+    expect(mode(agentsDir())).toBe(0o700);
+    expect(mode(join(agentsDir(), "legacy.json"))).toBe(0o600);
+    expect(mode(join(agentsDir(), "secret-agent.json"))).toBe(0o600);
   });
 
   it("defaults description and cwd to empty string when not provided", () => {

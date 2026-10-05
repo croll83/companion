@@ -13,7 +13,7 @@
  * - Invalid/corrupt JSON file handling
  */
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, existsSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -64,6 +64,17 @@ describe("linear-oauth-connections", () => {
   });
 
   // ─── Create ───────────────────────────────────────────────────────────────
+
+  // Review finding: the file holds OAuth client secrets and access/refresh
+  // tokens but was written with the default umask. It is 0600 now, also
+  // when an older version had left it readable.
+  it("writes the connections file owner-only", () => {
+    writeFileSync(TEST_FILE, "[]");
+    chmodSync(TEST_FILE, 0o644);
+    _resetForTest(TEST_FILE);
+    createOAuthConnection({ name: "App", oauthClientId: "c", oauthClientSecret: "s", webhookSecret: "w" });
+    expect(statSync(TEST_FILE).mode & 0o777).toBe(0o600);
+  });
 
   it("creates a connection with all required fields", () => {
     const conn = createOAuthConnection({

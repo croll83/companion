@@ -1,11 +1,11 @@
 import {
   mkdirSync,
   readFileSync,
-  writeFileSync,
   existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { PRIVATE_DIR_MODE, writePrivateFile } from "./private-file.js";
 import { isValidTimeZoneSetting } from "./time-zone.js";
 import { DEFAULT_CLI_BRIDGE_MODE, isCliBridgeMode, type CliBridgeMode } from "./cli-bridge-mode.js";
 
@@ -156,8 +156,10 @@ function ensureLoaded(): void {
 }
 
 function persist(): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(settings, null, 2), "utf-8");
+  // Holds secrets: owner-only file. COMPANION_HOME gets 0700 only when it is
+  // created here; an existing one is left as the user set it.
+  mkdirSync(dirname(filePath), { recursive: true, mode: PRIVATE_DIR_MODE });
+  writePrivateFile(filePath, JSON.stringify(settings, null, 2));
 }
 
 export function getSettings(): CompanionSettings {

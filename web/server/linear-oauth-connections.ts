@@ -1,12 +1,12 @@
 import {
   mkdirSync,
   readFileSync,
-  writeFileSync,
   existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { COMPANION_HOME } from "./paths.js";
+import { PRIVATE_DIR_MODE, writePrivateFile } from "./private-file.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -183,8 +183,10 @@ export function migrateFromAgents(deps?: MigrationDeps): void {
 }
 
 function persist(): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(connections, null, 2), "utf-8");
+  // Holds secrets: owner-only file. COMPANION_HOME gets 0700 only when it is
+  // created here; an existing one is left as the user set it.
+  mkdirSync(dirname(filePath), { recursive: true, mode: PRIVATE_DIR_MODE });
+  writePrivateFile(filePath, JSON.stringify(connections, null, 2));
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────

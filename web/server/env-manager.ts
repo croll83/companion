@@ -1,14 +1,12 @@
 import {
-  chmodSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
   unlinkSync,
   existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { ensurePrivateDir, writePrivateFile } from "./private-file.js";
 import { dedupeFolders, isPathWithin, normalizeFolderPath } from "./path-scope.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -52,9 +50,6 @@ export interface EnvPlacement {
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
 const ENVS_DIR = join(COMPANION_HOME, "envs");
-/** Env profiles hold secrets: owner-only directory and files. */
-const DIR_MODE = 0o700;
-const FILE_MODE = 0o600;
 
 /**
  * Create the envs dir if needed and tighten the modes of the dir and of every
@@ -62,14 +57,8 @@ const FILE_MODE = 0o600;
  * the default umask (often world-readable), so each write repairs them.
  */
 function ensureDirForWrite(): void {
-  mkdirSync(ENVS_DIR, { recursive: true, mode: DIR_MODE });
-  try { chmodSync(ENVS_DIR, DIR_MODE); } catch { /* best effort */ }
-  try {
-    for (const file of readdirSync(ENVS_DIR)) {
-      if (!file.endsWith(".json")) continue;
-      try { chmodSync(join(ENVS_DIR, file), FILE_MODE); } catch { /* best effort */ }
-    }
-  } catch { /* best effort */ }
+  // Env profiles hold secrets: owner-only directory and files.
+  ensurePrivateDir(ENVS_DIR, { fileSuffix: ".json" });
 }
 
 /** Validate that a slug contains only safe characters (prevents path traversal) */
@@ -86,9 +75,7 @@ function filePath(slug: string): string {
 
 function writeEnvFile(env: CompanionEnv): void {
   const path = filePath(env.slug);
-  writeFileSync(path, JSON.stringify(env, null, 2), { encoding: "utf-8", mode: FILE_MODE });
-  // `mode` only applies when the file is created; fix pre-existing files too.
-  chmodSync(path, FILE_MODE);
+  writePrivateFile(path, JSON.stringify(env, null, 2));
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
