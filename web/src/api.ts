@@ -626,6 +626,22 @@ export interface AgentInfo {
   scheduleError?: string | null;
 }
 
+/** A message scheduled into a session (server/wakeup-store.ts). */
+export interface SessionWakeup {
+  id: string;
+  sessionId: string;
+  message: string;
+  schedule: { at: string } | { cron: string };
+  createdAt: number;
+  /** "user" or "session:<id>" */
+  createdBy: string;
+  lastFiredAt?: number;
+  nextRunAt?: number;
+  enabled: boolean;
+  status: "pending" | "delivered" | "skipped" | "missed";
+  lastResult?: string;
+}
+
 export interface AgentExecution {
   sessionId: string;
   agentId: string;
@@ -1269,9 +1285,17 @@ export const api = {
   listSkills: () =>
     get<{ slug: string; name: string; description: string; path: string }[]>("/skills"),
 
-  // Cross-session messaging
+  // Cross-session messaging (a dead session is relaunched and gets it queued)
   sendSessionMessage: (sessionId: string, content: string) =>
-    post<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/message`, { content }),
+    post<{ ok: boolean; delivery?: "sent" | "queued" }>(`/sessions/${encodeURIComponent(sessionId)}/message`, { content }),
+
+  // Scheduled messages into a session ("wake-ups")
+  listSessionWakeups: (sessionId: string) =>
+    get<{ wakeups: SessionWakeup[] }>(`/sessions/${encodeURIComponent(sessionId)}/wakeups`),
+  createSessionWakeup: (sessionId: string, data: { message: string; at?: string; cron?: string }) =>
+    post<{ wakeup: SessionWakeup }>(`/sessions/${encodeURIComponent(sessionId)}/wakeups`, data),
+  cancelSessionWakeup: (sessionId: string, wakeupId: string) =>
+    del<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/wakeups/${encodeURIComponent(wakeupId)}`),
 
   // Saved prompts
   listPrompts: (cwd?: string, scope?: "global" | "project" | "all") => {

@@ -23,6 +23,7 @@ import { registerSettingsRoutes } from "./routes/settings-routes.js";
 import { registerTelegramRoutes } from "./routes/telegram-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
+import { registerWakeupRoutes } from "./routes/wakeup-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
 import { registerHubRoutes } from "./recording-hub/hub-routes.js";
 import { registerLinearRoutes, fetchLinearTeamStates } from "./routes/linear-routes.js";
@@ -52,6 +53,7 @@ export function createRoutes(
   agentExecutor?: import("./agent-executor.js").AgentExecutor,
   linearAgentBridge?: import("./linear-agent-bridge.js").LinearAgentBridge,
   port?: number,
+  wakeupScheduler?: import("./wakeup-scheduler.js").WakeupScheduler,
 ) {
   const api = new Hono();
 
@@ -821,7 +823,12 @@ export function createRoutes(
   registerEnvRoutes(api);
 
   registerPromptRoutes(api);
-  registerSettingsRoutes(api, { onTimeZoneChanged: () => agentExecutor?.rescheduleAll() });
+  registerSettingsRoutes(api, {
+    onTimeZoneChanged: () => {
+      agentExecutor?.rescheduleAll();
+      wakeupScheduler?.rescheduleAll();
+    },
+  });
   registerTelegramRoutes(api);
 
   // ─── Linear ────────────────────────────────────────────────────────
@@ -836,7 +843,9 @@ export function createRoutes(
     wsBridge,
     terminalManager,
     updateCheckStaleMs: UPDATE_CHECK_STALE_MS,
+    resetRelaunchBudget: (sessionId) => orchestrator.clearAutoRelaunchCount(sessionId),
   });
+  if (wakeupScheduler) registerWakeupRoutes(api, wakeupScheduler);
 
   registerSkillRoutes(api);
   registerAgentRoutes(api, agentExecutor);

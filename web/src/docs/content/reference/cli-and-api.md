@@ -62,6 +62,10 @@ All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 | `POST` | `/api/sessions` | Create a new session |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Archive a session |
+| `POST` | `/api/sessions/:id/message` | Send a user message (`{"content": "..."}`). A stopped CLI is relaunched on its conversation and gets the message queued (`"delivery": "queued"`); archived sessions get `409` |
+| `GET` | `/api/sessions/:id/wakeups` | List the session's wake-ups (pending and recently skipped, missed or delivered) |
+| `POST` | `/api/sessions/:id/wakeups` | Schedule a wake-up: `{"message": "...", "at": "2026-10-06T09:00"}` or `{"message": "...", "cron": "0 9 * * 1-5"}`, optional `"createdBy": "session:<id>"` |
+| `DELETE` | `/api/sessions/:id/wakeups/:wakeupId` | Cancel (or dismiss) a wake-up |
 
 ### Prompts
 

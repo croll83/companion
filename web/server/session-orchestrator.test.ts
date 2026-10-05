@@ -1080,6 +1080,16 @@ describe("SessionOrchestrator", () => {
   // ── Delete ────────────────────────────────────────────────────────────────
 
   describe("deleteSession()", () => {
+    // A deleted session can never be woken up: its wake-ups go with it.
+    it("drops the session's scheduled wake-ups", async () => {
+      const wakeupScheduler = { handleSessionDeleted: vi.fn() };
+      orchestrator = new SessionOrchestrator({ ...deps, wakeupScheduler });
+
+      await orchestrator.deleteSession("s1");
+
+      expect(wakeupScheduler.handleSessionDeleted).toHaveBeenCalledWith("s1");
+    });
+
     it("performs full cleanup: kill, worktree, PR, Linear, bridge", async () => {
       const result = await orchestrator.deleteSession("s1");
 

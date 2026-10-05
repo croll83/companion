@@ -1483,6 +1483,33 @@ describe("sendSessionMessage", () => {
   });
 });
 
+// Session wake-ups: list, create and cancel hit the per-session endpoints
+// with ids URL-encoded.
+describe("session wake-ups", () => {
+  it("lists a session's wake-ups", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ wakeups: [] }));
+    expect(await api.listSessionWakeups("s 1")).toEqual({ wakeups: [] });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/sessions/s%201/wakeups");
+  });
+
+  it("creates a wake-up with POST", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ wakeup: { id: "wk-1" } }));
+    await api.createSessionWakeup("s1", { message: "go", at: "2026-10-05T12:00" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/wakeups");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ message: "go", at: "2026-10-05T12:00" });
+  });
+
+  it("cancels a wake-up with DELETE", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.cancelSessionWakeup("s1", "wk-1");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/wakeups/wk-1");
+    expect(opts.method).toBe("DELETE");
+  });
+});
+
 // ===========================================================================
 // Saved prompts API
 // ===========================================================================

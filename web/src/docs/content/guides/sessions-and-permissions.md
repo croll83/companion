@@ -99,6 +99,38 @@ Click a file to edit it. JSON and TOML files are checked before they are saved, 
 
 Click the **stop button** in the composer area to interrupt a running agent. This sends an interrupt signal to the CLI subprocess.
 
+### Wake-ups (scheduled messages)
+
+A wake-up sends a message into an existing session at a set time, so the agent picks up the work later with its whole conversation. Open the session's **Context** panel and use **Wake-ups → Schedule**:
+
+- **Once**: a date and time
+- **Repeat (cron)**: a 5-field cron expression, such as `0 9 * * 1-5`
+
+Times are read in the time zone set in **Settings** (or the server's local zone when none is set). The panel lists pending wake-ups with their next time and a **Cancel** button. A wake-up that could not run shows why, with a **Dismiss** button.
+
+When a wake-up fires, its message is sent as a user message that starts with `[scheduled wake-up <id>, set <when> by <who>]`, so the agent knows nobody typed it just now. Then:
+
+- **The CLI is not running** (idle-killed, crashed, or the server restarted): the message is queued and the session is relaunched on its saved conversation (`--resume` for Claude Code, `thread/resume` for Codex). The message is delivered once the CLI is back.
+- **A turn is running**: the message waits until the turn ends. It is never mixed into the running turn.
+- **The session is archived**: a one-time wake-up is skipped. A recurring one skips that time and stays scheduled, in case the session is unarchived.
+- **The session was deleted**: its wake-ups are deleted too.
+
+Wake-ups survive restarts (they are stored in `~/.companion/wakeups/`, readable only by you). A one-time wake-up whose time passed while the server was down still fires at startup if it is less than 24 hours late. Otherwise it is shown as **missed**.
+
+Wake-ups work the same for Claude Code and Codex sessions. To create one from a script or from a session, use the REST API:
+
+```bash
+curl -X POST http://localhost:3456/api/sessions/SESSION_ID/wakeups \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Check whether CI passed and fix it if not", "at": "2026-10-06T09:00"}'
+```
+
+Send `"cron": "0 9 * * 1-5"` instead of `at` for a repeating wake-up. A session scheduling itself can say so with `"createdBy": "session:<its session id>"`.
+
+### Sending a message to a session from outside
+
+`POST /api/sessions/:id/message` with `{"content": "..."}` sends a user message into a session. It works for sessions whose CLI is not running: the message is queued and the session is relaunched on its saved conversation, like a wake-up. The response says `"delivery": "sent"` or `"queued"`. Archived sessions answer `409`.
+
 ### Archiving sessions
 
 Remove sessions from the sidebar by archiving them. This:

@@ -25,6 +25,11 @@ vi.mock("./ClaudeConfigBrowser.js", () => ({
   ClaudeConfigBrowser: () => <div data-testid="claude-config-browser">Config</div>,
 }));
 
+// SessionWakeups fetches from the API on its own; it has its own tests.
+vi.mock("./SessionWakeups.js", () => ({
+  SessionWakeups: ({ sessionId }: { sessionId: string }) => <div data-testid="session-wakeups">{sessionId}</div>,
+}));
+
 vi.mock("./LinearLogo.js", () => ({
   LinearLogo: ({ className }: { className?: string }) => (
     <span data-testid="linear-logo" className={className}>L</span>
@@ -1321,6 +1326,15 @@ describe("TaskPanel environment profiles", () => {
     resetStore({ sdkSessions: [{ sessionId: "s1" }] });
     render(<TaskPanel sessionId="s1" />);
     expect(screen.queryByRole("region", { name: "Environment profiles" })).not.toBeInTheDocument();
+  });
+});
+
+// Scheduled wake-ups of the session are shown in the Context panel.
+describe("TaskPanel wake-ups", () => {
+  it("shows the session's wake-ups block", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1" }] });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByTestId("session-wakeups")).toHaveTextContent("s1");
   });
 });
 

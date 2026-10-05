@@ -26,6 +26,7 @@ import { checkHostsEntry } from "../hosts-check.js";
 import { checkClaudeCli } from "../claude-cli-check.js";
 import { checkBunRuntime } from "../bun-runtime-check.js";
 import { TLS_BRIDGE_HOSTNAME } from "../tls-manager.js";
+import { deliverUserMessage } from "../session-delivery.js";
 
 /**
  * Resolve the directory where Bun stores the global install of `the-companion`.
@@ -58,6 +59,8 @@ export function registerSystemRoutes(
     wsBridge: WsBridge;
     terminalManager: TerminalManager;
     updateCheckStaleMs: number;
+    /** Fresh auto-relaunch budget for a dead session a message is sent to. */
+    resetRelaunchBudget?: (sessionId: string) => void;
   },
 ): void {
   api.get("/usage-limits", async (c) => {
@@ -329,16 +332,17 @@ export function registerSystemRoutes(
     return c.json({ ...checkBunRuntime(), isServiceMode: getUpdateState().isServiceMode });
   });
 
+  // Works for dead sessions too: the message is queued and the CLI relaunched
+  // on its saved conversation (see deliverUserMessage). Archived → 409.
   api.post("/sessions/:id/message", async (c) => {
     const id = c.req.param("id");
-    const session = deps.launcher.getSession(id);
-    if (!session) return c.json({ error: "Session not found" }, 404);
-    if (!deps.launcher.isAlive(id)) return c.json({ error: "Session is not running" }, 400);
+    if (!deps.launcher.getSession(id)) return c.json({ error: "Session not found" }, 404);
     const body = await c.req.json().catch(() => ({}));
     if (typeof body.content !== "string" || !body.content.trim()) {
       return c.json({ error: "content is required" }, 400);
     }
-    deps.wsBridge.injectUserMessage(id, body.content);
-    return c.json({ ok: true, sessionId: id });
+    const result = deliverUserMessage(deps, id, body.content);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, sessionId: id, delivery: result.delivery });
   });
 }

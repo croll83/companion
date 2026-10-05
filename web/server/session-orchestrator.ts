@@ -50,6 +50,8 @@ export interface SessionOrchestratorDeps {
     unwatch(sessionId: string): void;
   };
   agentExecutor: AgentExecutor;
+  /** Scheduled messages into sessions; a deleted session's wake-ups are dropped. */
+  wakeupScheduler?: { handleSessionDeleted(sessionId: string): void };
 }
 
 export interface CreateSessionRequest {
@@ -118,6 +120,7 @@ export class SessionOrchestrator {
   private worktreeTracker: WorktreeTracker;
   private prPoller: SessionOrchestratorDeps["prPoller"];
   private agentExecutor: AgentExecutor;
+  private wakeupScheduler?: SessionOrchestratorDeps["wakeupScheduler"];
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -145,6 +148,7 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    this.wakeupScheduler = deps.wakeupScheduler;
   }
 
   // ── Initialization (event wiring) ──────────────────────────────────────────
@@ -626,6 +630,7 @@ export class SessionOrchestrator {
     this.launcher.removeSession(sessionId);
     this.wsBridge.closeSession(sessionId);
     this.agentExecutor.handleSessionClosed(sessionId);
+    this.wakeupScheduler?.handleSessionDeleted(sessionId);
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);

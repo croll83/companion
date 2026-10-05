@@ -25,6 +25,8 @@ import { RecorderManager } from "./recorder.js";
 import { initLogFile, closeLogFile } from "./logger.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
+import { WakeupScheduler } from "./wakeup-scheduler.js";
+import { deliverUserMessage, isTurnBusy } from "./session-delivery.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
@@ -60,9 +62,21 @@ const recorder = new RecorderManager();
 const agentExecutor = new AgentExecutor(launcher, wsBridge);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
+// Scheduled messages into existing sessions. Delivery relaunches a dead CLI
+// (with a fresh relaunch budget) and never interrupts a running turn.
+const wakeupScheduler = new WakeupScheduler({
+  getSession: (sessionId) => launcher.getSession(sessionId),
+  deliver: (sessionId, content) => deliverUserMessage({
+    launcher,
+    wsBridge,
+    resetRelaunchBudget: (id) => orchestrator.clearAutoRelaunchCount(id),
+  }, sessionId, content),
+  isBusy: (sessionId) => isTurnBusy({ launcher, wsBridge }, sessionId),
+});
+
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
-  prPoller, agentExecutor,
+  prPoller, agentExecutor, wakeupScheduler,
 });
 
 // ── Restore persisted sessions from disk ────────────────────────────────────
@@ -101,7 +115,7 @@ app.get("/health", (c) => {
 });
 
 app.use("/api/*", cors());
-app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, agentExecutor, linearAgentBridge, port));
+app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, agentExecutor, linearAgentBridge, port, wakeupScheduler));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
 // on first launch. iOS gives standalone PWAs isolated storage from Safari,
@@ -351,6 +365,8 @@ if (process.env.NODE_ENV !== "production") {
 migrateCronJobsToAgents();
 migrateLinearCredentialsToAgents();
 agentExecutor.startAll();
+// After the orchestrator is wired: a wake-up due at startup relaunches its session.
+wakeupScheduler.startAll();
 
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).

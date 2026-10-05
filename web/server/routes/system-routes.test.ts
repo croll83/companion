@@ -94,6 +94,7 @@ import {
   setUpdateInProgress,
 } from "../update-checker.js";
 import { registerSystemRoutes } from "./system-routes.js";
+import { companionBus } from "../event-bus.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -111,6 +112,7 @@ function createMockWsBridge() {
     getSession: vi.fn(() => undefined as any),
     getCodexRateLimits: vi.fn(() => null),
     injectUserMessage: vi.fn(),
+    getOrCreateSession: vi.fn(),
   };
 }
 
@@ -129,6 +131,7 @@ let app: Hono;
 let launcher: ReturnType<typeof createMockLauncher>;
 let wsBridge: ReturnType<typeof createMockWsBridge>;
 let terminalManager: ReturnType<typeof createMockTerminalManager>;
+let resetRelaunchBudget: ReturnType<typeof vi.fn<(sessionId: string) => void>>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -148,6 +151,7 @@ beforeEach(() => {
     wsBridge: wsBridge as any,
     terminalManager: terminalManager as any,
     updateCheckStaleMs: 60_000,
+    resetRelaunchBudget: (resetRelaunchBudget = vi.fn<(sessionId: string) => void>()),
   });
   app.route("/api", api);
 });
@@ -731,9 +735,38 @@ describe("POST /api/sessions/:id/message", () => {
     expect(json.error).toMatch(/not found/i);
   });
 
-  it("returns 400 when the session is not running", async () => {
+  // Changed on purpose (step 3, wake-ups): a dead, non-archived session used
+  // to get 400 "not running". Now the message is queued in the bridge and
+  // the CLI relaunched on its saved conversation (--resume / thread/resume),
+  // with a fresh relaunch budget, so the message is delivered with context.
+  it("queues the message and asks for a relaunch when the session is not running", async () => {
     launcher.getSession.mockReturnValue({ id: "sess-1" } as any);
     launcher.isAlive.mockReturnValue(false);
+    const relaunches: string[] = [];
+    const onRelaunch = ({ sessionId }: { sessionId: string }) => { relaunches.push(sessionId); };
+    companionBus.on("session:relaunch-needed", onRelaunch);
+
+    try {
+      const res = await app.request("/api/sessions/sess-1/message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "hello" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, sessionId: "sess-1", delivery: "queued" });
+      expect(wsBridge.getOrCreateSession).toHaveBeenCalledWith("sess-1", undefined);
+      expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("sess-1", "hello");
+      expect(resetRelaunchBudget).toHaveBeenCalledWith("sess-1");
+      expect(relaunches).toEqual(["sess-1"]);
+    } finally {
+      companionBus.off("session:relaunch-needed", onRelaunch);
+    }
+  });
+
+  // An archived session is never relaunched behind the user's back.
+  it("returns 409 for an archived session", async () => {
+    launcher.getSession.mockReturnValue({ id: "sess-1", archived: true } as any);
 
     const res = await app.request("/api/sessions/sess-1/message", {
       method: "POST",
@@ -741,9 +774,9 @@ describe("POST /api/sessions/:id/message", () => {
       body: JSON.stringify({ content: "hello" }),
     });
 
-    expect(res.status).toBe(400);
-    const json = await res.json();
-    expect(json.error).toMatch(/not running/i);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/archived/i);
+    expect(wsBridge.injectUserMessage).not.toHaveBeenCalled();
   });
 
   it("returns 400 when content is missing or empty", async () => {
