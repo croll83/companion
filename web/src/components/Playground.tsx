@@ -2675,7 +2675,7 @@ export function Playground() {
           description="Full-screen overlay shown during session creation, replacing the inline progress list"
         >
           <div className="space-y-4">
-            <Card label="In progress (pulling branch, with detail)">
+            <Card label="In progress (pulling branch)">
               <div className="relative h-[360px] bg-cc-bg rounded-lg overflow-hidden border border-cc-border">
                 <SessionLaunchOverlay
                   steps={
@@ -2694,7 +2694,6 @@ export function Playground() {
                         step: "pulling_git",
                         label: "Pulling latest changes...",
                         status: "in_progress",
-                        detail: "Fast-forward 3f2a1c9..8be04d7",
                       },
                     ] satisfies CreationProgressEvent[]
                   }

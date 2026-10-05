@@ -3782,9 +3782,14 @@ describe("POST /api/sessions/create-stream", () => {
     expect(progressEvents.length).toBe(4);
 
     // First progress should be resolving_env in_progress
+    // The payload carries exactly step/label/status: the old container-only
+    // `detail` field (image pull / init-script output) no longer exists.
     const first = JSON.parse(progressEvents[0].data);
-    expect(first.step).toBe("resolving_env");
-    expect(first.status).toBe("in_progress");
+    expect(first).toEqual({
+      step: "resolving_env",
+      label: "Resolving environment...",
+      status: "in_progress",
+    });
 
     // Done event should be emitted with session info
     const doneEvent = events.find((e) => e.event === "done");

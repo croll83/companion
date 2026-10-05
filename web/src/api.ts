@@ -709,7 +709,6 @@ export interface CreationProgressEvent {
   step: string;
   label: string;
   status: "in_progress" | "done" | "error";
-  detail?: string;
 }
 
 export interface CreateSessionStreamResult {

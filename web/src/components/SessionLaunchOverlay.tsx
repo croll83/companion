@@ -123,13 +123,6 @@ export function SessionLaunchOverlay({ steps, error, backend, onCancel }: Props)
             >
               {step.label}
             </span>
-
-            {/* Detail (e.g. image name, branch) */}
-            {step.detail && step.status === "in_progress" && (
-              <span className="text-[10px] text-cc-muted truncate ml-auto max-w-[120px]">
-                {step.detail}
-              </span>
-            )}
           </div>
         ))}
       </div>

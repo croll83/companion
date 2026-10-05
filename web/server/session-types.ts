@@ -548,5 +548,4 @@ export interface CreationProgressEvent {
   step: CreationStepId;
   label: string;
   status: "in_progress" | "done" | "error";
-  detail?: string;
 }

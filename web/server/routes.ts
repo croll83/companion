@@ -192,10 +192,10 @@ export function createRoutes(
     return streamSSE(c, async (stream) => {
       const result = await orchestrator.createSessionStreaming(
         body,
-        async (step, label, status, detail) => {
+        async (step, label, status) => {
           await stream.writeSSE({
             event: "progress",
-            data: JSON.stringify({ step, label, status, detail }),
+            data: JSON.stringify({ step, label, status }),
           });
         },
       );
