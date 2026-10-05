@@ -1236,6 +1236,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       forkFromThreadId: this.prepareCodexFork(codexHome, info),
       sandbox: options.codexSandbox,
+      networkAccess: options.codexInternetAccess !== false,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
       killProcess: async () => {
@@ -1386,6 +1387,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       forkFromThreadId: this.prepareCodexFork(codexHome, info),
       sandbox: options.codexSandbox,
+      networkAccess: options.codexInternetAccess !== false,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
     });

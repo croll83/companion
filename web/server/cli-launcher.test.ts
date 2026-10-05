@@ -931,6 +931,12 @@ describe("codex websocket launcher", () => {
 
     expect(onAdapter).toHaveBeenCalledTimes(1);
     expect(onAdapter.mock.calls[0][0]).toBe("test-session-id");
+    // The adapter gets the sandbox and its network access, so every turn
+    // keeps the session in its sandbox (turn/start sandboxPolicy).
+    expect((onAdapter.mock.calls[0][1] as { options: unknown }).options).toMatchObject({
+      sandbox: "workspace-write",
+      networkAccess: true,
+    });
   });
 
   it("skips already-claimed ws ports when selecting Codex host listen port", async () => {

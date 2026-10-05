@@ -172,11 +172,21 @@ const RPC_METHOD_TIMEOUTS: Record<string, number> = {
 
 // ─── Adapter Options ──────────────────────────────────────────────────────────
 
+/** The SandboxPolicy shapes Companion sends (v2/SandboxPolicy in the app-server protocol). */
+type CodexSandboxPolicy =
+  | { type: "dangerFullAccess" }
+  | { type: "workspaceWrite"; writableRoots: string[]; networkAccess: boolean; excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean };
+
 export interface CodexAdapterOptions {
   model?: string;
   cwd?: string;
   approvalMode?: string;
   sandbox?: "workspace-write" | "danger-full-access";
+  /**
+   * Network access inside a "workspace-write" sandbox (agents'
+   * codexInternetAccess). Ignored with full access, which always has it.
+   */
+  networkAccess?: boolean;
   /** If provided, resume an existing thread instead of starting a new one. */
   threadId?: string;
   /**
@@ -1275,9 +1285,10 @@ export class CodexAdapter implements IBackendAdapter {
       // in "default" mode overrides approvalPolicy and re-enables permission prompts.
       // The server persists collaborationMode across turns, so we only need to send
       // it when switching (e.g. auto→plan or plan→auto).
-      // approvalPolicy and sandboxPolicy are static ("never" / dangerFullAccess) so
-      // resending them each turn is idempotent and ensures consistency if the server
-      // resets state. collaborationMode is only sent on transitions (see below).
+      // approvalPolicy and sandboxPolicy are static for a session ("never" / the
+      // session's sandbox) so resending them each turn is idempotent and ensures
+      // consistency if the server resets state. collaborationMode is only sent on
+      // transitions (see below).
       const turnParams: Record<string, unknown> = {
         threadId: this.threadId,
         input,
@@ -3116,9 +3127,26 @@ export class CodexAdapter implements IBackendAdapter {
     return "danger-full-access";
   }
 
-  /** Map permission mode to SandboxPolicy object (for turn/start's sandboxPolicy field). */
-  private mapSandboxPolicyObject(_mode?: string): { type: string } {
-    // Always full access — matches approvalPolicy: "never" for full autonomy.
+  /**
+   * The session's SandboxPolicy object (turn/start's sandboxPolicy field,
+   * which overrides the sandbox "for this turn and subsequent turns").
+   * Interactive sessions run with full access ("never" approvals, full
+   * autonomy); a "workspace-write" session (sandboxed Codex agents) must stay
+   * in its sandbox on every turn, writing only to its folder, with network
+   * only when allowed. Sending full access here regardless would silently
+   * lift the sandbox chosen at thread/start.
+   */
+  private mapSandboxPolicyObject(_mode?: string): CodexSandboxPolicy {
+    if (this.options.sandbox === "workspace-write") {
+      const cwd = this.getExecutionCwd();
+      return {
+        type: "workspaceWrite",
+        writableRoots: cwd ? [cwd] : [],
+        networkAccess: this.options.networkAccess === true,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    }
     return { type: "dangerFullAccess" };
   }
 

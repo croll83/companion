@@ -98,6 +98,16 @@ describe("Codex protocol compatibility (offline snapshot)", () => {
     }
   });
 
+  // turn/start's sandboxPolicy keeps sandboxed agents in their sandbox on
+  // every turn (codex-adapter mapSandboxPolicyObject sends these fields).
+  it("keeps the SandboxPolicy variants the adapter sends", () => {
+    const policyType = readSnapshot("server/protocol/codex-upstream/v2/SandboxPolicy.ts.txt");
+    expect(policyType).toContain('{ "type": "dangerFullAccess" }');
+    expect(policyType).toMatch(
+      /\{ "type": "workspaceWrite", writableRoots: Array<AbsolutePathBuf>, networkAccess: boolean, excludeTmpdirEnvVar: boolean, excludeSlashTmp: boolean, \}/,
+    );
+  });
+
   it("keeps ThreadForkResponse shape expected by the adapter", () => {
     const responseType = readSnapshot("server/protocol/codex-upstream/v2/ThreadForkResponse.ts.txt");
     expect(responseType).toContain("thread: Thread");

@@ -734,6 +734,44 @@ describe("CodexAdapter", () => {
     expect(allWritten).toContain("thr_123");
   });
 
+  // Review finding: turn/start's sandboxPolicy overrides the sandbox "for this
+  // turn and subsequent turns", and it was always dangerFullAccess, so a
+  // workspace-write (sandboxed) agent ran with full access from its first
+  // turn. It must carry the session's sandbox; full access stays full.
+  it.each([
+    {
+      options: { sandbox: "workspace-write" as const, networkAccess: false, cwd: "/work/repo" },
+      expected: { type: "workspaceWrite", writableRoots: ["/work/repo"], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+    },
+    {
+      options: { sandbox: "workspace-write" as const, networkAccess: true, cwd: "/work/repo" },
+      expected: { type: "workspaceWrite", writableRoots: ["/work/repo"], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+    },
+    { options: { sandbox: "workspace-write" as const }, expected: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } },
+    { options: { sandbox: "danger-full-access" as const, networkAccess: false }, expected: { type: "dangerFullAccess" } },
+    { options: {}, expected: { type: "dangerFullAccess" } },
+  ])("sends the session's sandbox as turn/start sandboxPolicy ($options.sandbox)", async ({ options, expected }) => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", ...options });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    adapter.sendBrowserMessage({ type: "user_message", content: "go" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const turnStart = stdin.chunks.join("").split("\n").filter(Boolean)
+      .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m: { method?: string } | null) => m?.method === "turn/start");
+    expect(turnStart.params.sandboxPolicy).toEqual(expected);
+    // thread/start carried the same choice as a SandboxMode string.
+    const threadStart = stdin.chunks.join("").split("\n").filter(Boolean)
+      .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m: { method?: string } | null) => m?.method === "thread/start");
+    expect(threadStart.params.sandbox).toBe(options.sandbox ?? "danger-full-access");
+  });
+
   // ─── Mid-turn steering ────────────────────────────────────────────────────
   // Codex can fold new input INTO the turn already running (turn/steer) instead
   // of opening a second one. `expectedTurnId` is a server-side precondition, so
