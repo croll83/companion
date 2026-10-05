@@ -229,7 +229,7 @@ vi.mock("./update-checker.js", () => ({
 }));
 
 import { Hono } from "hono";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRoutes } from "./routes.js";
 import * as envManager from "./env-manager.js";
@@ -3958,6 +3958,7 @@ describe("POST /api/sessions/:id/processes/:taskId/kill", () => {
 
   it("kills the process on the host", async () => {
     launcher.getSession.mockReturnValue({ pid: 1234 });
+    vi.mocked(execFileSync).mockClear();
     // execFileSync is mocked at module level — the endpoint uses dynamic import
     const res = await app.request("/api/sessions/sess-1/processes/abcdef/kill", {
       method: "POST",
@@ -3965,6 +3966,12 @@ describe("POST /api/sessions/:id/processes/:taskId/kill", () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.ok).toBe(true);
+    // The kill must actually run pkill on the host with the task ID as an argv entry.
+    expect(vi.mocked(execFileSync)).toHaveBeenCalledWith(
+      "pkill",
+      ["-f", "abcdef"],
+      expect.objectContaining({ timeout: 5_000 }),
+    );
   });
 });
 
@@ -3994,6 +4001,21 @@ describe("POST /api/sessions/:id/processes/kill-all", () => {
     expect(data.results[0].ok).toBe(true);
     expect(data.results[1].ok).toBe(false);
     expect(data.results[1].error).toContain("Invalid task ID");
+  });
+
+  it("runs pkill on the host for each valid task ID and skips invalid ones", async () => {
+    // Guards the actual kill side effect: without this, deleting the pkill
+    // call would still return ok:true results and every other test would pass.
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    vi.mocked(execSync).mockClear();
+    const res = await app.request("/api/sessions/sess-1/processes/kill-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskIds: ["abc123", "not-valid!"] }),
+    });
+    expect(res.status).toBe(200);
+    const pkillCalls = vi.mocked(execSync).mock.calls.map((call) => String(call[0]));
+    expect(pkillCalls).toEqual(["pkill -f 'abc123' 2>/dev/null; true"]);
   });
 
 });
