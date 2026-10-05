@@ -24,8 +24,8 @@ interface MockStoreState {
   activeTab: "chat" | "diff";
   setActiveTab: ReturnType<typeof vi.fn>;
   markChatTabReentry: ReturnType<typeof vi.fn>;
-  sessions: Map<string, { cwd?: string; is_containerized?: boolean }>;
-  sdkSessions: { sessionId: string; cwd?: string; containerId?: string; model?: string; backendType?: string }[];
+  sessions: Map<string, { cwd?: string }>;
+  sdkSessions: { sessionId: string; cwd?: string; model?: string; backendType?: string }[];
   gitChangedFilesCount: Map<string, number>;
 }
 

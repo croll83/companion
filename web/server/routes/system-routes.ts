@@ -22,8 +22,6 @@ import {
   FORK_REPO,
 } from "../update-checker.js";
 import { refreshServiceDefinition } from "../service.js";
-import { getSettings } from "../settings-manager.js";
-import { imagePullManager } from "../image-pull-manager.js";
 import { checkHostsEntry } from "../hosts-check.js";
 import { checkClaudeCli } from "../claude-cli-check.js";
 import { checkBunRuntime } from "../bun-runtime-check.js";
@@ -225,22 +223,6 @@ export function registerSystemRoutes(
 
         console.log(`[update] Installed the-companion ${version} into ${globalDir}`);
 
-        // Re-pull Docker image if auto-update is enabled
-        if (getSettings().dockerAutoUpdate) {
-          try {
-            console.log("[update] Re-pulling Docker image (dockerAutoUpdate enabled)...");
-            imagePullManager.pull("the-companion:latest");
-            const ready = await imagePullManager.waitForReady("the-companion:latest", 120_000);
-            if (ready) {
-              console.log("[update] Docker image re-pull complete.");
-            } else {
-              console.warn("[update] Docker image re-pull failed or timed out, continuing with restart.");
-            }
-          } catch (err) {
-            console.warn("[update] Docker image re-pull error, continuing:", err);
-          }
-        }
-
         try {
           refreshServiceDefinition();
           console.log("[update] Service definition refreshed.");
@@ -303,11 +285,9 @@ export function registerSystemRoutes(
   });
 
   api.post("/terminal/spawn", async (c) => {
-    const body = await c.req.json<{ cwd: string; cols?: number; rows?: number; containerId?: string }>();
+    const body = await c.req.json<{ cwd: string; cols?: number; rows?: number }>();
     if (!body.cwd) return c.json({ error: "cwd is required" }, 400);
-    const terminalId = deps.terminalManager.spawn(body.cwd, body.cols, body.rows, {
-      containerId: body.containerId,
-    });
+    const terminalId = deps.terminalManager.spawn(body.cwd, body.cols, body.rows);
     return c.json({ terminalId });
   });
 

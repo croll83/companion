@@ -36,7 +36,6 @@ vi.mock("./settings-manager.js", () => ({
 
 import { WsBridge, type SocketData } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
-import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -159,7 +158,6 @@ describe("Session management", () => {
     expect(session.state.is_compacting).toBe(false);
     expect(session.state.git_branch).toBe("");
     expect(session.state.is_worktree).toBe(false);
-    expect(session.state.is_containerized).toBe(false);
     expect(session.state.repo_root).toBe("");
     expect(session.state.git_ahead).toBe(0);
     expect(session.state.git_behind).toBe(0);
@@ -601,118 +599,6 @@ describe("CLI handlers", () => {
     expect(state.agents).toEqual(["agent1"]);
     expect(state.slash_commands).toEqual(["/commit"]);
     expect(state.skills).toEqual(["pdf"]);
-  });
-
-  it("handleCLIMessage: system.init preserves host cwd for containerized sessions", async () => {
-    // markContainerized sets the host cwd and is_containerized before CLI connects
-    bridge.markContainerized("s1", "/Users/stan/Dev/myproject");
-
-    mockExecSync.mockImplementation(() => {
-      throw new Error("container not tracked");
-    });
-
-    const cli = makeCliSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-
-    // CLI inside the container reports /workspace — should be ignored
-    await bridge.handleCLIMessage(cli, makeInitMsg({ cwd: "/workspace" }));
-
-    const state = bridge.getSession("s1")!.state;
-    expect(state.cwd).toBe("/Users/stan/Dev/myproject");
-    expect(state.is_containerized).toBe(true);
-  });
-
-  it("handleCLIMessage: keeps previous git info when container metadata is temporarily unavailable", async () => {
-    const session = bridge.getOrCreateSession("s1");
-    session.state.git_branch = "existing-branch";
-    session.state.repo_root = "/workspace";
-    session.state.git_ahead = 2;
-    session.state.git_behind = 1;
-    bridge.markContainerized("s1", "/Users/stan/Dev/myproject");
-
-    mockExecSync.mockImplementation(() => {
-      throw new Error("container not tracked");
-    });
-
-    const cli = makeCliSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-    await bridge.handleCLIMessage(cli, makeInitMsg({ cwd: "/workspace" }));
-
-    const state = bridge.getSession("s1")!.state;
-    expect(state.git_branch).toBe("existing-branch");
-    expect(state.repo_root).toBe("/workspace");
-    expect(state.git_ahead).toBe(2);
-    expect(state.git_behind).toBe(1);
-  });
-
-  it("handleCLIMessage: resolves git info from container for containerized sessions", async () => {
-    bridge.markContainerized("s1", "/Users/stan/Dev/myproject");
-    const getContainerSpy = vi.spyOn(containerManager, "getContainer").mockReturnValue({
-      containerId: "abc123def456",
-      name: "companion-test",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/Users/stan/Dev/myproject",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (!cmd.startsWith("docker exec abc123def456 sh -lc ")) {
-        throw new Error(`unexpected command: ${cmd}`);
-      }
-      if (cmd.includes("--abbrev-ref HEAD")) return "container-branch\n";
-      if (cmd.includes("--git-dir")) return ".git\n";
-      if (cmd.includes("--show-toplevel")) return "/workspace\n";
-      if (cmd.includes("--left-right --count")) return "1\t3\n";
-      throw new Error(`unknown git cmd: ${cmd}`);
-    });
-
-    const cli = makeCliSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-    await bridge.handleCLIMessage(cli, makeInitMsg({ cwd: "/workspace" }));
-
-    const state = bridge.getSession("s1")!.state;
-    expect(state.cwd).toBe("/Users/stan/Dev/myproject");
-    expect(state.git_branch).toBe("container-branch");
-    expect(state.repo_root).toBe("/Users/stan/Dev/myproject");
-    expect(state.git_behind).toBe(1);
-    expect(state.git_ahead).toBe(3);
-    expect(getContainerSpy).toHaveBeenCalledWith("s1");
-    getContainerSpy.mockRestore();
-  });
-
-  it("handleCLIMessage: maps nested container repo_root paths back to host paths", async () => {
-    bridge.markContainerized("s1", "/Users/stan/Dev/myproject");
-    const getContainerSpy = vi.spyOn(containerManager, "getContainer").mockReturnValue({
-      containerId: "abc123def456",
-      name: "companion-test",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/Users/stan/Dev/myproject",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (!cmd.startsWith("docker exec abc123def456 sh -lc ")) {
-        throw new Error(`unexpected command: ${cmd}`);
-      }
-      if (cmd.includes("--abbrev-ref HEAD")) return "container-branch\n";
-      if (cmd.includes("--git-dir")) return ".git\n";
-      if (cmd.includes("--show-toplevel")) return "/workspace/packages/api\n";
-      if (cmd.includes("--left-right --count")) return "0\t0\n";
-      throw new Error(`unknown git cmd: ${cmd}`);
-    });
-
-    const cli = makeCliSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
-    await bridge.handleCLIMessage(cli, makeInitMsg({ cwd: "/workspace" }));
-
-    const state = bridge.getSession("s1")!.state;
-    expect(state.repo_root).toBe("/Users/stan/Dev/myproject/packages/api");
-    expect(getContainerSpy).toHaveBeenCalledWith("s1");
-    getContainerSpy.mockRestore();
   });
 
   it("handleCLIMessage: system.init resolves git info via execSync", async () => {
@@ -2319,7 +2205,6 @@ describe("Browser message routing", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -2748,7 +2633,6 @@ describe("Persistence", () => {
         is_compacting: false,
         git_branch: "main",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "/saved",
         git_ahead: 0,
         git_behind: 0,
@@ -2802,7 +2686,6 @@ describe("Persistence", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -3476,7 +3359,6 @@ describe("Restore from disk with pendingPermissions", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -3527,7 +3409,6 @@ describe("Restore from disk with pendingPermissions", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -3585,7 +3466,6 @@ describe("Restore from disk with pendingPermissions", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -3626,7 +3506,6 @@ describe("Restore from disk with pendingPermissions", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -4057,7 +3936,6 @@ describe("onFirstTurnCompletedCallback", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,
@@ -4120,7 +3998,6 @@ describe("onFirstTurnCompletedCallback", () => {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,

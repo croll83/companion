@@ -173,8 +173,6 @@ const RPC_METHOD_TIMEOUTS: Record<string, number> = {
 export interface CodexAdapterOptions {
   model?: string;
   cwd?: string;
-  /** Runtime cwd for Codex RPC calls. Falls back to `cwd` when omitted. */
-  executionCwd?: string;
   approvalMode?: string;
   sandbox?: "workspace-write" | "danger-full-access";
   /** If provided, resume an existing thread instead of starting a new one. */
@@ -510,7 +508,7 @@ export class CodexAdapter implements IBackendAdapter {
   private protocolDriftSeen = new Set<string>();
 
   private getExecutionCwd(): string {
-    return this.options.executionCwd || this.options.cwd || "";
+    return this.options.cwd || "";
   }
 
   /**
@@ -860,7 +858,7 @@ export class CodexAdapter implements IBackendAdapter {
    * Called both at the end of initialize() and as a safety net in
    * sendBrowserMessage() — the latter covers edge cases where the
    * post-init flush was skipped (e.g. transport was momentarily
-   * unavailable right after init completed in a Docker container).
+   * unavailable right after init completed).
    */
   private flushPendingOutgoing(): void {
     if (this.pendingOutgoing.length === 0) return;
@@ -1153,7 +1151,6 @@ export class CodexAdapter implements IBackendAdapter {
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
-        is_containerized: false,
         repo_root: "",
         git_ahead: 0,
         git_behind: 0,

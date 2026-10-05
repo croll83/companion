@@ -49,7 +49,6 @@ export interface CompanionSettings {
   aiValidationAutoDeny: boolean;
   publicUrl: string;
   updateChannel: UpdateChannel;
-  dockerAutoUpdate: boolean;
   /** See CliBridgeMode. Defaults to DEFAULT_CLI_BRIDGE_MODE ("loopback"). Optional in fixtures; normalize() applies the default. */
   cliBridgeMode?: CliBridgeMode;
   /** Telegram bot token (single bot bridging sessions to Telegram groups/topics). */
@@ -91,7 +90,6 @@ let settings: CompanionSettings = {
   aiValidationAutoDeny: false,
   publicUrl: "",
   updateChannel: "stable",
-  dockerAutoUpdate: false,
   cliBridgeMode: DEFAULT_CLI_BRIDGE_MODE,
   telegramBotToken: "",
   timeZone: "",
@@ -125,7 +123,6 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     aiValidationAutoDeny: typeof raw?.aiValidationAutoDeny === "boolean" ? raw.aiValidationAutoDeny : false,
     publicUrl: typeof raw?.publicUrl === "string" ? raw.publicUrl.trim().replace(/\/+$/, "") : "",
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
-    dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
     cliBridgeMode: isCliBridgeMode(raw?.cliBridgeMode) ? raw.cliBridgeMode : DEFAULT_CLI_BRIDGE_MODE,
     telegramBotToken: typeof raw?.telegramBotToken === "string" ? raw.telegramBotToken : "",
     timeZone:
@@ -160,7 +157,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "cliBridgeMode" | "telegramBotToken" | "timeZone">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "timeZone">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -186,7 +183,6 @@ export function updateSettings(
     aiValidationAutoDeny: patch.aiValidationAutoDeny ?? settings.aiValidationAutoDeny,
     publicUrl: patch.publicUrl ?? settings.publicUrl,
     updateChannel: patch.updateChannel ?? settings.updateChannel,
-    dockerAutoUpdate: patch.dockerAutoUpdate ?? settings.dockerAutoUpdate,
     cliBridgeMode: patch.cliBridgeMode ?? settings.cliBridgeMode,
     telegramBotToken: patch.telegramBotToken ?? settings.telegramBotToken,
     timeZone: patch.timeZone ?? settings.timeZone,

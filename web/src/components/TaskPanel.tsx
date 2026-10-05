@@ -842,9 +842,6 @@ function GitBranchSection({ sessionId }: { sessionId: string }) {
         <p className="text-xs font-mono-code text-cc-fg truncate" title={branch}>
           {branch}
         </p>
-        {session?.is_containerized && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-cc-info/10 text-cc-info shrink-0 ml-2">container</span>
-        )}
       </div>
       {(branchAhead > 0 || branchBehind > 0 || lineAdds > 0 || lineRemoves > 0) && (
         <div className="flex items-center justify-between gap-2">

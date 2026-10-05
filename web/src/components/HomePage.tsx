@@ -5,11 +5,9 @@ import {
   createSessionStream,
   type ClaudeDiscoveredSession,
   type CompanionEnv,
-  type CompanionSandbox,
   type GitRepoInfo,
   type GitBranchInfo,
   type BackendInfo,
-  type ImagePullState,
   type LinearIssue,
 } from "../api.js";
 import { connectSession, createClientMessageId, waitForConnection, sendToSession } from "../ws.js";
@@ -124,17 +122,6 @@ export function HomePage() {
   const [showEnvDropdown, setShowEnvDropdown] = useState(false);
   const [showEnvManager, setShowEnvManager] = useState(false);
 
-  // Sandbox state
-  const [sandboxEnabled, setSandboxEnabled] = useState(() => localStorage.getItem("cc-sandbox-enabled") === "true");
-  const [sandboxes, setSandboxes] = useState<CompanionSandbox[]>([]);
-  const [selectedSandbox, setSelectedSandbox] = useState(() => localStorage.getItem("cc-selected-sandbox") || "");
-  const [showSandboxDropdown, setShowSandboxDropdown] = useState(false);
-  const sandboxDropdownRef = useRef<HTMLDivElement>(null);
-
-  // Sandbox image readiness
-  const [sandboxImageState, setSandboxImageState] = useState<ImagePullState | null>(null);
-  const sandboxImagePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Dropdown states
@@ -206,7 +193,6 @@ export function HomePage() {
       }
     }).catch(() => {});
     api.listEnvs().then(setEnvs).catch(() => {});
-    api.listSandboxes().then(setSandboxes).catch(() => {});
     api.getBackends().then(setBackends).catch(() => {});
     api.getSettings().then((s) => {
       setLinearConfigured(s.linearApiKeyConfigured);
@@ -251,44 +237,6 @@ export function HomePage() {
     });
   }, [backend]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When sandbox is enabled, check the-companion:latest image status
-  useEffect(() => {
-    if (sandboxImagePollRef.current) {
-      clearInterval(sandboxImagePollRef.current);
-      sandboxImagePollRef.current = null;
-    }
-    setSandboxImageState(null);
-
-    if (!sandboxEnabled) return;
-
-    const effectiveImage = "the-companion:latest";
-
-    const checkAndPull = () => {
-      api.getImageStatus(effectiveImage).then((state) => {
-        setSandboxImageState(state);
-        if (state.status === "idle") {
-          api.pullImage(effectiveImage).catch(() => {});
-        }
-        if (state.status === "ready" || state.status === "error") {
-          if (sandboxImagePollRef.current) {
-            clearInterval(sandboxImagePollRef.current);
-            sandboxImagePollRef.current = null;
-          }
-        }
-      }).catch(() => {});
-    };
-
-    checkAndPull();
-    sandboxImagePollRef.current = setInterval(checkAndPull, 2000);
-
-    return () => {
-      if (sandboxImagePollRef.current) {
-        clearInterval(sandboxImagePollRef.current);
-        sandboxImagePollRef.current = null;
-      }
-    };
-  }, [sandboxEnabled]);
-
   // Close dropdowns on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -303,9 +251,6 @@ export function HomePage() {
       }
       if (envDropdownRef.current && !envDropdownRef.current.contains(e.target as Node)) {
         setShowEnvDropdown(false);
-      }
-      if (sandboxDropdownRef.current && !sandboxDropdownRef.current.contains(e.target as Node)) {
-        setShowSandboxDropdown(false);
       }
     }
     document.addEventListener("pointerdown", handleClick);
@@ -644,8 +589,6 @@ export function HomePage() {
           permissionMode: mode,
           cwd: effectiveCwd || undefined,
           envSlug: selectedEnv || undefined,
-          sandboxEnabled: sandboxEnabled ? true : undefined,
-          sandboxSlug: sandboxEnabled && selectedSandbox ? selectedSandbox : undefined,
           branch: effectiveBranch,
           createBranch: effectiveCreateBranch ? true : undefined,
           useWorktree: effectiveUseWorktree ? true : undefined,
@@ -1126,109 +1069,6 @@ export function HomePage() {
                     >
                       Manage environments...
                     </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Sandbox selector */}
-            <div className="relative" ref={sandboxDropdownRef}>
-              <button
-                onClick={() => {
-                  if (!showSandboxDropdown) {
-                    api.listSandboxes().then(setSandboxes).catch(() => {});
-                  }
-                  setShowSandboxDropdown(!showSandboxDropdown);
-                }}
-                aria-expanded={showSandboxDropdown}
-                className={`flex items-center gap-1 px-2 py-1 text-[11px] sm:text-xs rounded-lg transition-colors cursor-pointer ${
-                  sandboxEnabled
-                    ? "text-cc-primary bg-cc-primary/8 hover:bg-cc-primary/12"
-                    : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
-                }`}
-              >
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3 opacity-60">
-                  <rect x="2" y="4" width="12" height="10" rx="1.5" />
-                  <path d="M5 4V2.5A1.5 1.5 0 016.5 1h3A1.5 1.5 0 0111 2.5V4" />
-                </svg>
-                <span className="max-w-[80px] sm:max-w-[100px] truncate">
-                  {sandboxEnabled
-                    ? (selectedSandbox ? sandboxes.find((s) => s.slug === selectedSandbox)?.name || "Sandbox" : "Sandbox")
-                    : "Sandbox"}
-                </span>
-                {sandboxEnabled && sandboxImageState && sandboxImageState.status !== "idle" && (
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full ${
-                      sandboxImageState.status === "ready"
-                        ? "bg-green-500"
-                        : sandboxImageState.status === "pulling"
-                          ? "bg-amber-500 animate-pulse"
-                          : "bg-cc-error"
-                    }`}
-                    title={
-                      sandboxImageState.status === "ready"
-                        ? "Docker image ready"
-                        : sandboxImageState.status === "pulling"
-                          ? "Pulling Docker image..."
-                          : `Image error: ${sandboxImageState.error || "unknown"}`
-                    }
-                  />
-                )}
-              </button>
-              {showSandboxDropdown && (
-                <div className="absolute left-0 bottom-full mb-1 w-56 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1 overflow-hidden">
-                  <button
-                    onClick={() => {
-                      setSandboxEnabled(false);
-                      localStorage.setItem("cc-sandbox-enabled", "false");
-                      setShowSandboxDropdown(false);
-                    }}
-                    className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer ${
-                      !sandboxEnabled ? "text-cc-primary font-medium" : "text-cc-fg"
-                    }`}
-                  >
-                    Off
-                  </button>
-                  <div className="border-t border-cc-border my-0.5" />
-                  <button
-                    onClick={() => {
-                      setSandboxEnabled(true);
-                      localStorage.setItem("cc-sandbox-enabled", "true");
-                      setSelectedSandbox("");
-                      localStorage.setItem("cc-selected-sandbox", "");
-                      setShowSandboxDropdown(false);
-                    }}
-                    className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer ${
-                      sandboxEnabled && !selectedSandbox ? "text-cc-primary font-medium" : "text-cc-fg"
-                    }`}
-                  >
-                    Default (the-companion:latest)
-                  </button>
-                  {sandboxes.map((sb) => (
-                    <button
-                      key={sb.slug}
-                      onClick={() => {
-                        setSandboxEnabled(true);
-                        localStorage.setItem("cc-sandbox-enabled", "true");
-                        setSelectedSandbox(sb.slug);
-                        localStorage.setItem("cc-selected-sandbox", sb.slug);
-                        setShowSandboxDropdown(false);
-                      }}
-                      className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-1 ${
-                        sandboxEnabled && sb.slug === selectedSandbox ? "text-cc-primary font-medium" : "text-cc-fg"
-                      }`}
-                    >
-                      <span className="truncate">{sb.name}</span>
-                    </button>
-                  ))}
-                  <div className="border-t border-cc-border mt-1 pt-1">
-                    <a
-                      href="#/sandboxes"
-                      className="block w-full px-3 py-2 text-xs text-left text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-                      onClick={() => setShowSandboxDropdown(false)}
-                    >
-                      Manage sandboxes...
-                    </a>
                   </div>
                 </div>
               )}

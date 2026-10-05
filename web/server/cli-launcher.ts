@@ -23,7 +23,6 @@ import { claudeTranscriptExists } from "./claude-session-history.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
-import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import { markClaudeCliRuntimeIncompatible, parseClaudeVersion } from "./claude-cli-check.js";
 import { getSettings } from "./settings-manager.js";
@@ -102,7 +101,50 @@ function sanitizeSpawnArgsForLog(args: string[]): string {
 }
 
 const CODEX_WS_PROXY_PATH = fileURLToPath(new URL("./codex-ws-proxy.cjs", import.meta.url));
-const CODEX_CONTAINER_WS_PORT = Number(process.env.COMPANION_CODEX_CONTAINER_WS_PORT || "4502");
+
+/**
+ * Build the command and environment that start a Codex app-server.
+ * Prefers the `node` binary that sits next to the codex launcher (avoids
+ * shebang/PATH issues with nvm installs) and puts that directory first on PATH.
+ */
+function buildCodexSpawn(
+  binary: string,
+  args: string[],
+  env: Record<string, string> | undefined,
+  codexHome: string,
+): { spawnCmd: string[]; spawnEnv: Record<string, string | undefined> } {
+  const binaryDir = resolve(binary, "..");
+  const siblingNode = join(binaryDir, "node");
+  const enrichedPath = getEnrichedPath();
+  const pathSep = process.platform === "win32" ? ";" : ":";
+  const spawnPath = [binaryDir, ...enrichedPath.split(pathSep)].filter(Boolean).join(pathSep);
+
+  let spawnCmd: string[];
+  if (existsSync(siblingNode)) {
+    let codexScript: string;
+    try {
+      codexScript = realpathSync(binary);
+    } catch {
+      codexScript = binary;
+    }
+    spawnCmd = [siblingNode, codexScript, ...args];
+  } else {
+    // On Windows, .cmd/.bat files cannot be spawned directly by Bun.spawn
+    const isCmdScript = process.platform === "win32" && (binary.endsWith(".cmd") || binary.endsWith(".bat"));
+    spawnCmd = isCmdScript ? ["cmd.exe", "/c", binary, ...args] : [binary, ...args];
+  }
+
+  return {
+    spawnCmd,
+    spawnEnv: {
+      ...process.env,
+      CLAUDECODE: undefined,
+      ...env,
+      CODEX_HOME: codexHome,
+      PATH: spawnPath,
+    },
+  };
+}
 
 export interface SdkSessionInfo {
   sessionId: string;
@@ -156,24 +198,12 @@ export interface SdkSessionInfo {
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
   agentName?: string;
-  /** Sandbox profile slug used for this session */
-  sandboxSlug?: string;
 
   // Codex WebSocket transport fields
-  /** Port used for Codex WebSocket transport (host mode). */
+  /** Port used for Codex WebSocket transport. */
   codexWsPort?: number;
   /** Full WebSocket URL for the Codex app-server. */
   codexWsUrl?: string;
-
-  // Container fields
-  /** Docker container ID when session runs inside a container */
-  containerId?: string;
-  /** Docker container name */
-  containerName?: string;
-  /** Docker image used for the container */
-  containerImage?: string;
-  /** Runtime cwd inside container for agent RPC calls (e.g. "/workspace"). */
-  containerCwd?: string;
 
   /** One-shot token validated on the CLI WS upgrade when cliBridgeMode === "jsonHandoff". */
   bridgeToken?: string;
@@ -200,22 +230,12 @@ export interface LaunchOptions {
   codexInternetAccess?: boolean;
   /** Optional override for CODEX_HOME used by Codex sessions. */
   codexHome?: string;
-  /** Docker container ID — when set, CLI runs inside container via docker exec */
-  containerId?: string;
-  /** Docker container name */
-  containerName?: string;
-  /** Docker image used for the container */
-  containerImage?: string;
-  /** Runtime cwd inside the container (typically "/workspace"). */
-  containerCwd?: string;
   /** Start from a specific prior Claude session/thread point. */
   resumeSessionAt?: string;
   /** Fork a new Claude session when resuming from prior context. */
   forkSession?: boolean;
   /** Optional system prompt to inject into Codex sessions (e.g. Linear context). */
   systemPrompt?: string;
-  /** Sandbox profile slug used for this session */
-  sandboxSlug?: string;
 }
 
 /**
@@ -286,7 +306,7 @@ export class CliLauncher {
   }
 
   private releaseCodexWsPort(info: SdkSessionInfo | undefined): void {
-    if (!info || info.containerId) return;
+    if (!info) return;
     if (typeof info.codexWsPort !== "number") return;
     this.claimedCodexWsPorts.delete(info.codexWsPort);
     info.codexWsPort = undefined;
@@ -308,20 +328,7 @@ export class CliLauncher {
 
       // Check if the process is still alive
       if (info.state !== "exited") {
-        if (info.containerId && info.codexWsPort) {
-          // Docker WS mode: the stored PID is `docker exec -d` which exits
-          // immediately after launch.  Check container liveness instead.
-          const containerState = containerManager.isContainerAlive(info.containerId);
-          if (containerState === "running") {
-            info.state = "starting";
-            this.sessions.set(info.sessionId, info);
-            recovered++;
-          } else {
-            info.state = "exited";
-            info.exitCode = -1;
-            this.sessions.set(info.sessionId, info);
-          }
-        } else if (info.pid) {
+        if (info.pid) {
           try {
             process.kill(info.pid, 0); // signal 0 = just check if alive
             info.state = "starting"; // WS not yet re-established, wait for CLI to reconnect
@@ -341,10 +348,9 @@ export class CliLauncher {
         this.sessions.set(info.sessionId, info);
       }
 
-      // Avoid reusing ports already owned by recovered host-mode Codex sessions.
+      // Avoid reusing ports already owned by recovered Codex sessions.
       if (
         info.backendType === "codex"
-        && !info.containerId
         && info.state !== "exited"
         && typeof info.codexWsPort === "number"
       ) {
@@ -385,19 +391,6 @@ export class CliLauncher {
     if (backendType === "codex") {
       info.codexInternetAccess = options.codexInternetAccess === true;
       info.codexSandbox = options.codexSandbox;
-    }
-
-    // Store sandbox slug if provided
-    if (options.sandboxSlug) {
-      info.sandboxSlug = options.sandboxSlug;
-    }
-
-    // Store container metadata if provided
-    if (options.containerId) {
-      info.containerId = options.containerId;
-      info.containerName = options.containerName;
-      info.containerImage = options.containerImage;
-      info.containerCwd = options.containerCwd || "/workspace";
     }
 
     this.sessions.set(sessionId, info);
@@ -468,53 +461,8 @@ export class CliLauncher {
       try { process.kill(info.pid, "SIGTERM"); } catch {}
     }
 
-    // Release any host-mode Codex port claim before picking a new one.
+    // Release any Codex port claim before picking a new one.
     this.releaseCodexWsPort(info);
-
-    // Pre-flight validation for containerized sessions
-    if (info.containerId) {
-      const containerLabel = info.containerName || info.containerId.slice(0, 12);
-      const containerState = containerManager.isContainerAlive(info.containerId);
-
-      if (containerState === "missing") {
-        console.error(`[cli-launcher] Container ${containerLabel} no longer exists for session ${sessionId}`);
-        info.state = "exited";
-        info.exitCode = 1;
-        this.persistState();
-        return {
-          ok: false,
-          error: `Container "${containerLabel}" was removed externally. Please create a new session.`,
-        };
-      }
-
-      if (containerState === "stopped") {
-        try {
-          containerManager.startContainer(info.containerId);
-          console.log(`[cli-launcher] Restarted stopped container ${containerLabel} for session ${sessionId}`);
-        } catch (e) {
-          info.state = "exited";
-          info.exitCode = 1;
-          this.persistState();
-          return {
-            ok: false,
-            error: `Container "${containerLabel}" is stopped and could not be restarted: ${e instanceof Error ? e.message : String(e)}`,
-          };
-        }
-      }
-
-      // Validate the CLI binary exists inside the container
-      const binary = info.backendType === "codex" ? "codex" : "claude";
-      if (!containerManager.hasBinaryInContainer(info.containerId, binary)) {
-        console.error(`[cli-launcher] "${binary}" not found in container ${containerLabel} for session ${sessionId}`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
-        return {
-          ok: false,
-          error: `"${binary}" command not found inside container "${containerLabel}". The container image may need to be rebuilt.`,
-        };
-      }
-    }
 
     info.state = "starting";
 
@@ -527,10 +475,6 @@ export class CliLauncher {
         cwd: info.cwd,
         codexSandbox: info.codexSandbox,
         codexInternetAccess: info.codexInternetAccess,
-        containerId: info.containerId,
-        containerName: info.containerName,
-        containerImage: info.containerImage,
-        containerCwd: info.containerCwd,
         env: runtimeEnv,
       });
     } else {
@@ -541,9 +485,6 @@ export class CliLauncher {
         permissionMode: info.permissionMode,
         cwd: info.cwd,
         resumeSessionId: info.cliSessionId,
-        containerId: info.containerId,
-        containerName: info.containerName,
-        containerImage: info.containerImage,
         env: runtimeEnv,
       });
     }
@@ -558,33 +499,19 @@ export class CliLauncher {
   }
 
   private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions & { resumeSessionId?: string }): void {
-    const isContainerized = !!options.containerId;
-
-    // For containerized sessions, the CLI binary lives inside the container.
-    // For host sessions, resolve the binary on the host.
     let binary = options.claudeBinary || "claude";
-    if (!isContainerized) {
-      const resolved = resolveBinary(binary);
-      if (resolved) {
-        binary = resolved;
-      } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
-        return;
-      }
+    const resolved = resolveBinary(binary);
+    if (resolved) {
+      binary = resolved;
+    } else {
+      console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+      info.state = "exited";
+      info.exitCode = 127;
+      this.persistState();
+      return;
     }
 
-    // Allow overriding the host alias used by containerized Claude sessions.
-    // Useful when host.docker.internal is unavailable in a given Docker setup.
-    const containerSdkHost = (process.env.COMPANION_CONTAINER_SDK_HOST || "host.docker.internal").trim()
-      || "host.docker.internal";
-
-    // When running inside a container, the SDK URL targets the host alias so
-    // the CLI can connect back to the Hono server running on the host.
-    // For host sessions, use the numeric loopback (127.0.0.1) instead of
-    // "localhost": Claude Code v1.2.1+ rejects the literal hostname
+    // Use the numeric loopback (127.0.0.1) instead of "localhost": Claude Code v1.2.1+ rejects the literal hostname
     // "localhost" in --sdk-url as a CSWSH hardening measure (issue #655).
     //
     // Claude Code v2.1.142+ introduced a further restriction: --sdk-url is
@@ -601,52 +528,42 @@ export class CliLauncher {
       || "beacon.claude-ai.staging.ant.dev").trim() || "beacon.claude-ai.staging.ant.dev";
     const tlsBridgePort = Number(process.env.COMPANION_SDK_BRIDGE_PORT) || 8443;
 
-    // stdio bridge mode (host sessions only): no --sdk-url at all; the NDJSON
+    // stdio bridge mode: no --sdk-url at all; the NDJSON
     // protocol flows over the child's stdin/stdout. Immune to the Anthropic
     // endpoint allowlist that broke ws --sdk-url on Claude Code 2.1.142+/2.1.175.
-    const useStdio = !isContainerized && bridgeMode === "stdio";
+    const useStdio = bridgeMode === "stdio";
 
     let sdkUrl: string;
-    if (isContainerized) {
-      sdkUrl = `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`;
-    } else if (bridgeMode === "tlsLoopback") {
+    if (bridgeMode === "tlsLoopback") {
       sdkUrl = `wss://${tlsBridgeHost}:${tlsBridgePort}/ws/cli/${sessionId}`;
     } else {
       sdkUrl = `ws://127.0.0.1:${this.port}/ws/cli/${sessionId}`;
     }
 
-    // Claude Code rejects bypassPermissions when running with root/sudo.
-    // Container sessions are downgraded by default; host sessions are only
-    // downgraded when this server itself runs as root.
+    // Claude Code rejects bypassPermissions when running with root/sudo, so
+    // downgrade it when this server itself runs as root.
     let effectivePermissionMode = options.permissionMode;
     const isRootProcess = typeof process.getuid === "function" && process.getuid() === 0;
-    const shouldDowngradeContainerBypass =
-      isContainerized
-      && options.permissionMode === "bypassPermissions"
-      && process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER !== "1";
     const shouldDowngradeRootBypass =
-      !isContainerized
-      && isRootProcess
+      isRootProcess
       && options.permissionMode === "bypassPermissions"
       && process.env.COMPANION_FORCE_BYPASS_AS_ROOT !== "1";
 
-    if (shouldDowngradeContainerBypass || shouldDowngradeRootBypass) {
-      const scope = isContainerized ? "container" : "root";
+    if (shouldDowngradeRootBypass) {
       console.warn(
-        `[cli-launcher] Session ${sessionId}: downgrading ${scope} permission mode ` +
+        `[cli-launcher] Session ${sessionId}: downgrading root permission mode ` +
         `from bypassPermissions to acceptEdits.`,
       );
       effectivePermissionMode = "acceptEdits";
       info.permissionMode = "acceptEdits";
     }
 
-    // Optional: just-every/code-style JSON handoff. When enabled (and not
-    // containerized — the temp file path wouldn't be visible inside the
-    // container), write a temp descriptor with a one-shot token and pass its
-    // path via CLAUDE_BRIDGE_CONFIG env var instead of --sdk-url on argv.
+    // Optional: just-every/code-style JSON handoff. When enabled, write a temp
+    // descriptor with a one-shot token and pass its path via
+    // CLAUDE_BRIDGE_CONFIG env var instead of --sdk-url on argv.
     // This is forward-compatible if Anthropic further restricts --sdk-url
     // (e.g. drops it entirely or adds origin/handshake checks).
-    const useJsonHandoff = bridgeMode === "jsonHandoff" && !isContainerized;
+    const useJsonHandoff = bridgeMode === "jsonHandoff";
     let bridgeConfigPath: string | undefined;
     if (useJsonHandoff) {
       bridgeConfigPath = join(tmpdir(), `companion-bridge-${sessionId}.json`);
@@ -721,64 +638,32 @@ export class CliLauncher {
       args.push("-p", "");
     }
 
-    let spawnCmd: string[];
-    let spawnEnv: Record<string, string | undefined>;
-    let spawnCwd: string | undefined;
-
-    if (isContainerized) {
-      // Run CLI inside the container via docker exec -i.
-      // Keeping stdin open avoids premature EOF-driven exits in SDK mode.
-      // Environment variables are passed via -e flags to docker exec.
-      const dockerArgs = ["docker", "exec", "-i"];
-
-      // Pass env vars via -e flags
-      if (options.env) {
-        for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
-        }
-      }
-      // Ensure CLAUDECODE is unset inside container
-      dockerArgs.push("-e", "CLAUDECODE=");
-
-      dockerArgs.push(options.containerId!);
-      // Use a login shell so ~/.bashrc is sourced and nvm/bun/deno/etc are on PATH
-      const innerCmd = [binary, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-      dockerArgs.push("bash", "-lc", innerCmd);
-
-      spawnCmd = dockerArgs;
-      // Host env for the docker CLI itself
-      spawnEnv = { ...process.env, PATH: getEnrichedPath() };
-      spawnCwd = undefined; // cwd is set inside the container via -w at creation
-    } else {
-      // Host-based spawn (original behavior)
-      // On Windows, .cmd/.bat files cannot be spawned directly by Bun.spawn;
-      // they must be invoked via cmd.exe /c.
-      const isCmdScript = process.platform === "win32" && (binary.endsWith(".cmd") || binary.endsWith(".bat"));
-      spawnCmd = isCmdScript ? ["cmd.exe", "/c", binary, ...args] : [binary, ...args];
-      spawnEnv = {
-        ...process.env,
-        CLAUDECODE: undefined,
-        // Have the CLI report its own turn state (session_state_changed:
-        // idle | running | requires_action) instead of Companion inferring it.
-        // Off by default in the CLI; see session-work.ts for how it is used.
-        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
-        ...options.env,
-        PATH: getEnrichedPath(),
-        ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),
-        ...(bridgeMode === "tlsLoopback" && this.tlsCaPath
-          ? { NODE_EXTRA_CA_CERTS: this.tlsCaPath }
-          : {}),
-      };
-      spawnCwd = info.cwd;
-    }
+    // On Windows, .cmd/.bat files cannot be spawned directly by Bun.spawn;
+    // they must be invoked via cmd.exe /c.
+    const isCmdScript = process.platform === "win32" && (binary.endsWith(".cmd") || binary.endsWith(".bat"));
+    const spawnCmd = isCmdScript ? ["cmd.exe", "/c", binary, ...args] : [binary, ...args];
+    const spawnEnv: Record<string, string | undefined> = {
+      ...process.env,
+      CLAUDECODE: undefined,
+      // Have the CLI report its own turn state (session_state_changed:
+      // idle | running | requires_action) instead of Companion inferring it.
+      // Off by default in the CLI; see session-work.ts for how it is used.
+      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+      ...options.env,
+      PATH: getEnrichedPath(),
+      ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),
+      ...(bridgeMode === "tlsLoopback" && this.tlsCaPath
+        ? { NODE_EXTRA_CA_CERTS: this.tlsCaPath }
+        : {}),
+    };
 
     console.log(
-      `[cli-launcher] Spawning session ${sessionId}${isContainerized ? " (container)" : ""}: ` +
+      `[cli-launcher] Spawning session ${sessionId}: ` +
       sanitizeSpawnArgsForLog(spawnCmd),
     );
 
     const proc = Bun.spawn(spawnCmd, {
-      cwd: spawnCwd,
+      cwd: info.cwd,
       env: spawnEnv,
       // In stdio mode the child's stdin carries the NDJSON input stream.
       stdin: useStdio ? "pipe" : "ignore",
@@ -1008,66 +893,40 @@ export class CliLauncher {
    * Codex listens on `ws://127.0.0.1:PORT`, Companion connects as a client.
    */
   private async spawnCodexWs(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): Promise<void> {
-    const isContainerized = !!options.containerId;
     const connectTimeoutMs = Math.max(1000, parseInt(process.env.COMPANION_CODEX_WS_CONNECT_TIMEOUT_MS ?? "", 10) || 30000);
     const pongTimeoutMs = Math.max(1000, parseInt(process.env.COMPANION_CODEX_PONG_TIMEOUT_MS ?? "", 10) || 30000);
 
     let binary = options.codexBinary || "codex";
-    if (!isContainerized) {
-      const resolved = resolveBinary(binary);
-      if (resolved) {
-        binary = resolved;
-      } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
-        return;
-      }
-    }
-
-    // Host mode: choose a free host port. Container mode: use a fixed container port
-    // and connect via the container's mapped host port.
-    let codexListenPort: number;
-    let proxyConnectPort: number;
-    if (isContainerized) {
-      codexListenPort = CODEX_CONTAINER_WS_PORT;
-      const containerInfo = containerManager.getContainerById(options.containerId!);
-      const mappedPort = containerInfo?.portMappings.find((p) => p.containerPort === CODEX_CONTAINER_WS_PORT)?.hostPort;
-      if (!mappedPort) {
-        console.error(
-          `[cli-launcher] Missing port mapping for Codex container port ${CODEX_CONTAINER_WS_PORT} ` +
-          `on container ${options.containerId}`,
-        );
-        info.state = "exited";
-        info.exitCode = 1;
-        this.persistState();
-        return;
-      }
-      proxyConnectPort = mappedPort;
+    const resolved = resolveBinary(binary);
+    if (resolved) {
+      binary = resolved;
     } else {
-      try {
-        proxyConnectPort = await findFreePort(
-          4500,
-          4600,
-          (port) => this.claimedCodexWsPorts.has(port),
-        );
-        this.claimCodexWsPort(proxyConnectPort);
-        // Set immediately after claiming so any downstream failure can release it.
-        info.codexWsPort = proxyConnectPort;
-      } catch (err) {
-        console.error(`[cli-launcher] Failed to find free port for Codex WS: ${err}`);
-        info.state = "exited";
-        info.exitCode = 1;
-        this.persistState();
-        return;
-      }
-      codexListenPort = proxyConnectPort;
+      console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+      info.state = "exited";
+      info.exitCode = 127;
+      this.persistState();
+      return;
     }
 
-    const listenAddr = isContainerized
-      ? `ws://0.0.0.0:${codexListenPort}`
-      : `ws://127.0.0.1:${codexListenPort}`;
+    let codexPort: number;
+    try {
+      codexPort = await findFreePort(
+        4500,
+        4600,
+        (port) => this.claimedCodexWsPorts.has(port),
+      );
+      this.claimCodexWsPort(codexPort);
+      // Set immediately after claiming so any downstream failure can release it.
+      info.codexWsPort = codexPort;
+    } catch (err) {
+      console.error(`[cli-launcher] Failed to find free port for Codex WS: ${err}`);
+      info.state = "exited";
+      info.exitCode = 1;
+      this.persistState();
+      return;
+    }
+
+    const listenAddr = `ws://127.0.0.1:${codexPort}`;
 
     const args: string[] = ["app-server", "--listen", listenAddr];
     // Enable Codex multi-agent mode by default (product decision).
@@ -1084,69 +943,17 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    if (!isContainerized) {
-      this.prepareCodexHome(codexHome);
-    }
+    this.prepareCodexHome(codexHome);
 
-    let spawnCmd: string[];
-    let spawnEnv: Record<string, string | undefined>;
-    let spawnCwd: string | undefined;
-
-    if (isContainerized) {
-      // Run Codex inside the container via docker exec -d (detached, no stdin pipe needed)
-      const dockerArgs = ["docker", "exec", "-d"];
-      if (options.env) {
-        for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
-        }
-      }
-      dockerArgs.push("-e", "CLAUDECODE=");
-      dockerArgs.push("-e", "CODEX_HOME=/root/.codex");
-      dockerArgs.push(options.containerId!);
-      const innerCmd = [binary, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-      dockerArgs.push("bash", "-lc", innerCmd);
-
-      spawnCmd = dockerArgs;
-      spawnEnv = { ...process.env, PATH: getEnrichedPath() };
-      spawnCwd = undefined;
-    } else {
-      const binaryDir = resolve(binary, "..");
-      const siblingNode = join(binaryDir, "node");
-      const enrichedPath = getEnrichedPath();
-      const pathSep = process.platform === "win32" ? ";" : ":";
-      const spawnPath = [binaryDir, ...enrichedPath.split(pathSep)].filter(Boolean).join(pathSep);
-
-      if (existsSync(siblingNode)) {
-        let codexScript: string;
-        try {
-          codexScript = realpathSync(binary);
-        } catch {
-          codexScript = binary;
-        }
-        spawnCmd = [siblingNode, codexScript, ...args];
-      } else {
-        // On Windows, .cmd/.bat files cannot be spawned directly by Bun.spawn
-        const isCmdScript = process.platform === "win32" && (binary.endsWith(".cmd") || binary.endsWith(".bat"));
-        spawnCmd = isCmdScript ? ["cmd.exe", "/c", binary, ...args] : [binary, ...args];
-      }
-
-      spawnEnv = {
-        ...process.env,
-        CLAUDECODE: undefined,
-        ...options.env,
-        CODEX_HOME: codexHome,
-        PATH: spawnPath,
-      };
-      spawnCwd = info.cwd;
-    }
+    const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
 
     console.log(
-      `[cli-launcher] Spawning Codex WS session ${sessionId}${isContainerized ? " (container)" : ""}: ` +
+      `[cli-launcher] Spawning Codex WS session ${sessionId}: ` +
       sanitizeSpawnArgsForLog(spawnCmd),
     );
 
     const proc = Bun.spawn(spawnCmd, {
-      cwd: spawnCwd,
+      cwd: info.cwd,
       env: spawnEnv,
       stdin: "ignore",
       stdout: "pipe",
@@ -1160,19 +967,15 @@ export class CliLauncher {
     this.pipeOutput(sessionId, proc);
 
     // Store WS metadata
-    const wsUrl = `ws://127.0.0.1:${proxyConnectPort}`;
-    if (typeof info.codexWsPort !== "number") {
-      info.codexWsPort = proxyConnectPort;
-    }
+    const wsUrl = `ws://127.0.0.1:${codexPort}`;
     info.codexWsUrl = wsUrl;
 
     // Connect to Codex app-server through a Node helper process that uses the
     // `ws` package directly (with perMessageDeflate disabled). This avoids a Bun
     // runtime compatibility issue where the `ws` client can mis-handle a valid
     // 101 upgrade response from Codex's Rust WS server.
-    const codexBinaryDir = isContainerized ? undefined : resolve(binary, "..");
-    const proxyNodeCandidate = codexBinaryDir ? join(codexBinaryDir, "node") : undefined;
-    const proxyNode = proxyNodeCandidate && existsSync(proxyNodeCandidate) ? proxyNodeCandidate : "node";
+    const proxyNodeCandidate = join(resolve(binary, ".."), "node");
+    const proxyNode = existsSync(proxyNodeCandidate) ? proxyNodeCandidate : "node";
     const proxyProc = Bun.spawn([proxyNode, CODEX_WS_PROXY_PATH, wsUrl, String(connectTimeoutMs), String(pongTimeoutMs)], {
       cwd: info.cwd,
       env: {
@@ -1195,7 +998,6 @@ export class CliLauncher {
     const adapter = new CodexAdapter(proxyProc, sessionId, {
       model: options.model,
       cwd: info.cwd,
-      executionCwd: options.containerId ? (info.containerCwd || "/workspace") : info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
@@ -1235,9 +1037,8 @@ export class CliLauncher {
 
     info.state = "connected";
 
-    // Monitor the proxy connection process as the primary transport liveness.
-    // In container mode, `docker exec -d` exits immediately after launching Codex
-    // and must not be treated as the backend process lifetime.
+    // Monitor both the proxy connection process and Codex itself: whichever
+    // exits first ends the session.
     let exitHandled = false;
     const handleWsSessionExit = (exitCode: number | null, source: "proxy" | "codex") => {
       if (exitHandled) return;
@@ -1274,19 +1075,9 @@ export class CliLauncher {
       handleWsSessionExit(exitCode, "proxy");
     });
 
-    if (!isContainerized) {
-      proc.exited.then((exitCode) => {
-        handleWsSessionExit(exitCode, "codex");
-      });
-    } else {
-      proc.exited.then((exitCode) => {
-        // `docker exec -d` exits immediately after launch in container WS mode.
-        // Suppress the expected success case to avoid noisy logs; keep non-zero exits.
-        if (exitCode !== 0) {
-          console.warn(`[cli-launcher] Codex WS launcher command for ${sessionId} exited (code=${exitCode})`);
-        }
-      });
-    }
+    proc.exited.then((exitCode) => {
+      handleWsSessionExit(exitCode, "codex");
+    });
 
     this.persistState();
   }
@@ -1296,20 +1087,17 @@ export class CliLauncher {
    * Unlike Claude Code (which connects back via WebSocket), Codex uses stdin/stdout.
    */
   private spawnCodexStdio(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
-    const isContainerized = !!options.containerId;
 
     let binary = options.codexBinary || "codex";
-    if (!isContainerized) {
-      const resolved = resolveBinary(binary);
-      if (resolved) {
-        binary = resolved;
-      } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
-        return;
-      }
+    const resolved = resolveBinary(binary);
+    if (resolved) {
+      binary = resolved;
+    } else {
+      console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+      info.state = "exited";
+      info.exitCode = 127;
+      this.persistState();
+      return;
     }
 
     const args: string[] = ["app-server"];
@@ -1327,72 +1115,17 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    if (!isContainerized) {
-      this.prepareCodexHome(codexHome);
-    }
+    this.prepareCodexHome(codexHome);
 
-    let spawnCmd: string[];
-    let spawnEnv: Record<string, string | undefined>;
-    let spawnCwd: string | undefined;
-
-    if (isContainerized) {
-      // Run Codex inside the container via docker exec -i (stdin required for JSON-RPC)
-      const dockerArgs = ["docker", "exec", "-i"];
-      if (options.env) {
-        for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
-        }
-      }
-      dockerArgs.push("-e", "CLAUDECODE=");
-      // Point Codex at /root/.codex where container-manager seeded auth/config
-      dockerArgs.push("-e", "CODEX_HOME=/root/.codex");
-      dockerArgs.push(options.containerId!);
-      // Use a login shell so ~/.bashrc is sourced and nvm/bun/deno/etc are on PATH
-      const innerCmd = [binary, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-      dockerArgs.push("bash", "-lc", innerCmd);
-
-      spawnCmd = dockerArgs;
-      spawnEnv = { ...process.env, PATH: getEnrichedPath() };
-      spawnCwd = undefined;
-    } else {
-      // Host-based spawn — resolve node/shebang issues
-      const binaryDir = resolve(binary, "..");
-      const siblingNode = join(binaryDir, "node");
-      const enrichedPath = getEnrichedPath();
-      const pathSep = process.platform === "win32" ? ";" : ":";
-      const spawnPath = [binaryDir, ...enrichedPath.split(pathSep)].filter(Boolean).join(pathSep);
-
-      if (existsSync(siblingNode)) {
-        let codexScript: string;
-        try {
-          codexScript = realpathSync(binary);
-        } catch {
-          codexScript = binary;
-        }
-        spawnCmd = [siblingNode, codexScript, ...args];
-      } else {
-        // On Windows, .cmd/.bat files cannot be spawned directly by Bun.spawn
-        const isCmdScript = process.platform === "win32" && (binary.endsWith(".cmd") || binary.endsWith(".bat"));
-        spawnCmd = isCmdScript ? ["cmd.exe", "/c", binary, ...args] : [binary, ...args];
-      }
-
-      spawnEnv = {
-        ...process.env,
-        CLAUDECODE: undefined,
-        ...options.env,
-        CODEX_HOME: codexHome,
-        PATH: spawnPath,
-      };
-      spawnCwd = info.cwd;
-    }
+    const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
 
     console.log(
-      `[cli-launcher] Spawning Codex session ${sessionId}${isContainerized ? " (container)" : ""}: ` +
+      `[cli-launcher] Spawning Codex session ${sessionId}: ` +
       sanitizeSpawnArgsForLog(spawnCmd),
     );
 
     const proc = Bun.spawn(spawnCmd, {
-      cwd: spawnCwd,
+      cwd: info.cwd,
       env: spawnEnv,
       stdin: "pipe",
       stdout: "pipe",
@@ -1413,7 +1146,6 @@ export class CliLauncher {
     const adapter = new CodexAdapter(proc, sessionId, {
       model: options.model,
       cwd: info.cwd,
-      executionCwd: options.containerId ? (info.containerCwd || "/workspace") : info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,

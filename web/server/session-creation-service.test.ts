@@ -10,12 +10,6 @@ vi.mock("./env-manager.js", () => ({
   listEnvs: vi.fn(() => []),
 }));
 
-// Mock sandbox-manager
-vi.mock("./sandbox-manager.js", () => ({
-  getSandbox: vi.fn(() => null),
-  listSandboxes: vi.fn(() => []),
-}));
-
 // Mock git-utils
 vi.mock("./git-utils.js", () => ({
   getRepoInfo: vi.fn(() => null),
@@ -26,56 +20,6 @@ vi.mock("./git-utils.js", () => ({
     actualBranch: "feature-branch",
   })),
   checkoutOrCreateBranch: vi.fn(() => ({ created: false })),
-}));
-
-// Mock container-manager
-vi.mock("./container-manager.js", () => ({
-  containerManager: {
-    createContainer: vi.fn(() => ({
-      containerId: "abc123",
-      name: "test-container",
-      image: "test-image",
-      portMappings: [],
-      hostCwd: "/workspace",
-      containerCwd: "/workspace",
-      state: "running",
-    })),
-    copyWorkspaceToContainer: vi.fn(async () => {}),
-    reseedGitAuth: vi.fn(),
-    gitOpsInContainer: vi.fn(() => ({
-      fetchOk: true,
-      checkoutOk: true,
-      pullOk: true,
-      errors: [],
-    })),
-    execInContainerAsync: vi.fn(async () => ({
-      exitCode: 0,
-      output: "ok",
-    })),
-    removeContainer: vi.fn(),
-    retrack: vi.fn(),
-  },
-}));
-
-// Mock claude-container-auth
-vi.mock("./claude-container-auth.js", () => ({
-  hasContainerClaudeAuth: vi.fn(() => true),
-}));
-
-// Mock codex-container-auth
-vi.mock("./codex-container-auth.js", () => ({
-  hasContainerCodexAuth: vi.fn(() => true),
-}));
-
-// Mock image-pull-manager
-vi.mock("./image-pull-manager.js", () => ({
-  imagePullManager: {
-    isReady: vi.fn(() => true),
-    getState: vi.fn(() => ({ status: "ready" })),
-    ensureImage: vi.fn(),
-    waitForReady: vi.fn(async () => true),
-    onProgress: vi.fn(() => vi.fn()),
-  },
 }));
 
 // Mock linear-connections
@@ -107,12 +51,7 @@ import {
   type ProgressCallback,
 } from "./session-creation-service.js";
 import * as envManager from "./env-manager.js";
-import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
-import { containerManager } from "./container-manager.js";
-import { hasContainerClaudeAuth } from "./claude-container-auth.js";
-import { hasContainerCodexAuth } from "./codex-container-auth.js";
-import { imagePullManager } from "./image-pull-manager.js";
 import { getConnection } from "./linear-connections.js";
 
 // ---------------------------------------------------------------------------
@@ -132,7 +71,6 @@ function makeDeps(): SessionCreationDeps {
       })),
     } as unknown as SessionCreationDeps["launcher"],
     wsBridge: {
-      markContainerized: vi.fn(),
       injectSystemPrompt: vi.fn(),
       prePopulateCommands: vi.fn(),
     } as unknown as SessionCreationDeps["wsBridge"],
@@ -200,21 +138,6 @@ describe("executeSessionCreation", () => {
     );
   });
 
-  // -- Sandbox resolution --
-  it("throws 404 for missing sandbox when sandboxEnabled", async () => {
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", sandboxEnabled: true, sandboxSlug: "missing" },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(404);
-      expect((e as SessionCreationError).step).toBe("resolving_env");
-    }
-  });
-
   // -- Branch validation --
   it("rejects invalid branch names", async () => {
     try {
@@ -275,125 +198,6 @@ describe("executeSessionCreation", () => {
     expect(gitUtils.gitPull).toHaveBeenCalled();
   });
 
-  // -- Container auth check: Claude --
-  it("throws 400 when containerized Claude has no auth", async () => {
-    vi.mocked(hasContainerClaudeAuth).mockReturnValueOnce(false);
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", container: { image: "test:latest" } },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(400);
-      expect((e as SessionCreationError).message).toContain("ANTHROPIC_API_KEY");
-    }
-  });
-
-  // -- Container auth check: Codex --
-  it("throws 400 when containerized Codex has no auth", async () => {
-    vi.mocked(hasContainerCodexAuth).mockReturnValueOnce(false);
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", backend: "codex", container: { image: "test:latest" } },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(400);
-      expect((e as SessionCreationError).message).toContain("OPENAI_API_KEY");
-    }
-  });
-
-  // -- Image pull failure --
-  it("throws 503 when image pull fails", async () => {
-    vi.mocked(imagePullManager.isReady).mockReturnValueOnce(false);
-    vi.mocked(imagePullManager.waitForReady).mockResolvedValueOnce(false);
-    vi.mocked(imagePullManager.getState).mockReturnValueOnce({
-      status: "error",
-      error: "pull failed",
-    } as any);
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", container: { image: "broken:latest" } },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(503);
-      expect((e as SessionCreationError).step).toBe("pulling_image");
-    }
-  });
-
-  // -- Container create failure --
-  it("throws 503 when container creation fails", async () => {
-    vi.mocked(containerManager.createContainer).mockImplementationOnce(() => {
-      throw new Error("docker not found");
-    });
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", container: { image: "test:latest" } },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(503);
-      expect((e as SessionCreationError).step).toBe("creating_container");
-    }
-  });
-
-  // -- Workspace copy failure triggers cleanup --
-  it("removes container when workspace copy fails", async () => {
-    vi.mocked(containerManager.copyWorkspaceToContainer).mockRejectedValueOnce(
-      new Error("copy failed"),
-    );
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", container: { image: "test:latest" } },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(503);
-      expect((e as SessionCreationError).step).toBe("copying_workspace");
-      // Verify cleanup happened
-      expect(containerManager.removeContainer).toHaveBeenCalled();
-    }
-  });
-
-  // -- Container git checkout failure triggers cleanup --
-  it("removes container when in-container git checkout fails", async () => {
-    vi.mocked(containerManager.gitOpsInContainer).mockReturnValueOnce({
-      fetchOk: true,
-      checkoutOk: false,
-      pullOk: false,
-      errors: ["checkout error"],
-    } as any);
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", container: { image: "test:latest" }, branch: "feature" },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(400);
-      expect((e as SessionCreationError).step).toBe("checkout_branch");
-      expect(containerManager.removeContainer).toHaveBeenCalled();
-    }
-  });
-
   // -- Progress callback is invoked in order --
   it("calls onProgress at each step in correct order", async () => {
     const steps: string[] = [];
@@ -444,17 +248,6 @@ describe("executeSessionCreation", () => {
       "sess-1",
       expect.any(String),
     );
-  });
-
-  // -- Post-launch: container retracking --
-  it("retracks container and marks session as containerized after launch", async () => {
-    await executeSessionCreation(
-      { cwd: "/workspace", container: { image: "test:latest" } },
-      deps,
-    );
-
-    expect(containerManager.retrack).toHaveBeenCalledWith("abc123", "sess-1");
-    expect(deps.wsBridge.markContainerized).toHaveBeenCalledWith("sess-1", "/workspace");
   });
 
   // -- Post-launch: worktree tracking --
@@ -522,91 +315,9 @@ describe("executeSessionCreation", () => {
     );
   });
 
-  // -- Init script: success --
-  it("runs init script when sandbox has one configured", async () => {
-    vi.mocked(sandboxManager.getSandbox).mockReturnValueOnce({
-      slug: "test-sandbox",
-      name: "Test Sandbox",
-      initScript: "echo hello",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    } as any);
 
-    await executeSessionCreation(
-      { cwd: "/workspace", sandboxEnabled: true, sandboxSlug: "test-sandbox" },
-      deps,
-    );
-
-    // Init script should have been executed via execInContainerAsync
-    expect(containerManager.execInContainerAsync).toHaveBeenCalledWith(
-      "abc123",
-      ["sh", "-lc", "echo hello"],
-      expect.objectContaining({ timeout: expect.any(Number) }),
-    );
-    expect(deps.launcher.launch).toHaveBeenCalled();
-  });
-
-  // -- Init script: non-zero exit triggers cleanup --
-  it("cleans up container when init script fails with non-zero exit", async () => {
-    vi.mocked(sandboxManager.getSandbox).mockReturnValueOnce({
-      slug: "test-sandbox",
-      name: "Test Sandbox",
-      initScript: "exit 1",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    } as any);
-    vi.mocked(containerManager.execInContainerAsync).mockResolvedValueOnce({
-      exitCode: 1,
-      output: "script failed",
-    });
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", sandboxEnabled: true, sandboxSlug: "test-sandbox" },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(503);
-      expect((e as SessionCreationError).step).toBe("running_init_script");
-      expect(containerManager.removeContainer).toHaveBeenCalled();
-    }
-  });
-
-  // -- Init script: exception triggers cleanup --
-  it("cleans up container when init script throws", async () => {
-    vi.mocked(sandboxManager.getSandbox).mockReturnValueOnce({
-      slug: "test-sandbox",
-      name: "Test Sandbox",
-      initScript: "echo boom",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    } as any);
-    vi.mocked(containerManager.execInContainerAsync).mockRejectedValueOnce(
-      new Error("exec timeout"),
-    );
-
-    try {
-      await executeSessionCreation(
-        { cwd: "/workspace", sandboxEnabled: true, sandboxSlug: "test-sandbox" },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(503);
-      expect((e as SessionCreationError).step).toBe("running_init_script");
-      expect(containerManager.removeContainer).toHaveBeenCalled();
-    }
-  });
-
-
-  // -- launcher.launch() failure cleans up container --
-  it("cleans up container when launcher.launch() throws", async () => {
-    // Set up a containerized session via container.image (triggers effectiveImage)
-    vi.mocked(hasContainerClaudeAuth).mockReturnValueOnce(true);
-
+  // -- launcher.launch() failure is reported as a launching_cli error --
+  it("throws 503 when launcher.launch() throws", async () => {
     // Make launcher.launch() throw
     deps.launcher.launch = vi.fn(() => {
       throw new Error("spawn failed");
@@ -614,7 +325,7 @@ describe("executeSessionCreation", () => {
 
     try {
       await executeSessionCreation(
-        { backend: "claude", cwd: "/workspace", container: { image: "test:latest" } },
+        { backend: "claude", cwd: "/workspace" },
         deps,
       );
       expect.unreachable("should have thrown");
@@ -623,25 +334,9 @@ describe("executeSessionCreation", () => {
       expect((e as SessionCreationError).statusCode).toBe(503);
       expect((e as SessionCreationError).step).toBe("launching_cli");
       expect((e as SessionCreationError).message).toContain("spawn failed");
-      // Verify container cleanup
-      expect(containerManager.removeContainer).toHaveBeenCalled();
     }
   });
 
-  // -- cwd validation for containerized sessions --
-  it("throws 400 when cwd is missing for containerized session", async () => {
-    try {
-      await executeSessionCreation(
-        { container: { image: "test:latest" } },
-        deps,
-      );
-      expect.unreachable("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(SessionCreationError);
-      expect((e as SessionCreationError).statusCode).toBe(400);
-      expect((e as SessionCreationError).message).toContain("cwd");
-    }
-  });
 });
 
 describe("SessionCreationError", () => {

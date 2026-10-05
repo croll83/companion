@@ -12,7 +12,6 @@ import { TerminalAccessoryBar } from "./TerminalAccessoryBar.js";
 
 interface TerminalViewProps {
   cwd: string;
-  containerId?: string;
   title?: string;
   onClose?: () => void;
   embedded?: boolean;
@@ -31,7 +30,6 @@ function getTerminalTheme(dark: boolean) {
 
 export function TerminalView({
   cwd,
-  containerId,
   title,
   onClose,
   embedded = false,
@@ -75,7 +73,7 @@ export function TerminalView({
 
       // Spawn terminal on server then connect WebSocket
       api
-        .spawnTerminal(cwd, xterm.cols, xterm.rows, { containerId })
+        .spawnTerminal(cwd, xterm.cols, xterm.rows)
         .then(({ terminalId }) => {
           if (cancelled) return;
           useStore.getState().setTerminalId(terminalId);
@@ -144,7 +142,7 @@ export function TerminalView({
       cleanupRef.current?.();
       cleanupRef.current = null;
     };
-  }, [cwd, containerId]);
+  }, [cwd]);
 
   // Separate effect: update theme without recreating the terminal
   useEffect(() => {
@@ -200,6 +198,7 @@ export function TerminalView({
           {onClose && (
             <button
               onClick={onClose}
+              aria-label="Close terminal"
               className="w-6 h-6 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer shrink-0"
             >
               <svg

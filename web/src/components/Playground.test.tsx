@@ -76,4 +76,32 @@ describe("Playground", () => {
     );
     expect((await screen.findByRole("alert")).textContent).toContain("Bun 1.3.9");
   });
+
+  // Container sessions were removed: the Browser Preview section now renders
+  // the real host-only pane (no API needed), and no Docker/sandbox demo
+  // sections remain in the playground.
+  it("renders the interactive host Browser Preview and no Docker sections", () => {
+    render(<Playground />);
+    const heading = screen.getByRole("heading", { name: "Browser Preview" });
+    const section = heading.closest("section")!;
+    fireEvent.change(within(section).getByLabelText("Navigate URL"), {
+      target: { value: "http://localhost:4000/app" },
+    });
+    fireEvent.click(within(section).getByText("Go"));
+    expect(within(section).getByTitle("Browser preview")).toHaveProperty(
+      "src",
+      expect.stringContaining("/api/sessions/playground-browser/browser/host-proxy/4000/app"),
+    );
+    expect(screen.queryByText("Docker Update Dialog")).toBeNull();
+    expect(screen.queryByText(/Pulling Docker image/)).toBeNull();
+  });
+
+  it("passes axe accessibility checks on the Browser Preview and Session Creation Progress sections", async () => {
+    const { axe } = await import("vitest-axe");
+    render(<Playground />);
+    for (const name of ["Browser Preview", "Session Creation Progress"]) {
+      const section = screen.getByRole("heading", { name }).closest("section")!;
+      expect(await axe(section)).toHaveNoViolations();
+    }
+  });
 });

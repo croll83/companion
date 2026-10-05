@@ -4,7 +4,7 @@ import { CLI_BRIDGE_MODE_ERROR, isCliBridgeMode } from "../cli-bridge-mode.js";
 import { isValidTimeZoneSetting } from "../time-zone.js";
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
-import { hasContainerCodexAuth } from "../codex-container-auth.js";
+import { hasCodexAuth } from "../codex-auth-check.js";
 import { telegramBridgeManager } from "../telegram-bridge-manager.js";
 
 export function registerSettingsRoutes(api: Hono): void {
@@ -16,7 +16,7 @@ export function registerSettingsRoutes(api: Hono): void {
       anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
       claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
       openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
-      codexDeviceAuthConfigured: hasContainerCodexAuth(),
+      codexDeviceAuthConfigured: hasCodexAuth(),
       onboardingCompleted: settings.onboardingCompleted,
       linearApiKeyConfigured: !!settings.linearApiKey.trim() || connections.length > 0,
       linearConnectionCount: connections.length,
@@ -31,7 +31,6 @@ export function registerSettingsRoutes(api: Hono): void {
       aiValidationAutoDeny: settings.aiValidationAutoDeny,
       publicUrl: settings.publicUrl,
       updateChannel: settings.updateChannel,
-      dockerAutoUpdate: settings.dockerAutoUpdate,
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
@@ -117,9 +116,6 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
-    if (body.dockerAutoUpdate !== undefined && typeof body.dockerAutoUpdate !== "boolean") {
-      return c.json({ error: "dockerAutoUpdate must be a boolean" }, 400);
-    }
     // Valid modes come from the single CLI_BRIDGE_MODES list (cli-bridge-mode.ts)
     // so a new mode can never be silently rejected here again.
     if (body.cliBridgeMode !== undefined && !isCliBridgeMode(body.cliBridgeMode)) {
@@ -138,7 +134,6 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.aiValidationAutoDeny !== undefined
       || body.publicUrl !== undefined
       || body.updateChannel !== undefined
-      || body.dockerAutoUpdate !== undefined
       || body.cliBridgeMode !== undefined
       || body.telegramBotToken !== undefined
       || body.timeZone !== undefined;
@@ -231,10 +226,6 @@ export function registerSettingsRoutes(api: Hono): void {
         body.updateChannel === "stable" || body.updateChannel === "prerelease"
           ? (body.updateChannel as UpdateChannel)
           : undefined,
-      dockerAutoUpdate:
-        typeof body.dockerAutoUpdate === "boolean"
-          ? body.dockerAutoUpdate
-          : undefined,
       cliBridgeMode: isCliBridgeMode(body.cliBridgeMode) ? body.cliBridgeMode : undefined,
       telegramBotToken:
         typeof body.telegramBotToken === "string"
@@ -255,7 +246,7 @@ export function registerSettingsRoutes(api: Hono): void {
       anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
       claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
       openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
-      codexDeviceAuthConfigured: hasContainerCodexAuth(),
+      codexDeviceAuthConfigured: hasCodexAuth(),
       onboardingCompleted: settings.onboardingCompleted,
       linearApiKeyConfigured: !!settings.linearApiKey.trim() || connectionsAfterUpdate.length > 0,
       linearConnectionCount: connectionsAfterUpdate.length,
@@ -270,7 +261,6 @@ export function registerSettingsRoutes(api: Hono): void {
       aiValidationAutoDeny: settings.aiValidationAutoDeny,
       publicUrl: settings.publicUrl,
       updateChannel: settings.updateChannel,
-      dockerAutoUpdate: settings.dockerAutoUpdate,
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",

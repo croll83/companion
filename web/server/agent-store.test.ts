@@ -273,6 +273,22 @@ describe("getAgent", () => {
     expect(loaded).not.toBeNull();
     expect((loaded!.triggers as Record<string, unknown>)?.chat).toBeUndefined();
   });
+
+  it("ignores the legacy container block of agents saved before containers were removed", () => {
+    // Older agents could carry a Docker `container` config. Loading them must
+    // still work, and the dead config must not reach the API (or exports).
+    const agent = agentStore.createAgent(makeAgentInput({ name: "Legacy Container" }));
+    const agentFile = join(agentsDir(), `${agent.id}.json`);
+    const raw = JSON.parse(readFileSync(agentFile, "utf-8"));
+    raw.container = { image: "the-companion:latest", ports: [3000] };
+    writeFileSync(agentFile, JSON.stringify(raw), "utf-8");
+
+    const loaded = agentStore.getAgent(agent.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.name).toBe("Legacy Container");
+    expect("container" in loaded!).toBe(false);
+    expect(agentStore.listAgents().find((a) => a.id === agent.id)).not.toHaveProperty("container");
+  });
 });
 
 // ===========================================================================
@@ -508,12 +524,6 @@ describe("edge cases", () => {
         webhook: { enabled: true, secret: "abc123" },
         schedule: { enabled: true, expression: "0 8 * * *", recurring: true },
       },
-      container: {
-        image: "ubuntu:22.04",
-        ports: [3000, 8080],
-        volumes: ["/data:/data"],
-        initScript: "apt-get update",
-      },
       mcpServers: {
         myServer: { type: "stdio" as const, command: "node", args: ["server.js"] },
       },
@@ -545,10 +555,6 @@ describe("edge cases", () => {
     expect(retrieved!.triggers!.schedule!.enabled).toBe(true);
     expect(retrieved!.triggers!.schedule!.expression).toBe("0 8 * * *");
     expect(retrieved!.triggers!.schedule!.recurring).toBe(true);
-    expect(retrieved!.container!.image).toBe("ubuntu:22.04");
-    expect(retrieved!.container!.ports).toEqual([3000, 8080]);
-    expect(retrieved!.container!.volumes).toEqual(["/data:/data"]);
-    expect(retrieved!.container!.initScript).toBe("apt-get update");
     expect(retrieved!.mcpServers!.myServer).toEqual({
       type: "stdio",
       command: "node",

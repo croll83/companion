@@ -794,8 +794,6 @@ describe("AgentsPage", () => {
   it("edit mode deserializes all agent fields into form", async () => {
     // When editing an agent with all fields configured, the form should
     // correctly deserialize all values from AgentInfo to AgentFormData.
-    // Docker container fields are no longer part of the agent editor (they
-    // belong in Environment profiles via EnvManager).
     const agent = makeAgent({
       id: "a1",
       name: "Full Agent",

@@ -12,7 +12,6 @@ function makeSession(overrides: Partial<SessionItemType> = {}): SessionItemType 
     model: "claude-sonnet-4-6",
     cwd: "/workspace/app",
     gitBranch: "",
-    isContainerized: false,
     gitAhead: 0,
     gitBehind: 0,
     linesAdded: 0,
@@ -64,15 +63,6 @@ describe("SessionItem", () => {
 
     expect(screen.getByText("claude-sonnet-4-6")).toBeInTheDocument();
     expect(screen.getByText("/workspace/app")).toBeInTheDocument();
-  });
-
-  it("renders the Docker logo asset when session is containerized", () => {
-    // Regression guard for THE-195: keep using the transparent Docker logo asset.
-    render(<SessionItem {...buildProps({ session: makeSession({ isContainerized: true }) })} />);
-
-    expect(screen.getByTitle("Docker")).toBeInTheDocument();
-    const dockerLogo = screen.getByAltText("Docker logo");
-    expect(dockerLogo).toHaveAttribute("src", "/logo-docker.svg");
   });
 
   it("enters rename flow on double-click", () => {

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
+import { axe } from "vitest-axe";
 import { render, screen } from "@testing-library/react";
 import { SessionCreationProgress } from "./SessionCreationProgress.js";
 import type { CreationProgressEvent } from "../types.js";
@@ -24,7 +25,7 @@ describe("SessionCreationProgress", () => {
 
   it("shows spinner for in_progress steps (via animate-spin class)", () => {
     const steps: CreationProgressEvent[] = [
-      { step: "pulling_image", label: "Pulling Docker image...", status: "in_progress" },
+      { step: "launching_cli", label: "Launching Claude Code...", status: "in_progress" },
     ];
     const { container } = render(<SessionCreationProgress steps={steps} />);
     // The spinner element has the animate-spin class
@@ -44,7 +45,7 @@ describe("SessionCreationProgress", () => {
 
   it("shows X SVG for error steps", () => {
     const steps: CreationProgressEvent[] = [
-      { step: "building_image", label: "Build failed", status: "error" },
+      { step: "creating_worktree", label: "Worktree failed", status: "error" },
     ];
     const { container } = render(<SessionCreationProgress steps={steps} />);
     // Error steps have a red X SVG with the cc-error class
@@ -54,7 +55,7 @@ describe("SessionCreationProgress", () => {
 
   it("displays error message box when error prop is set", () => {
     const steps: CreationProgressEvent[] = [
-      { step: "pulling_image", label: "Pull failed", status: "error" },
+      { step: "fetching_git", label: "Fetch failed", status: "error" },
     ];
     render(
       <SessionCreationProgress
@@ -89,16 +90,28 @@ describe("SessionCreationProgress", () => {
   });
 
   it("renders multiple steps in correct order", () => {
-    // Verifies steps appear in the order provided (container session flow)
+    // Verifies steps appear in the order provided (worktree session flow)
     const steps: CreationProgressEvent[] = [
       { step: "resolving_env", label: "Step 1", status: "done" },
-      { step: "pulling_image", label: "Step 2", status: "done" },
-      { step: "creating_container", label: "Step 3", status: "in_progress" },
+      { step: "creating_worktree", label: "Step 2", status: "done" },
+      { step: "launching_cli", label: "Step 3", status: "in_progress" },
     ];
     const { container } = render(<SessionCreationProgress steps={steps} />);
     const labels = Array.from(container.querySelectorAll("span.text-sm")).map(
       (el) => el.textContent,
     );
     expect(labels).toEqual(["Step 1", "Step 2", "Step 3"]);
+  });
+
+  // Status icons are decorative and the error box is plain text; the step list
+  // must not introduce any axe violations in the launch overlay.
+  it("passes axe accessibility checks with every status and an error", async () => {
+    const steps: CreationProgressEvent[] = [
+      { step: "resolving_env", label: "Environment resolved", status: "done" },
+      { step: "fetching_git", label: "Fetch failed", status: "error" },
+      { step: "launching_cli", label: "Launching Claude Code...", status: "in_progress" },
+    ];
+    const { container } = render(<SessionCreationProgress steps={steps} error="Boom" />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

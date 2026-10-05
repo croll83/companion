@@ -44,8 +44,8 @@ import {
 import { LinearLogo } from "./LinearLogo.js";
 import { SessionCreationProgress } from "./SessionCreationProgress.js";
 import { SessionLaunchOverlay } from "./SessionLaunchOverlay.js";
+import { SessionBrowserPane } from "./SessionBrowserPane.js";
 import { PlaygroundUpdateOverlay } from "./UpdateOverlay.js";
-import { PlaygroundDockerUpdateDialog } from "./DockerUpdateDialog.js";
 import { SessionItem } from "./SessionItem.js";
 import type { CreationProgressEvent } from "../types.js";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
@@ -809,7 +809,6 @@ export function Playground() {
       is_compacting: false,
       git_branch: "feat/jwt-auth",
       is_worktree: false,
-      is_containerized: true,
       repo_root: "/Users/stan/Dev/project",
       git_ahead: 3,
       git_behind: 0,
@@ -2588,7 +2587,7 @@ export function Playground() {
           description="Step-by-step progress indicator shown during session creation (SSE streaming)"
         >
           <div className="space-y-4 max-w-md">
-            <Card label="In progress (container session)">
+            <Card label="In progress (branch checkout)">
               <SessionCreationProgress
                 steps={
                   [
@@ -2598,18 +2597,13 @@ export function Playground() {
                       status: "done",
                     },
                     {
-                      step: "pulling_image",
-                      label: "Pulling Docker image...",
+                      step: "fetching_git",
+                      label: "Fetching from remote...",
                       status: "done",
                     },
                     {
-                      step: "creating_container",
-                      label: "Starting container...",
-                      status: "in_progress",
-                    },
-                    {
-                      step: "launching_cli",
-                      label: "Launching Claude Code...",
+                      step: "checkout_branch",
+                      label: "Checking out feat/auth...",
                       status: "in_progress",
                     },
                   ] satisfies CreationProgressEvent[]
@@ -2649,7 +2643,7 @@ export function Playground() {
                 }
               />
             </Card>
-            <Card label="Error during image pull">
+            <Card label="Error during worktree creation">
               <SessionCreationProgress
                 steps={
                   [
@@ -2659,92 +2653,18 @@ export function Playground() {
                       status: "done",
                     },
                     {
-                      step: "pulling_image",
-                      label: "Pulling Docker image...",
+                      step: "fetching_git",
+                      label: "Fetch complete",
+                      status: "done",
+                    },
+                    {
+                      step: "creating_worktree",
+                      label: "Creating worktree...",
                       status: "error",
                     },
                   ] satisfies CreationProgressEvent[]
                 }
-                error="Failed to pull docker.io/croll83/the-companion:latest — connection timed out after 30s"
-              />
-            </Card>
-            <Card label="With streaming init script logs">
-              <SessionCreationProgress
-                steps={
-                  [
-                    {
-                      step: "resolving_env",
-                      label: "Resolving environment...",
-                      status: "done",
-                    },
-                    {
-                      step: "pulling_image",
-                      label: "Image ready",
-                      status: "done",
-                    },
-                    {
-                      step: "creating_container",
-                      label: "Container running",
-                      status: "done",
-                    },
-                    {
-                      step: "running_init_script",
-                      label: "Running init script...",
-                      status: "in_progress",
-                      detail: "Installing dependencies...",
-                    },
-                  ] satisfies CreationProgressEvent[]
-                }
-              />
-            </Card>
-            <Card label="With streaming image pull logs">
-              <SessionCreationProgress
-                steps={
-                  [
-                    {
-                      step: "resolving_env",
-                      label: "Resolving environment...",
-                      status: "done",
-                    },
-                    {
-                      step: "pulling_image",
-                      label: "Pulling Docker image...",
-                      status: "in_progress",
-                      detail: "Downloading layer 3/7 [=====>    ] 45%",
-                    },
-                  ] satisfies CreationProgressEvent[]
-                }
-              />
-            </Card>
-            <Card label="Error during init script">
-              <SessionCreationProgress
-                steps={
-                  [
-                    {
-                      step: "resolving_env",
-                      label: "Resolving environment...",
-                      status: "done",
-                    },
-                    {
-                      step: "pulling_image",
-                      label: "Pulling Docker image...",
-                      status: "done",
-                    },
-                    {
-                      step: "creating_container",
-                      label: "Starting container...",
-                      status: "done",
-                    },
-                    {
-                      step: "running_init_script",
-                      label: "Running init script...",
-                      status: "error",
-                    },
-                  ] satisfies CreationProgressEvent[]
-                }
-                error={
-                  "npm ERR! code ENOENT\nnpm ERR! syscall open\nnpm ERR! path /app/package.json"
-                }
+                error="fatal: '/Users/stan/Dev/project-wt/feat-auth' already exists"
               />
             </Card>
           </div>
@@ -2755,7 +2675,7 @@ export function Playground() {
           description="Full-screen overlay shown during session creation, replacing the inline progress list"
         >
           <div className="space-y-4">
-            <Card label="In progress (container session)">
+            <Card label="In progress (pulling branch, with detail)">
               <div className="relative h-[360px] bg-cc-bg rounded-lg overflow-hidden border border-cc-border">
                 <SessionLaunchOverlay
                   steps={
@@ -2766,19 +2686,15 @@ export function Playground() {
                         status: "done",
                       },
                       {
-                        step: "pulling_image",
-                        label: "Pulling Docker image...",
+                        step: "fetching_git",
+                        label: "Fetch complete",
                         status: "done",
                       },
                       {
-                        step: "creating_container",
-                        label: "Starting container...",
+                        step: "pulling_git",
+                        label: "Pulling latest changes...",
                         status: "in_progress",
-                      },
-                      {
-                        step: "launching_cli",
-                        label: "Launching Claude Code...",
-                        status: "in_progress",
+                        detail: "Fast-forward 3f2a1c9..8be04d7",
                       },
                     ] satisfies CreationProgressEvent[]
                   }
@@ -2829,13 +2745,13 @@ export function Playground() {
                         status: "done",
                       },
                       {
-                        step: "pulling_image",
-                        label: "Pulling Docker image...",
+                        step: "creating_worktree",
+                        label: "Creating worktree...",
                         status: "error",
                       },
                     ] satisfies CreationProgressEvent[]
                   }
-                  error="Failed to pull docker.io/croll83/the-companion:latest — connection timed out after 30s"
+                  error="fatal: '/Users/stan/Dev/project-wt/feat-auth' already exists"
                   backend="claude"
                   onCancel={() => {}}
                 />
@@ -2893,26 +2809,6 @@ export function Playground() {
             </Card>
           </div>
         </Section>
-        {/* ─── Docker Update Dialog ─────────────────────────── */}
-        <Section
-          title="Docker Update Dialog"
-          description="Post-update dialog asking whether to also update the sandbox Docker image"
-        >
-          <div className="space-y-4">
-            <Card label="Prompt phase">
-              <PlaygroundDockerUpdateDialog phase="prompt" />
-            </Card>
-            <Card label="Pulling phase">
-              <PlaygroundDockerUpdateDialog phase="pulling" />
-            </Card>
-            <Card label="Done phase">
-              <PlaygroundDockerUpdateDialog phase="done" />
-            </Card>
-            <Card label="Error phase">
-              <PlaygroundDockerUpdateDialog phase="error" />
-            </Card>
-          </div>
-        </Section>
         {/* ─── CLAUDE.md Editor ──────────────────────────────── */}
         <Section
           title="CLAUDE.md Editor"
@@ -2930,91 +2826,19 @@ export function Playground() {
         {/* ─── Session Items ──────────────────────────────────── */}
         <Section
           title="Session Items"
-          description="Sidebar session rows — status dot, backend badge, Docker indicator, archive on hover"
+          description="Sidebar session rows — status dot, backend badge, archive on hover"
         >
           <PlaygroundSessionItems />
         </Section>
-        {/* ─── Browser Preview States ────────────────────────────── */}
+        {/* ─── Browser Preview ────────────────────────────────────── */}
         <Section
           title="Browser Preview"
-          description="Browser preview panel — host mode (HTTP proxy) and container mode (noVNC) — loading, error, and active states"
+          description="Previews a dev server on this host through the companion's HTTP proxy — type a localhost URL and press Go"
         >
           <div className="space-y-4 max-w-3xl">
-            <Card label="Loading state">
-              <div className="h-48 flex flex-col items-center justify-center gap-3 p-4 bg-cc-bg rounded border border-cc-border">
-                <div className="w-5 h-5 border-2 border-cc-primary border-t-transparent rounded-full animate-spin" />
-                <div className="text-sm text-cc-muted">Starting browser preview...</div>
-              </div>
-            </Card>
-            <Card label="Error state">
-              <div className="h-48 flex items-center justify-center p-4 bg-cc-bg rounded border border-cc-border">
-                <div className="px-4 py-3 rounded-lg bg-cc-error/10 border border-cc-error/30 text-sm text-cc-error max-w-md text-center">
-                  Browser preview unavailable.
-                </div>
-              </div>
-            </Card>
-            <Card label="Host mode (proxy — before navigation)">
-              <div className="h-48 flex flex-col bg-cc-bg rounded border border-cc-border overflow-hidden">
-                <div className="shrink-0 px-3 py-2 border-b border-cc-border flex items-center gap-2">
-                  <button
-                    type="button"
-                    className="flex items-center justify-center w-7 h-7 rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-                    aria-label="Reload browser"
-                    title="Reload"
-                  >
-                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                      <path d="M13.65 2.35a1 1 0 0 0-1.3 0L11 3.7A5.99 5.99 0 0 0 2 8a1 1 0 1 0 2 0 4 4 0 0 1 6.29-3.29L8.65 6.35a1 1 0 0 0 .7 1.7H13a1 1 0 0 0 1-1V3.4a1 1 0 0 0-.35-.7z M14 8a1 1 0 1 0-2 0 4 4 0 0 1-6.29 3.29l1.64-1.64a1 1 0 0 0-.7-1.7H3.05a1 1 0 0 0-1 1v3.65a1 1 0 0 0 1.7.7L5 11.7A5.99 5.99 0 0 0 14 8z" />
-                    </svg>
-                  </button>
-                  <input
-                    type="text"
-                    defaultValue="http://localhost:3000"
-                    className="flex-1 px-2 py-1 text-xs rounded bg-cc-bg border border-cc-border text-cc-fg placeholder:text-cc-muted focus:outline-none focus:border-cc-primary"
-                    aria-label="Navigate URL"
-                    readOnly
-                  />
-                  <button
-                    type="button"
-                    className="px-3 py-1 rounded text-xs font-medium bg-cc-primary text-white hover:bg-cc-primary-hover transition-colors cursor-pointer"
-                  >
-                    Go
-                  </button>
-                </div>
-                <div className="flex-1 flex items-center justify-center text-xs text-cc-muted">
-                  Enter a URL and click Go to preview.
-                </div>
-              </div>
-            </Card>
-            <Card label="Container mode (noVNC — active)">
-              <div className="h-48 flex flex-col bg-cc-bg rounded border border-cc-border overflow-hidden">
-                <div className="shrink-0 px-3 py-2 border-b border-cc-border flex items-center gap-2">
-                  <button
-                    type="button"
-                    className="flex items-center justify-center w-7 h-7 rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-                    aria-label="Reload browser"
-                    title="Reload"
-                  >
-                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                      <path d="M13.65 2.35a1 1 0 0 0-1.3 0L11 3.7A5.99 5.99 0 0 0 2 8a1 1 0 1 0 2 0 4 4 0 0 1 6.29-3.29L8.65 6.35a1 1 0 0 0 .7 1.7H13a1 1 0 0 0 1-1V3.4a1 1 0 0 0-.35-.7z M14 8a1 1 0 1 0-2 0 4 4 0 0 1-6.29 3.29l1.64-1.64a1 1 0 0 0-.7-1.7H3.05a1 1 0 0 0-1 1v3.65a1 1 0 0 0 1.7.7L5 11.7A5.99 5.99 0 0 0 14 8z" />
-                    </svg>
-                  </button>
-                  <input
-                    type="text"
-                    defaultValue="http://localhost:3000"
-                    className="flex-1 px-2 py-1 text-xs rounded bg-cc-bg border border-cc-border text-cc-fg placeholder:text-cc-muted focus:outline-none focus:border-cc-primary"
-                    aria-label="Navigate URL"
-                    readOnly
-                  />
-                  <button
-                    type="button"
-                    className="px-3 py-1 rounded text-xs font-medium bg-cc-primary text-white hover:bg-cc-primary-hover transition-colors cursor-pointer"
-                  >
-                    Go
-                  </button>
-                </div>
-                <div className="flex-1 flex items-center justify-center text-xs text-cc-muted">
-                  noVNC iframe would render here
-                </div>
+            <Card label="Before navigation (interactive)">
+              <div className="h-48 rounded border border-cc-border overflow-hidden">
+                <SessionBrowserPane sessionId="playground-browser" />
               </div>
             </Card>
           </div>
@@ -3075,7 +2899,6 @@ function mockSession(overrides: Partial<SessionItemType>): SessionItemType {
     model: "claude-sonnet-4-20250514",
     cwd: "/Users/dev/project",
     gitBranch: "main",
-    isContainerized: false,
     gitAhead: 0,
     gitBehind: 0,
     linesAdded: 0,
@@ -3132,15 +2955,14 @@ function PlaygroundSessionItems() {
         </div>
       </Card>
 
-      {/* Running — Codex + Docker */}
-      <Card label="Running — Codex + Docker">
+      {/* Running — Codex */}
+      <Card label="Running — Codex">
         <div className="bg-cc-sidebar rounded-lg p-1">
           <SessionItem
             session={mockSession({
               isConnected: true,
               status: "running",
               backendType: "codex",
-              isContainerized: true,
             })}
             isActive={false}
             sessionName="Add payment flow"
@@ -3224,7 +3046,6 @@ function PlaygroundSessionItems() {
               isConnected: true,
               status: "running",
               backendType: "claude",
-              isContainerized: true,
             })}
             isActive={true}
             sessionName="Build new dashboard"
@@ -3297,7 +3118,7 @@ function Card({
 function PlaygroundTerminalTabsMock() {
   const tabs = [
     { id: "host", label: "Terminal", cwd: "/Users/demo/project" },
-    { id: "docker", label: "Docker", cwd: "/workspace" },
+    { id: "host-2", label: "Terminal 2", cwd: "/Users/demo/project/web" },
   ];
   const [active, setActive] = useState("host");
   const [placement, setPlacement] = useState<
@@ -3675,7 +3496,6 @@ function CodexPlaygroundDemo() {
       is_compacting: false,
       git_branch: "main",
       is_worktree: false,
-      is_containerized: false,
       repo_root: "/Users/demo/project",
       git_ahead: 0,
       git_behind: 0,
@@ -4003,7 +3823,6 @@ function PlaygroundAiValidationToggle({ enabled }: { enabled: boolean }) {
       is_compacting: false,
       git_branch: "main",
       is_worktree: false,
-      is_containerized: false,
       repo_root: "/workspace",
       git_ahead: 0,
       git_behind: 0,

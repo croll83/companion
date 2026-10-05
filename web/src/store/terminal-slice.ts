@@ -5,7 +5,6 @@ export interface QuickTerminalTab {
   id: string;
   label: string;
   cwd: string;
-  containerId?: string;
 }
 
 export type QuickTerminalPlacement = "top" | "right" | "bottom" | "left";
@@ -23,13 +22,12 @@ export interface TerminalSlice {
   activeQuickTerminalTabId: string | null;
   quickTerminalPlacement: QuickTerminalPlacement;
   quickTerminalNextHostIndex: number;
-  quickTerminalNextDockerIndex: number;
   terminalOpen: boolean;
   terminalCwd: string | null;
   terminalId: string | null;
 
   setQuickTerminalOpen: (open: boolean) => void;
-  openQuickTerminal: (opts: { target: "host" | "docker"; cwd: string; containerId?: string; reuseIfExists?: boolean }) => void;
+  openQuickTerminal: (opts: { cwd: string; reuseIfExists?: boolean }) => void;
   closeQuickTerminalTab: (tabId: string) => void;
   setActiveQuickTerminalTabId: (tabId: string | null) => void;
   resetQuickTerminal: () => void;
@@ -46,7 +44,6 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   activeQuickTerminalTabId: null,
   quickTerminalPlacement: getInitialQuickTerminalPlacement(),
   quickTerminalNextHostIndex: 1,
-  quickTerminalNextDockerIndex: 1,
   terminalOpen: false,
   terminalCwd: null,
   terminalId: null,
@@ -55,10 +52,7 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   openQuickTerminal: (opts) =>
     set((s) => {
       if (opts.reuseIfExists) {
-        const existing = s.quickTerminalTabs.find((t) =>
-          t.cwd === opts.cwd
-          && t.containerId === opts.containerId,
-        );
+        const existing = s.quickTerminalTabs.find((t) => t.cwd === opts.cwd);
         if (existing) {
           return {
             quickTerminalOpen: true,
@@ -67,25 +61,17 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         }
       }
 
-      const isDocker = opts.target === "docker";
       const hostIndex = s.quickTerminalNextHostIndex;
-      const dockerIndex = s.quickTerminalNextDockerIndex;
-      const nextHostIndex = isDocker ? hostIndex : hostIndex + 1;
-      const nextDockerIndex = isDocker ? dockerIndex + 1 : dockerIndex;
       const nextTab: QuickTerminalTab = {
-        id: `${opts.target}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        label: isDocker
-          ? `Docker ${dockerIndex}`
-          : (hostIndex === 1 ? "Terminal" : `Terminal ${hostIndex}`),
+        id: `host-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        label: hostIndex === 1 ? "Terminal" : `Terminal ${hostIndex}`,
         cwd: opts.cwd,
-        containerId: opts.containerId,
       };
       return {
         quickTerminalOpen: true,
         quickTerminalTabs: [...s.quickTerminalTabs, nextTab],
         activeQuickTerminalTabId: nextTab.id,
-        quickTerminalNextHostIndex: nextHostIndex,
-        quickTerminalNextDockerIndex: nextDockerIndex,
+        quickTerminalNextHostIndex: hostIndex + 1,
       };
     }),
   closeQuickTerminalTab: (tabId) =>
@@ -105,7 +91,6 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       quickTerminalTabs: [],
       activeQuickTerminalTabId: null,
       quickTerminalNextHostIndex: 1,
-      quickTerminalNextDockerIndex: 1,
     }),
 
   setTerminalOpen: (open) => set({ terminalOpen: open }),

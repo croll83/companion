@@ -963,85 +963,6 @@ describe("SettingsPage", () => {
     expect(mockApi.updateSettings).not.toHaveBeenCalled();
   });
 
-  // ─── Docker Auto-Update toggle tests ──────────────────────────────────
-
-  // The Docker auto-update toggle renders in the Updates section and calls
-  // updateSettings with dockerAutoUpdate when clicked.
-  it("toggles dockerAutoUpdate and calls updateSettings", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "stable",
-      dockerAutoUpdate: false,
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    // Find the toggle by its role=switch and aria-checked attribute
-    const toggle = screen.getByRole("switch", { name: "" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    // Click to enable
-    fireEvent.click(toggle);
-
-    await waitFor(() => {
-      expect(mockApi.updateSettings).toHaveBeenCalledWith({ dockerAutoUpdate: true });
-    });
-  });
-
-  // When the API call for dockerAutoUpdate fails, the toggle should revert
-  // to its previous value (optimistic update rollback).
-  it("reverts dockerAutoUpdate toggle on API failure", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "stable",
-      dockerAutoUpdate: false,
-    });
-    mockApi.updateSettings.mockRejectedValueOnce(new Error("network error"));
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    const toggle = screen.getByRole("switch", { name: "" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    // Click to enable — optimistic update sets it to true
-    fireEvent.click(toggle);
-
-    // After the API rejects, the toggle should revert back to false
-    await waitFor(() => {
-      expect(toggle).toHaveAttribute("aria-checked", "false");
-    });
-  });
-
-  // When settings load with dockerAutoUpdate: true, the toggle should
-  // reflect the enabled state.
-  it("shows dockerAutoUpdate as enabled when loaded from settings", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "stable",
-      dockerAutoUpdate: true,
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    const toggle = screen.getByRole("switch", { name: "" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-  });
-
   // ─── Webhooks section tests ──────────────────────────────────
 
   // The Webhooks category should appear in the sidebar navigation so users
@@ -1792,8 +1713,8 @@ describe("SettingsPage – extended behaviour", () => {
     expect(screen.getByRole("button", { name: "Check for updates" })).not.toBeDisabled();
   });
 
-  // A failed update must clear the post-restart Docker prompt flag and re-enable the button.
-  it("clears the docker prompt flag and shows the error when the update fails", async () => {
+  // A failed update must show the error and re-enable the button.
+  it("shows the error and re-enables the button when the update fails", async () => {
     mockState = createMockState({
       updateInfo: {
         currentVersion: "0.22.1",
@@ -1808,7 +1729,6 @@ describe("SettingsPage – extended behaviour", () => {
     await renderLoaded();
     fireEvent.click(screen.getByRole("button", { name: "Update & Restart" }));
     expect(await screen.findByText("update failed")).toBeInTheDocument();
-    expect(localStorage.getItem("companion_docker_prompt_pending")).toBeNull();
     expect(screen.getByRole("button", { name: "Update & Restart" })).not.toBeDisabled();
     expect(mockState.setUpdateOverlayActive).not.toHaveBeenCalled();
   });

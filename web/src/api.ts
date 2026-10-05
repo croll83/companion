@@ -189,18 +189,6 @@ async function del<T = unknown>(path: string, body?: object): Promise<T> {
   }
 }
 
-export interface ContainerCreateOpts {
-  image?: string;
-  ports?: number[];
-  volumes?: string[];
-  env?: Record<string, string>;
-}
-
-export interface ContainerStatus {
-  available: boolean;
-  version: string | null;
-}
-
 export interface CreateSessionOpts {
   model?: string;
   /** Reasoning-effort level for effort-capable Claude models. */
@@ -216,9 +204,6 @@ export interface CreateSessionOpts {
   createBranch?: boolean;
   useWorktree?: boolean;
   backend?: "claude" | "codex";
-  sandboxEnabled?: boolean;
-  sandboxSlug?: string;
-  container?: ContainerCreateOpts;
   resumeSessionAt?: string;
   forkSession?: boolean;
   linearConnectionId?: string;
@@ -311,23 +296,6 @@ export interface CompanionEnv {
   updatedAt: number;
 }
 
-export interface CompanionSandbox {
-  name: string;
-  slug: string;
-  initScript?: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ImagePullState {
-  image: string;
-  status: "idle" | "pulling" | "ready" | "error";
-  progress: string[];
-  error?: string;
-  startedAt?: number;
-  completedAt?: number;
-}
-
 export interface DirEntry {
   name: string;
   path: string;
@@ -371,14 +339,7 @@ export interface UsageLimits {
 export interface EditorStartResult {
   available: boolean;
   installed: boolean;
-  mode: "host" | "container";
-  url?: string;
-  message?: string;
-}
-
-export interface BrowserStartResult {
-  available: boolean;
-  mode: "host" | "container";
+  mode: "host";
   url?: string;
   message?: string;
 }
@@ -403,7 +364,6 @@ export interface AppSettings {
   aiValidationAutoDeny: boolean;
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
-  dockerAutoUpdate: boolean;
   cliBridgeMode: CliBridgeMode;
   telegramBotTokenConfigured: boolean;
   /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
@@ -649,12 +609,6 @@ export interface AgentInfo {
   prompt: string;
   mcpServers?: Record<string, McpServerConfigAgent>;
   skills?: string[];
-  container?: {
-    image?: string;
-    ports?: number[];
-    volumes?: string[];
-    initScript?: string;
-  };
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
@@ -964,31 +918,6 @@ export const api = {
   ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),
 
-  // Sandboxes
-  listSandboxes: () => get<CompanionSandbox[]>("/sandboxes"),
-  getSandbox: (slug: string) =>
-    get<CompanionSandbox>(`/sandboxes/${encodeURIComponent(slug)}`),
-  createSandbox: (name: string, opts?: { initScript?: string }) =>
-    post<CompanionSandbox>("/sandboxes", { name, ...opts }),
-  updateSandbox: (
-    slug: string,
-    data: {
-      name?: string;
-      initScript?: string;
-    },
-  ) => put<CompanionSandbox>(`/sandboxes/${encodeURIComponent(slug)}`, data),
-  deleteSandbox: (slug: string) => del(`/sandboxes/${encodeURIComponent(slug)}`),
-  testInitScript: (slug: string, cwd: string, initScript?: string) =>
-    post<{ success: boolean; exitCode: number; output: string }>(
-      `/sandboxes/${encodeURIComponent(slug)}/test-init`,
-      { cwd, initScript },
-    ),
-
-  buildBaseImage: () =>
-    post<{ ok: boolean; tag: string }>("/docker/build-base"),
-  getBaseImageStatus: () =>
-    get<{ exists: boolean; tag: string }>("/docker/base-image"),
-
   // Settings
   getSettings: () => get<AppSettings>("/settings"),
   updateSettings: (data: {
@@ -1009,7 +938,6 @@ export const api = {
     linearOAuthWebhookSecret?: string;
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
-    dockerAutoUpdate?: boolean;
     cliBridgeMode?: CliBridgeMode;
     telegramBotToken?: string;
     timeZone?: string;
@@ -1142,32 +1070,10 @@ export const api = {
   getBackendModels: (backendId: string) =>
     get<BackendModelInfo[]>(`/backends/${encodeURIComponent(backendId)}/models`),
 
-  // Containers
-  getContainerStatus: () => get<ContainerStatus>("/containers/status"),
-  getContainerImages: () => get<string[]>("/containers/images"),
-
-  // Image pull manager
-  getImageStatus: (tag: string) =>
-    get<ImagePullState>(`/images/${encodeURIComponent(tag)}/status`),
-  pullImage: (tag: string) =>
-    post<{ ok: boolean; state: ImagePullState }>(`/images/${encodeURIComponent(tag)}/pull`),
-
   // Editor
   startEditor: (sessionId: string) =>
     post<EditorStartResult>(
       `/sessions/${encodeURIComponent(sessionId)}/editor/start`,
-    ),
-
-  // Browser preview
-  startBrowser: (sessionId: string, url?: string) =>
-    post<BrowserStartResult>(
-      `/sessions/${encodeURIComponent(sessionId)}/browser/start`,
-      url ? { url } : undefined,
-    ),
-  navigateBrowser: (sessionId: string, url: string) =>
-    post<{ ok?: boolean; error?: string }>(
-      `/sessions/${encodeURIComponent(sessionId)}/browser/navigate`,
-      { url },
     ),
 
   // Editor filesystem
@@ -1216,8 +1122,8 @@ export const api = {
     get<UsageLimits>(`/sessions/${encodeURIComponent(sessionId)}/usage-limits`),
 
   // Terminal
-  spawnTerminal: (cwd: string, cols?: number, rows?: number, opts?: { containerId?: string }) =>
-    post<{ terminalId: string }>("/terminal/spawn", { cwd, cols, rows, containerId: opts?.containerId }),
+  spawnTerminal: (cwd: string, cols?: number, rows?: number) =>
+    post<{ terminalId: string }>("/terminal/spawn", { cwd, cols, rows }),
   killTerminal: (terminalId: string) =>
     post<{ ok: boolean }>("/terminal/kill", { terminalId }),
   getTerminal: (terminalId?: string) =>

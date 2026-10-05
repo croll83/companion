@@ -2,18 +2,11 @@ import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { WorktreeTracker } from "./worktree-tracker.js";
 import type { CreationStepId } from "./session-types.js";
-import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
 import * as envManager from "./env-manager.js";
-import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
-import { containerManager } from "./container-manager.js";
-import { hasContainerClaudeAuth } from "./claude-container-auth.js";
-import { hasContainerCodexAuth } from "./codex-container-auth.js";
-import { imagePullManager } from "./image-pull-manager.js";
 import { getConnection } from "./linear-connections.js";
 import { buildLinearSystemPrompt } from "./linear-prompt-builder.js";
 import { discoverCommandsAndSkills } from "./commands-discovery.js";
-import { VSCODE_EDITOR_CONTAINER_PORT, CODEX_APP_SERVER_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -100,13 +93,6 @@ export async function executeSessionCreation(
     console.warn(`[session-creation] Environment "${body.envSlug}" not found, ignoring`);
   }
 
-  // Resolve sandbox configuration
-  const sandboxEnabled = body.sandboxEnabled === true;
-  const companionSandbox = body.sandboxSlug ? sandboxManager.getSandbox(body.sandboxSlug as string) : null;
-  if (sandboxEnabled && body.sandboxSlug && !companionSandbox) {
-    throw new SessionCreationError(`Sandbox "${body.sandboxSlug}" not found`, 404, "resolving_env");
-  }
-
   // Inject LINEAR_API_KEY if a Linear connection is specified
   let linearSystemPrompt: string | undefined;
   if (body.linearConnectionId) {
@@ -117,18 +103,9 @@ export async function executeSessionCreation(
     }
   }
 
-  // Resolve Docker image early
-  let effectiveImage: string | null = null;
-  if (sandboxEnabled) {
-    effectiveImage = "the-companion:latest";
-  } else if ((body.container as Record<string, unknown>)?.image) {
-    effectiveImage = (body.container as Record<string, unknown>).image as string;
-  }
-  const isDockerSession = !!effectiveImage;
-
   await emit(onProgress, "resolving_env", "Environment resolved", "done");
 
-  // -- Step: Git operations (host-only) --
+  // -- Step: Git operations --
   let cwd = body.cwd as string | undefined;
   let worktreeInfo: {
     isWorktree: boolean;
@@ -143,7 +120,7 @@ export async function executeSessionCreation(
     throw new SessionCreationError("Invalid branch name", 400, "checkout_branch");
   }
 
-  if (!isDockerSession && body.useWorktree && body.branch && cwd) {
+  if (body.useWorktree && body.branch && cwd) {
     const repoInfo = gitUtils.getRepoInfo(cwd);
     if (repoInfo) {
       await emit(onProgress, "fetching_git", "Fetching from remote...", "in_progress");
@@ -169,7 +146,7 @@ export async function executeSessionCreation(
       };
       await emit(onProgress, "creating_worktree", "Worktree ready", "done");
     }
-  } else if (!isDockerSession && body.branch && cwd) {
+  } else if (body.branch && cwd) {
     const repoInfo = gitUtils.getRepoInfo(cwd);
     if (repoInfo) {
       await emit(onProgress, "fetching_git", "Fetching from remote...", "in_progress");
@@ -197,209 +174,6 @@ export async function executeSessionCreation(
     }
   }
 
-  // -- Step: Container creation --
-  let containerInfo: ContainerInfo | undefined;
-  let containerId: string | undefined;
-  let containerName: string | undefined;
-  let containerImage: string | undefined;
-  let tempId: string | undefined;
-
-  // Validate cwd before container operations (cwd! assertions below rely on this)
-  if (effectiveImage && !cwd) {
-    throw new SessionCreationError(
-      "Working directory (cwd) is required for containerized sessions",
-      400,
-    );
-  }
-
-  // Auth checks for containerized sessions
-  if (effectiveImage && backend === "claude" && !hasContainerClaudeAuth(envVars)) {
-    throw new SessionCreationError(
-      "Containerized Claude requires auth available inside the container. " +
-      "Set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_AUTH_TOKEN) in the selected environment.",
-      400,
-    );
-  }
-  if (effectiveImage && backend === "codex" && !hasContainerCodexAuth(envVars)) {
-    throw new SessionCreationError(
-      "Containerized Codex requires auth available inside the container. " +
-      "Set OPENAI_API_KEY in the selected environment, or ensure ~/.codex/auth.json exists on the host.",
-      400,
-    );
-  }
-
-  if (effectiveImage) {
-    // -- Image pull --
-    if (!imagePullManager.isReady(effectiveImage)) {
-      const pullState = imagePullManager.getState(effectiveImage);
-      if (pullState.status === "idle" || pullState.status === "error") {
-        imagePullManager.ensureImage(effectiveImage);
-      }
-
-      await emit(onProgress, "pulling_image", "Pulling Docker image...", "in_progress");
-
-      // Stream pull progress lines if the caller wants progress
-      let unsub: (() => void) | undefined;
-      if (onProgress) {
-        unsub = imagePullManager.onProgress(effectiveImage, (line) => {
-          emit(onProgress, "pulling_image", "Pulling Docker image...", "in_progress", line).catch(() => {});
-        });
-      }
-
-      const ready = await imagePullManager.waitForReady(effectiveImage, 300_000);
-      unsub?.();
-
-      if (ready) {
-        await emit(onProgress, "pulling_image", "Image ready", "done");
-      } else {
-        const state = imagePullManager.getState(effectiveImage);
-        throw new SessionCreationError(
-          state.error ||
-          `Docker image ${effectiveImage} could not be pulled or built. Use the environment manager to pull/build the image first.`,
-          503,
-          "pulling_image",
-        );
-      }
-    }
-
-    // -- Create container --
-    await emit(onProgress, "creating_container", "Starting container...", "in_progress");
-    tempId = crypto.randomUUID().slice(0, 8);
-    const requestedPorts = Array.isArray((body.container as Record<string, unknown>)?.ports)
-      ? ((body.container as Record<string, unknown>).ports as number[]).map(Number).filter((n: number) => n > 0)
-      : [];
-    const containerPorts: (number | { port: number; hostIp?: string })[] = [
-      ...Array.from(new Set([
-        ...requestedPorts.filter((p: number) => p !== NOVNC_CONTAINER_PORT),
-        VSCODE_EDITOR_CONTAINER_PORT,
-        ...(backend === "codex" ? [CODEX_APP_SERVER_CONTAINER_PORT] : []),
-      ])),
-      { port: NOVNC_CONTAINER_PORT, hostIp: "127.0.0.1" },
-    ];
-    const cConfig: ContainerConfig = {
-      image: effectiveImage,
-      ports: containerPorts,
-      volumes: (body.container as Record<string, unknown>)?.volumes as string[] | undefined,
-      env: { ...(envVars ?? {}), DISPLAY: ":99" },
-      privileged: sandboxEnabled && effectiveImage === "the-companion:latest",
-    };
-    try {
-      containerInfo = containerManager.createContainer(tempId, cwd!, cConfig);
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new SessionCreationError(
-        `Docker is required to run this environment image (${effectiveImage}) ` +
-        `but container startup failed: ${reason}`,
-        503,
-        "creating_container",
-      );
-    }
-    containerId = containerInfo.containerId;
-    containerName = containerInfo.name;
-    containerImage = effectiveImage;
-    await emit(onProgress, "creating_container", "Container running", "done");
-
-    // -- Copy workspace --
-    await emit(onProgress, "copying_workspace", "Copying workspace files...", "in_progress");
-    try {
-      await containerManager.copyWorkspaceToContainer(containerInfo.containerId, cwd!);
-      containerManager.reseedGitAuth(containerInfo.containerId);
-      await emit(onProgress, "copying_workspace", "Workspace copied", "done");
-    } catch (err) {
-      containerManager.removeContainer(tempId);
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new SessionCreationError(
-        `Failed to copy workspace to container: ${reason}`,
-        503,
-        "copying_workspace",
-      );
-    }
-
-    // -- Git ops in container --
-    if (body.branch) {
-      const repoInfo = cwd ? gitUtils.getRepoInfo(cwd) : null;
-
-      await emit(onProgress, "fetching_git", "Fetching from remote (in container)...", "in_progress");
-      const gitResult = containerManager.gitOpsInContainer(containerInfo.containerId, {
-        branch: body.branch as string,
-        currentBranch: repoInfo?.currentBranch || "HEAD",
-        createBranch: body.createBranch as boolean | undefined,
-        defaultBranch: repoInfo?.defaultBranch,
-      });
-      await emit(onProgress, "fetching_git", gitResult.fetchOk ? "Fetch complete" : "Fetch skipped", "done");
-
-      if (repoInfo?.currentBranch !== body.branch) {
-        await emit(
-          onProgress,
-          "checkout_branch",
-          gitResult.checkoutOk ? `On branch ${body.branch}` : "Checkout failed",
-          gitResult.checkoutOk ? "done" : "error",
-        );
-      }
-
-      await emit(onProgress, "pulling_git", gitResult.pullOk ? "Up to date" : "Pull skipped", "done");
-
-      if (gitResult.errors.length > 0) {
-        console.warn(`[session-creation] In-container git ops warnings: ${gitResult.errors.join("; ")}`);
-      }
-      if (!gitResult.checkoutOk) {
-        containerManager.removeContainer(tempId);
-        throw new SessionCreationError(
-          `Failed to checkout branch "${body.branch}" inside container: ${gitResult.errors.join("; ")}`,
-          400,
-          "checkout_branch",
-        );
-      }
-    }
-
-    // -- Init script --
-    const initScript = companionSandbox?.initScript?.trim();
-    if (initScript) {
-      await emit(onProgress, "running_init_script", "Running init script...", "in_progress");
-      try {
-        const initTimeout = Number(process.env.COMPANION_INIT_SCRIPT_TIMEOUT) || 120_000;
-        const result = await containerManager.execInContainerAsync(
-          containerInfo.containerId,
-          ["sh", "-lc", initScript],
-          {
-            timeout: initTimeout,
-            onOutput: onProgress
-              ? (line) => {
-                  emit(onProgress, "running_init_script", "Running init script...", "in_progress", line).catch(() => {});
-                }
-              : undefined,
-          },
-        );
-        if (result.exitCode !== 0) {
-          console.error(
-            `[session-creation] Init script failed for sandbox "${companionSandbox?.name || "sandbox"}" (exit ${result.exitCode}):\n${result.output}`,
-          );
-          containerManager.removeContainer(tempId);
-          const truncated =
-            result.output.length > 2000
-              ? result.output.slice(0, 500) + "\n...[truncated]...\n" + result.output.slice(-1500)
-              : result.output;
-          throw new SessionCreationError(
-            `Init script failed (exit ${result.exitCode}):\n${truncated}`,
-            503,
-            "running_init_script",
-          );
-        }
-        console.log(`[session-creation] Init script completed successfully for sandbox "${companionSandbox?.name || "sandbox"}"`);
-        await emit(onProgress, "running_init_script", "Init script complete", "done");
-      } catch (e) {
-        if (e instanceof SessionCreationError) throw e;
-        containerManager.removeContainer(tempId);
-        const reason = e instanceof Error ? e.message : String(e);
-        throw new SessionCreationError(
-          `Init script execution failed: ${reason}`,
-          503,
-          "running_init_script",
-        );
-      }
-    }
-  }
-
   // -- Step: Launch CLI --
   await emit(
     onProgress,
@@ -421,17 +195,11 @@ export async function executeSessionCreation(
       allowedTools: body.allowedTools as string[] | undefined,
       env: envVars,
       backendType: backend,
-      containerId,
-      containerName,
-      containerImage,
-      containerCwd: containerInfo?.containerCwd,
       resumeSessionAt,
       forkSession,
       systemPrompt: backend === "codex" ? linearSystemPrompt : undefined,
-      sandboxSlug: sandboxEnabled ? ((body.sandboxSlug as string) || undefined) : undefined,
     });
   } catch (err) {
-    if (tempId) containerManager.removeContainer(tempId);
     const reason = err instanceof Error ? err.message : String(err);
     throw new SessionCreationError(
       `Failed to launch CLI: ${reason}`,
@@ -441,11 +209,6 @@ export async function executeSessionCreation(
   }
 
   // -- Post-launch tracking --
-  if (containerInfo) {
-    containerManager.retrack(containerInfo.containerId, session.sessionId);
-    wsBridge.markContainerized(session.sessionId, cwd!);
-  }
-
   if (worktreeInfo) {
     worktreeTracker.addMapping({
       sessionId: session.sessionId,

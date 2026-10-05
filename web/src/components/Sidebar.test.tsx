@@ -84,7 +84,6 @@ function makeSession(id: string, overrides: Partial<SessionState> = {}): Session
     is_compacting: false,
     git_branch: "",
     is_worktree: false,
-    is_containerized: false,
     repo_root: "",
     git_ahead: 0,
     git_behind: 0,
@@ -236,21 +235,6 @@ describe("Sidebar", () => {
 
     render(<Sidebar />);
     expect(screen.queryByText("feature/awesome")).not.toBeInTheDocument();
-  });
-
-  it("session items show container badge when is_containerized is true", () => {
-    const session = makeSession("s1", { git_branch: "feature/docker", is_containerized: true });
-    const sdk = makeSdkSession("s1", { containerId: "abc123" });
-    mockState = createMockState({
-      sessions: new Map([["s1", session]]),
-      sdkSessions: [sdk],
-    });
-
-    render(<Sidebar />);
-    const badge = screen.getByTitle("Docker");
-    expect(badge).toBeInTheDocument();
-    const dockerLogo = badge.querySelector('img[src="/logo-docker.svg"]');
-    expect(dockerLogo).toBeInTheDocument();
   });
 
   it("session items do not show git stats (removed in redesign)", () => {
@@ -1331,88 +1315,10 @@ describe("Sidebar", () => {
     expect(mockApi.deleteSession).not.toHaveBeenCalled();
   });
 
-  // ─── Archive with container confirmation ───────────────────────────────────
-
-  it("archiving a containerized session shows container warning confirmation", () => {
-    // Verifies that archiving a containerized session triggers the container
-    // archive confirmation panel warning about uncommitted changes.
-    const session = makeSession("s1", { is_containerized: true });
-    const sdk = makeSdkSession("s1", { containerId: "abc123" });
-    mockState = createMockState({
-      sessions: new Map([["s1", session]]),
-      sdkSessions: [sdk],
-    });
-
-    render(<Sidebar />);
-
-    // Open the context menu and click Archive
-    fireEvent.click(screen.getByTitle("Session actions"));
-    fireEvent.click(screen.getByText("Archive"));
-
-    // Container warning should appear
-    expect(screen.getByText(/Archiving will/)).toBeInTheDocument();
-    expect(screen.getByText(/remove the container/)).toBeInTheDocument();
-  });
-
-  it("confirming container archive calls api.archiveSession with force:true", async () => {
-    // Verifies that confirming the container archive sends force:true to the API
-    // which bypasses the container check.
-    const session = makeSession("s1", { is_containerized: true });
-    const sdk = makeSdkSession("s1", { containerId: "abc123" });
-    mockState = createMockState({
-      sessions: new Map([["s1", session]]),
-      sdkSessions: [sdk],
-    });
-
-    render(<Sidebar />);
-
-    // Trigger archive via context menu
-    fireEvent.click(screen.getByTitle("Session actions"));
-    fireEvent.click(screen.getByText("Archive"));
-
-    // Click the "Archive" confirm button in the warning panel
-    // (There are multiple "Archive" texts, find the one in the confirmation panel)
-    const archiveConfirmBtn = screen.getAllByText("Archive").find(
-      (el) => el.closest(".bg-cc-warning\\/10") !== null,
-    );
-    expect(archiveConfirmBtn).toBeTruthy();
-    fireEvent.click(archiveConfirmBtn!);
-
-    await vi.waitFor(() => {
-      expect(mockDisconnectSession).toHaveBeenCalledWith("s1");
-    });
-    expect(mockApi.archiveSession).toHaveBeenCalledWith("s1", { force: true });
-  });
-
-  it("cancelling container archive dismisses the warning", () => {
-    // Verifies that clicking Cancel in the container archive confirmation
-    // dismisses the warning without archiving.
-    const session = makeSession("s1", { is_containerized: true });
-    const sdk = makeSdkSession("s1", { containerId: "abc123" });
-    mockState = createMockState({
-      sessions: new Map([["s1", session]]),
-      sdkSessions: [sdk],
-    });
-
-    render(<Sidebar />);
-    fireEvent.click(screen.getByTitle("Session actions"));
-    fireEvent.click(screen.getByText("Archive"));
-
-    // Click Cancel in the warning panel
-    const cancelBtn = screen.getAllByText("Cancel").find(
-      (el) => el.closest(".bg-cc-warning\\/10") !== null,
-    );
-    fireEvent.click(cancelBtn!);
-
-    // Warning should be dismissed
-    expect(screen.queryByText(/remove the container/)).not.toBeInTheDocument();
-    expect(mockApi.archiveSession).not.toHaveBeenCalled();
-  });
-
-  it("archiving a non-containerized session archives directly without confirmation", async () => {
-    // Verifies that archiving a regular (non-containerized) session proceeds
-    // immediately without showing the container warning.
-    const session = makeSession("s1", { is_containerized: false });
+  it("archiving a session archives directly without confirmation", async () => {
+    // Verifies that archiving a session with no linked Linear issue proceeds
+    // immediately, without any confirmation step.
+    const session = makeSession("s1");
     const sdk = makeSdkSession("s1");
     mockState = createMockState({
       sessions: new Map([["s1", session]]),
@@ -1422,9 +1328,6 @@ describe("Sidebar", () => {
     render(<Sidebar />);
     fireEvent.click(screen.getByTitle("Session actions"));
     fireEvent.click(screen.getByText("Archive"));
-
-    // Should NOT show container warning
-    expect(screen.queryByText(/remove the container/)).not.toBeInTheDocument();
 
     // Should directly call archiveSession
     await vi.waitFor(() => {
@@ -1436,7 +1339,7 @@ describe("Sidebar", () => {
   it("archiving the current session navigates home and creates a new session", async () => {
     // Verifies that when the currently selected session is archived, the user
     // is redirected to the home page and a new session is started.
-    const session = makeSession("s1", { is_containerized: false });
+    const session = makeSession("s1");
     const sdk = makeSdkSession("s1");
     mockState = createMockState({
       sessions: new Map([["s1", session]]),
@@ -1461,7 +1364,7 @@ describe("Sidebar", () => {
   it("shows archive modal when session has a linked non-done Linear issue", async () => {
     // Verifies that archiving a session linked to a non-done Linear issue
     // shows the ArchiveLinearModal instead of archiving directly.
-    const session = makeSession("s1", { is_containerized: false });
+    const session = makeSession("s1");
     const sdk = makeSdkSession("s1");
     const linkedIssues = new Map<string, unknown>([["s1", {
       id: "issue-1",
@@ -1496,7 +1399,7 @@ describe("Sidebar", () => {
 
   it("archives directly when session has no linked Linear issue", async () => {
     // Verifies that the modal is NOT shown for sessions without a linked issue.
-    const session = makeSession("s1", { is_containerized: false });
+    const session = makeSession("s1");
     const sdk = makeSdkSession("s1");
     mockState = createMockState({
       sessions: new Map([["s1", session]]),
@@ -1518,7 +1421,7 @@ describe("Sidebar", () => {
 
   it("archives directly when linked issue is already done", async () => {
     // Verifies that completed issues don't trigger the modal.
-    const session = makeSession("s1", { is_containerized: false });
+    const session = makeSession("s1");
     const sdk = makeSdkSession("s1");
     const linkedIssues = new Map<string, unknown>([["s1", {
       id: "issue-1",

@@ -19,9 +19,6 @@ import { CliLauncher } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
-import { containerManager } from "./container-manager.js";
-import { join } from "node:path";
-import { COMPANION_HOME } from "./paths.js";
 import { TerminalManager } from "./terminal-manager.js";
 import { PRPoller } from "./pr-poller.js";
 import { RecorderManager } from "./recorder.js";
@@ -32,11 +29,9 @@ import { SessionOrchestrator } from "./session-orchestrator.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
-import { NoVncProxy } from "./novnc-proxy.js";
 
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { telegramBridgeManager } from "./telegram-bridge-manager.js";
-import { imagePullManager } from "./image-pull-manager.js";
 import { isRunningAsService } from "./service.js";
 import { getToken, verifyToken } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
@@ -59,9 +54,7 @@ const sessionStore = new SessionStore(process.env.COMPANION_SESSION_DIR);
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
 const worktreeTracker = new WorktreeTracker();
-const CONTAINER_STATE_PATH = join(COMPANION_HOME, "containers.json");
 const terminalManager = new TerminalManager();
-const noVncProxy = new NoVncProxy();
 const prPoller = new PRPoller(wsBridge);
 const recorder = new RecorderManager();
 const cronScheduler = new CronScheduler(launcher, wsBridge);
@@ -81,7 +74,6 @@ launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
-containerManager.restoreState(CONTAINER_STATE_PATH);
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
@@ -222,21 +214,6 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
 
-    // ── noVNC WebSocket — proxies VNC data to container's websockify ────
-    const novncMatch = url.pathname.match(/^\/ws\/novnc\/([a-f0-9-]+)$/);
-    if (novncMatch) {
-      const wsToken = url.searchParams.get("token");
-      if (!isLocalhost && !verifyToken(wsToken)) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-      const sessionId = novncMatch[1];
-      const upgraded = server.upgrade(req, {
-        data: { kind: "novnc" as const, sessionId },
-      });
-      if (upgraded) return undefined;
-      return new Response("WebSocket upgrade failed", { status: 400 });
-    }
-
     // Hono handles the rest
     return app.fetch(req, server);
 };
@@ -253,8 +230,6 @@ const websocketHandlers = {
       wsBridge.handleBrowserOpen(ws, data.sessionId);
     } else if (data.kind === "terminal") {
       terminalManager.addBrowserSocket(ws);
-    } else if (data.kind === "novnc") {
-      noVncProxy.handleOpen(ws, data.sessionId);
     }
   },
   message(ws: ServerWebSocket<SocketData>, msg: string | Buffer) {
@@ -265,8 +240,6 @@ const websocketHandlers = {
       wsBridge.handleBrowserMessage(ws, msg);
     } else if (data.kind === "terminal") {
       terminalManager.handleBrowserMessage(ws, msg);
-    } else if (data.kind === "novnc") {
-      noVncProxy.handleMessage(ws, msg);
     }
   },
   close(ws: ServerWebSocket<SocketData>, code?: number, _reason?: string) {
@@ -278,8 +251,6 @@ const websocketHandlers = {
       wsBridge.handleBrowserClose(ws);
     } else if (data.kind === "terminal") {
       terminalManager.removeBrowserSocket(ws);
-    } else if (data.kind === "novnc") {
-      noVncProxy.handleClose(ws);
     }
   },
 };
@@ -381,9 +352,6 @@ migrateCronJobsToAgents();
 migrateLinearCredentialsToAgents();
 agentExecutor.startAll();
 
-// ── Image pull manager — pre-pull missing Docker images for environments ────
-imagePullManager.initFromEnvironments();
-
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).
 telegramBridgeManager.start(port);
@@ -425,11 +393,9 @@ setInterval(() => {
   });
 }, DIAGNOSTICS_INTERVAL_MS);
 
-// ── Graceful shutdown — persist container state ──────────────────────────────
+// ── Graceful shutdown ────────────────────────────────────────────────────────
 function gracefulShutdown() {
-  console.log("[server] Persisting container state before shutdown...");
   telegramBridgeManager.stop();
-  containerManager.persistState(CONTAINER_STATE_PATH);
   closeLogFile();
   process.exit(0);
 }

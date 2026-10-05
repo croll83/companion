@@ -13,7 +13,7 @@ const EDITABLE_FIELDS = [
   "backendType", "model", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
   "prompt", "mcpServers", "skills",
-  "container", "branch", "createBranch", "useWorktree",
+  "branch", "createBranch", "useWorktree",
   "triggers", "enabled",
 ] as const;
 
@@ -45,7 +45,6 @@ function buildCreateInput(
     prompt: (body.prompt as string | undefined) || "",
     mcpServers: body.mcpServers as AgentConfig["mcpServers"] | undefined,
     skills: body.skills as string[] | undefined,
-    container: body.container as AgentConfig["container"] | undefined,
     branch: body.branch as string | undefined,
     createBranch: body.createBranch as boolean | undefined,
     useWorktree: body.useWorktree as boolean | undefined,

@@ -40,6 +40,12 @@ describe("parseHash", () => {
     expect(parseHash("#/environments")).toEqual({ page: "environments" });
   });
 
+  it("parses sandboxes route as home (removed)", () => {
+    // The Sandboxes page was removed with container sessions; old bookmarks
+    // must fall back to home instead of rendering an empty page.
+    expect(parseHash("#/sandboxes")).toEqual({ page: "home" });
+  });
+
   it("parses docker-builder route as home (removed)", () => {
     // docker-builder route was removed; unknown routes map to home
     expect(parseHash("#/docker-builder")).toEqual({ page: "home" });
