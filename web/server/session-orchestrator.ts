@@ -26,6 +26,18 @@ const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 
+/**
+ * True when a create-session body uses the removed sandbox/container fields
+ * the way older versions did to start a container session:
+ * `sandboxEnabled: true` or `container: { image }`.
+ */
+function requestsRemovedSandbox(body: CreateSessionRequest): boolean {
+  const legacy = body as { sandboxEnabled?: unknown; container?: unknown };
+  if (legacy.sandboxEnabled === true) return true;
+  const container = legacy.container;
+  return typeof container === "object" && container !== null && !!(container as { image?: unknown }).image;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface SessionOrchestratorDeps {
@@ -69,7 +81,6 @@ export type ProgressCallback = (
   step: CreationStepId,
   label: string,
   status: "in_progress" | "done" | "error",
-  detail?: string,
 ) => Promise<void>;
 
 export interface ArchiveSessionOptions {
@@ -346,6 +357,16 @@ export class SessionOrchestrator {
       const backend = (body.backend ?? "claude") as BackendType;
       if (backend !== "claude" && backend !== "codex") {
         return { ok: false, error: `Invalid backend: ${String(body.backend)}`, status: 400 };
+      }
+      // Sandboxed/container sessions were removed. A caller that still asks
+      // for isolation (old UI bundle, external API client) must get an error
+      // rather than a silently unsandboxed host session.
+      if (requestsRemovedSandbox(body)) {
+        return {
+          ok: false,
+          error: "Sandboxed/container sessions were removed; this session would run directly on the host",
+          status: 400,
+        };
       }
 
       // --- Step: Resolve environment ---

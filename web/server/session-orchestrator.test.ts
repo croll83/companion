@@ -459,6 +459,40 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // Sandboxed/container sessions were removed. A request that still asks for
+    // one must fail loudly instead of silently starting an unsandboxed host
+    // session (with bypassPermissions honoured) for a caller that wanted isolation.
+    it("returns 400 and launches nothing when sandboxEnabled is true", async () => {
+      const body = { cwd: "/test", sandboxEnabled: true } as Parameters<typeof orchestrator.createSession>[0];
+      const result = await orchestrator.createSession(body);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.status).toBe(400);
+        expect(result.error).toContain("container sessions were removed");
+      }
+      expect(deps.launcher.launch).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 and launches nothing when a container image is requested", async () => {
+      const body = { cwd: "/test", container: { image: "the-companion:latest" } } as Parameters<typeof orchestrator.createSession>[0];
+      const result = await orchestrator.createSession(body);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.status).toBe(400);
+      expect(deps.launcher.launch).not.toHaveBeenCalled();
+    });
+
+    it("still creates a host session when legacy sandbox fields ask for no isolation", async () => {
+      // Old bundles could send sandboxEnabled:false or an image-less container
+      // object; those never created a container, so they must keep working.
+      const body = { cwd: "/test", sandboxEnabled: false, container: { ports: [3000] } } as Parameters<typeof orchestrator.createSession>[0];
+      const result = await orchestrator.createSession(body);
+
+      expect(result.ok).toBe(true);
+      expect(deps.launcher.launch).toHaveBeenCalled();
+    });
+
     it("resolves environment variables from envSlug", async () => {
       vi.mocked(envManager.getEnv).mockReturnValue({
         name: "Production",
@@ -724,6 +758,29 @@ describe("SessionOrchestrator", () => {
       await orchestrator.createSessionStreaming({ cwd: "/test" }, onProgress);
 
       expect(onProgress).toHaveBeenCalledWith("launching_cli", "Launching Claude Code...", "in_progress");
+    });
+
+    it("rejects a sandbox request before emitting any progress", async () => {
+      // The streaming path shares the guard: a removed-sandbox request fails
+      // with 400 and never reaches environment resolution or the launcher.
+      const onProgress = vi.fn();
+      const body = { cwd: "/test", sandboxEnabled: true } as Parameters<typeof orchestrator.createSessionStreaming>[0];
+      const result = await orchestrator.createSessionStreaming(body, onProgress);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.status).toBe(400);
+      expect(onProgress).not.toHaveBeenCalled();
+      expect(deps.launcher.launch).not.toHaveBeenCalled();
+    });
+
+    it("emits progress with exactly step, label and status", async () => {
+      // The container-only `detail` argument was removed end to end; every
+      // progress call now carries three arguments.
+      const onProgress = vi.fn();
+      await orchestrator.createSessionStreaming({ cwd: "/test" }, onProgress);
+
+      expect(onProgress.mock.calls.length).toBeGreaterThan(0);
+      for (const call of onProgress.mock.calls) expect(call).toHaveLength(3);
     });
   });
 
