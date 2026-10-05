@@ -1124,6 +1124,7 @@ describe("POST /api/envs", () => {
     expect(envManager.createEnv).toHaveBeenCalledWith(
       "Staging",
       { HOST: "staging.example.com" },
+      { scope: undefined, folders: undefined },
     );
   });
 

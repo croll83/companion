@@ -27,6 +27,7 @@ import { companionBus } from "./event-bus.js";
 import { markClaudeCliRuntimeIncompatible, parseClaudeVersion } from "./claude-cli-check.js";
 import { getSettings } from "./settings-manager.js";
 import { DEFAULT_CLI_BRIDGE_MODE } from "./cli-bridge-mode.js";
+import { resolveSessionEnv } from "./session-env.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -198,6 +199,17 @@ export interface SdkSessionInfo {
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
   agentName?: string;
+  /**
+   * Explicitly chosen env profile. Only the slug is persisted: the variables
+   * are re-read from the profile at every spawn and relaunch.
+   */
+  envSlug?: string;
+  /** Linear connection whose API key is injected as LINEAR_API_KEY at every spawn. */
+  linearConnectionId?: string;
+  /** Main repo root of a worktree session, used to match project env profiles. */
+  repoRoot?: string;
+  /** Names (never values) of the env profiles applied at the last spawn. */
+  envProfiles?: string[];
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport. */
@@ -222,7 +234,17 @@ export interface LaunchOptions {
   claudeBinary?: string;
   codexBinary?: string;
   allowedTools?: string[];
+  /**
+   * Request/agent env, applied on top of the resolved env profiles. Persisted
+   * (0600, outside launcher.json) so relaunches after a restart keep it.
+   */
   env?: Record<string, string>;
+  /** Explicitly chosen env profile slug (see SdkSessionInfo.envSlug). */
+  envSlug?: string;
+  /** Linear connection id for LINEAR_API_KEY injection. */
+  linearConnectionId?: string;
+  /** Main repo root for worktree sessions (project env profile matching). */
+  repoRoot?: string;
   backendType?: BackendType;
   /** Codex sandbox mode. */
   codexSandbox?: "workspace-write" | "danger-full-access";
@@ -264,8 +286,11 @@ export class CliLauncher {
   private codexWsProxies = new Map<string, Subprocess>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
   private claimedCodexWsPorts = new Set<number>();
-  /** Runtime-only env vars per session (kept out of persisted launcher state). */
-  private sessionEnvs = new Map<string, Record<string, string>>();
+  /**
+   * Request/agent env per session. Mirrors what the store persists (0600
+   * sidecar) so tests without a store and the hot path avoid a disk read.
+   */
+  private requestEnvs = new Map<string, Record<string, string>>();
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
@@ -393,17 +418,52 @@ export class CliLauncher {
       info.codexSandbox = options.codexSandbox;
     }
 
+    if (options.envSlug) info.envSlug = options.envSlug;
+    if (options.linearConnectionId) info.linearConnectionId = options.linearConnectionId;
+    if (options.repoRoot) info.repoRoot = options.repoRoot;
+
     this.sessions.set(sessionId, info);
-    if (options.env) {
-      this.sessionEnvs.set(sessionId, { ...options.env });
+    if (options.env && Object.keys(options.env).length > 0) {
+      this.requestEnvs.set(sessionId, { ...options.env });
+      this.store?.saveRequestEnv(sessionId, options.env);
     }
 
+    const spawnOptions = { ...options, env: this.resolveSpawnEnv(sessionId, info) };
     if (backendType === "codex") {
-      this.spawnCodex(sessionId, info, options);
+      this.spawnCodex(sessionId, info, spawnOptions);
     } else {
-      this.spawnCLI(sessionId, info, options);
+      this.spawnCLI(sessionId, info, spawnOptions);
     }
     return info;
+  }
+
+  /**
+   * Build the env overlay for a spawn from persisted references only (env
+   * slug, cwd/repo root, Linear connection, the request-env sidecar) so the
+   * first launch and every relaunch — including after a server restart —
+   * resolve exactly the same way. Records the applied profile names.
+   */
+  private resolveSpawnEnv(sessionId: string, info: SdkSessionInfo): Record<string, string> {
+    let requestEnv = this.requestEnvs.get(sessionId);
+    if (!requestEnv && this.store) {
+      requestEnv = this.store.loadRequestEnv(sessionId);
+      if (requestEnv) this.requestEnvs.set(sessionId, requestEnv);
+    }
+    const { env, profileNames } = resolveSessionEnv({
+      cwd: info.cwd,
+      repoRoot: info.repoRoot,
+      backendType: info.backendType,
+      envSlug: info.envSlug,
+      linearConnectionId: info.linearConnectionId,
+      requestEnv,
+    });
+    info.envProfiles = profileNames.length > 0 ? profileNames : undefined;
+    return env;
+  }
+
+  private forgetRequestEnv(sessionId: string): void {
+    this.requestEnvs.delete(sessionId);
+    this.store?.removeRequestEnv(sessionId);
   }
 
   /**
@@ -466,7 +526,7 @@ export class CliLauncher {
 
     info.state = "starting";
 
-    const runtimeEnv = this.sessionEnvs.get(sessionId);
+    const runtimeEnv = this.resolveSpawnEnv(sessionId, info);
 
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, {
@@ -1329,7 +1389,7 @@ export class CliLauncher {
     this.sessions.delete(sessionId);
     this.processes.delete(sessionId);
     this.codexWsProxies.delete(sessionId);
-    this.sessionEnvs.delete(sessionId);
+    this.forgetRequestEnv(sessionId);
     this.persistState();
   }
 
@@ -1342,7 +1402,7 @@ export class CliLauncher {
       if (session.state === "exited") {
         this.releaseCodexWsPort(session);
         this.sessions.delete(id);
-        this.sessionEnvs.delete(id);
+        this.forgetRequestEnv(id);
         this.codexWsProxies.delete(id);
         pruned++;
       }

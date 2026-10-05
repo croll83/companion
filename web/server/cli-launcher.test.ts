@@ -50,6 +50,13 @@ const isMockedPath = vi.hoisted(() => (path: string): boolean => {
   return path.includes(".claude") || path.startsWith("/tmp/worktrees/") || path.startsWith("/tmp/main-repo");
 });
 
+// Env profiles are resolved at every spawn. Keep the real ~/.companion/envs
+// out of these tests: profile resolution has its own tests
+// (env-manager.test.ts, session-env.test.ts, cli-launcher-env.test.ts).
+vi.mock("./env-manager.js", () => ({
+  resolveEnvProfiles: vi.fn(() => ({ profiles: [], variables: {}, missingExplicit: false })),
+}));
+
 const mockTranscriptExists = vi.hoisted(() => vi.fn(() => true));
 vi.mock("./claude-session-history.js", () => ({ claudeTranscriptExists: mockTranscriptExists }));
 

@@ -112,12 +112,9 @@ export class CronScheduler {
     };
 
     try {
-      // Resolve environment variables
-      let envVars: Record<string, string> | undefined;
-      if (job.envSlug) {
-        const env = envManager.getEnv(job.envSlug);
-        if (env) envVars = env.variables;
-      }
+      // The job's env profile is resolved by the launcher at every spawn and
+      // relaunch (together with global and folder-matched profiles).
+      const envSlug = job.envSlug && envManager.getEnv(job.envSlug) ? job.envSlug : undefined;
 
       // Launch the session via CliLauncher
       // For Codex, explicitly set sandbox and internet access for full autonomy
@@ -125,7 +122,7 @@ export class CronScheduler {
         model: job.model,
         permissionMode: job.permissionMode,
         cwd: job.cwd,
-        env: envVars,
+        envSlug,
         backendType: job.backendType,
         codexInternetAccess: job.backendType === "codex" ? (job.codexInternetAccess ?? true) : undefined,
         codexSandbox: job.backendType === "codex"

@@ -372,33 +372,24 @@ export class SessionOrchestrator {
       // --- Step: Resolve environment ---
       if (onProgress) await onProgress("resolving_env", "Resolving environment...", "in_progress");
 
-      let envVars: Record<string, string> | undefined = body.env;
-      const companionEnv = body.envSlug ? envManager.getEnv(body.envSlug) : null;
-      if (body.envSlug && companionEnv) {
-        console.log(
-          `[orchestrator] Injecting env "${companionEnv.name}" (${Object.keys(companionEnv.variables).length} vars):`,
-          Object.keys(companionEnv.variables).join(", "),
-        );
-        envVars = { ...companionEnv.variables, ...body.env };
-      } else if (body.envSlug) {
-        console.warn(`[orchestrator] Environment "${body.envSlug}" not found, ignoring`);
+      // The env itself (folder-scoped profiles, the explicit envSlug, body.env,
+      // provider tokens from settings, LINEAR_API_KEY) is resolved by the
+      // launcher at every spawn and relaunch from the references passed below
+      // (see session-env.ts), so nothing here is lost on a server restart.
+      // An unknown slug is dropped rather than persisted, so a profile created
+      // later under that name never silently attaches to this session.
+      let envSlug: string | undefined;
+      if (body.envSlug) {
+        if (envManager.getEnv(body.envSlug)) envSlug = body.envSlug;
+        else console.warn(`[orchestrator] Environment "${body.envSlug}" not found, ignoring`);
       }
 
-      // Inject provider tokens from global settings (if not already set by env profile).
-      const globalSettings = getSettings();
-      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !("CLAUDE_CODE_OAUTH_TOKEN" in (envVars ?? {}))) {
-        envVars = { ...envVars, CLAUDE_CODE_OAUTH_TOKEN: globalSettings.claudeCodeOAuthToken };
-      }
-      if (backend === "codex" && globalSettings.openaiApiKey && !("OPENAI_API_KEY" in (envVars ?? {}))) {
-        envVars = { ...envVars, OPENAI_API_KEY: globalSettings.openaiApiKey };
-      }
-
-      // Inject LINEAR_API_KEY if a Linear connection is specified
       let linearSystemPrompt: string | undefined;
+      let linearConnectionId: string | undefined;
       if (body.linearConnectionId) {
         const conn = getConnection(body.linearConnectionId);
         if (conn?.apiKey) {
-          envVars = { ...envVars, LINEAR_API_KEY: conn.apiKey };
+          linearConnectionId = body.linearConnectionId;
           linearSystemPrompt = buildLinearSystemPrompt(conn, body.linearIssue as { identifier: string; title: string; stateName: string; teamName: string; url: string } | undefined);
         }
       }
@@ -483,7 +474,10 @@ export class SessionOrchestrator {
           codexInternetAccess: backend === "codex",
           codexSandbox: backend === "codex" ? "danger-full-access" : undefined,
           allowedTools: body.allowedTools,
-          env: envVars,
+          env: body.env,
+          envSlug,
+          linearConnectionId,
+          repoRoot: worktreeInfo?.repoRoot,
           backendType: backend,
           resumeSessionAt,
           forkSession,

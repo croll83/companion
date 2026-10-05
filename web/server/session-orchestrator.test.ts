@@ -3,9 +3,22 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 // ── Module mocks ────────────────────────────────────────────────────────────
 // Must be declared before any imports that reference them.
 
-vi.mock("./env-manager.js", () => ({
-  getEnv: vi.fn(() => null),
-}));
+vi.mock("./env-manager.js", async () => {
+  const getEnv = vi.fn((_slug: string) => null as null | { name: string; variables: Record<string, string> });
+  return {
+    getEnv,
+    // Stand-in for the real resolver (covered in env-manager.test.ts): only the
+    // explicit profile, read through the mocked getEnv above.
+    resolveEnvProfiles: vi.fn(({ explicitSlug }: { explicitSlug?: string }) => {
+      const explicit = explicitSlug ? getEnv(explicitSlug) : null;
+      return {
+        profiles: explicit ? [explicit] : [],
+        variables: explicit ? { ...explicit.variables } : {},
+        missingExplicit: !!explicitSlug && !explicit,
+      };
+    }),
+  };
+});
 
 vi.mock("./git-utils.js", () => ({
   getRepoInfo: vi.fn(() => null),
@@ -83,8 +96,27 @@ import { resolveApiKey } from "./linear-connections.js";
 import { transitionLinearIssue, fetchLinearTeamStates } from "./routes/linear-routes.js";
 import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
+import { resolveSessionEnv } from "./session-env.js";
 
 // ── Mock factories ──────────────────────────────────────────────────────────
+
+/**
+ * The env the CLI of the n-th launch actually gets. The orchestrator hands the
+ * launcher references (envSlug, request env, Linear connection) and the
+ * launcher resolves them with resolveSessionEnv at every spawn, so the
+ * env-related tests below assert on that resolved result.
+ */
+function spawnedEnv(launch: ReturnType<typeof vi.fn>, n = 0): Record<string, string> {
+  const opts = launch.mock.calls[n][0];
+  return resolveSessionEnv({
+    cwd: opts.cwd,
+    repoRoot: opts.repoRoot,
+    backendType: opts.backendType,
+    envSlug: opts.envSlug,
+    linearConnectionId: opts.linearConnectionId,
+    requestEnv: opts.env,
+  }).env;
+}
 
 function createMockLauncher() {
   return {
@@ -506,11 +538,25 @@ describe("SessionOrchestrator", () => {
 
       expect(result.ok).toBe(true);
       expect(envManager.getEnv).toHaveBeenCalledWith("production");
+      // Only the slug is handed to the launcher (and persisted)...
       expect(deps.launcher.launch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          env: expect.objectContaining({ API_KEY: "secret", DB_HOST: "db.example.com" }),
-        }),
+        expect.objectContaining({ envSlug: "production" }),
       );
+      // ...which resolves it into the profile's variables at spawn time.
+      expect(spawnedEnv(vi.mocked(deps.launcher.launch))).toEqual(
+        expect.objectContaining({ API_KEY: "secret", DB_HOST: "db.example.com" }),
+      );
+    });
+
+    // An unknown slug must not be persisted on the session: a profile created
+    // later under that name would otherwise silently attach on relaunch.
+    it("drops an unknown envSlug instead of persisting it", async () => {
+      vi.mocked(envManager.getEnv).mockReturnValue(null);
+
+      const result = await orchestrator.createSession({ cwd: "/test", envSlug: "missing" });
+
+      expect(result.ok).toBe(true);
+      expect(vi.mocked(deps.launcher.launch).mock.calls[0][0].envSlug).toBeUndefined();
     });
 
     // ── Global token injection from settings ───────────────────────────
@@ -525,10 +571,8 @@ describe("SessionOrchestrator", () => {
 
       await orchestrator.createSession({ cwd: "/test", backend: "claude" });
 
-      expect(deps.launcher.launch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          env: expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "global-oauth-token" }),
-        }),
+      expect(spawnedEnv(vi.mocked(deps.launcher.launch))).toEqual(
+        expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "global-oauth-token" }),
       );
     });
 
@@ -542,10 +586,8 @@ describe("SessionOrchestrator", () => {
 
       await orchestrator.createSession({ cwd: "/test", backend: "codex" });
 
-      expect(deps.launcher.launch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          env: expect.objectContaining({ OPENAI_API_KEY: "sk-global-key" }),
-        }),
+      expect(spawnedEnv(vi.mocked(deps.launcher.launch))).toEqual(
+        expect.objectContaining({ OPENAI_API_KEY: "sk-global-key" }),
       );
     });
 
@@ -565,10 +607,8 @@ describe("SessionOrchestrator", () => {
 
       await orchestrator.createSession({ cwd: "/test", backend: "claude", envSlug: "custom" });
 
-      expect(deps.launcher.launch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          env: expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "env-profile-token" }),
-        }),
+      expect(spawnedEnv(vi.mocked(deps.launcher.launch))).toEqual(
+        expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "env-profile-token" }),
       );
     });
 
@@ -584,6 +624,7 @@ describe("SessionOrchestrator", () => {
 
       const launchCall = vi.mocked(deps.launcher.launch).mock.calls[0][0];
       expect(launchCall.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      expect(spawnedEnv(vi.mocked(deps.launcher.launch)).CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     });
 
     it("validates branch name to prevent injection", async () => {

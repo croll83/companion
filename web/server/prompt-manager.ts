@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { dedupeFolders, isPathWithin, normalizeFolderPath } from "./path-scope.js";
 
 export type PromptScope = "global" | "project";
 
@@ -26,10 +27,6 @@ const PROMPTS_FILE = join(COMPANION_HOME, "prompts.json");
 
 function ensureDir(): void {
   mkdirSync(COMPANION_HOME, { recursive: true });
-}
-
-function normalizePath(path: string): string {
-  return resolve(path).replace(/[\\/]+$/, "");
 }
 
 function loadPrompts(): SavedPrompt[] {
@@ -66,12 +63,7 @@ function sortPrompts(prompts: SavedPrompt[]): SavedPrompt[] {
 function visibleForCwd(prompt: SavedPrompt, cwd: string): boolean {
   if (prompt.scope === "global") return true;
   const paths = resolveProjectPaths(prompt);
-  if (paths.length === 0) return false;
-  const normalizedCwd = normalizePath(cwd);
-  return paths.some((p) => {
-    const normalizedProject = normalizePath(p);
-    return normalizedCwd === normalizedProject || normalizedCwd.startsWith(`${normalizedProject}/`);
-  });
+  return paths.some((p) => isPathWithin(cwd, p));
 }
 
 /** Merges legacy projectPath and projectPaths into a single deduplicated list. */
@@ -80,7 +72,7 @@ function resolveProjectPaths(prompt: SavedPrompt): string[] {
   if (prompt.projectPaths && prompt.projectPaths.length > 0) {
     paths.push(...prompt.projectPaths);
   }
-  if (prompt.projectPath && !paths.some((p) => normalizePath(p) === normalizePath(prompt.projectPath!))) {
+  if (prompt.projectPath && !paths.some((p) => normalizeFolderPath(p) === normalizeFolderPath(prompt.projectPath!))) {
     paths.push(prompt.projectPath);
   }
   return paths;
@@ -141,19 +133,7 @@ export function createPrompt(
 }
 
 function dedupeAndNormalizePaths(paths?: string[], legacyPath?: string): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  const all = [...(paths ?? []), ...(legacyPath?.trim() ? [legacyPath] : [])];
-  for (const p of all) {
-    const trimmed = p.trim();
-    if (!trimmed) continue;
-    const normalized = normalizePath(trimmed);
-    if (!seen.has(normalized)) {
-      seen.add(normalized);
-      result.push(normalized);
-    }
-  }
-  return result;
+  return dedupeFolders([...(paths ?? []), ...(legacyPath ? [legacyPath] : [])]);
 }
 
 export function updatePrompt(id: string, updates: PromptUpdateFields): SavedPrompt | null {

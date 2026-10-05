@@ -140,18 +140,17 @@ export class AgentExecutor {
     };
 
     try {
-      // Resolve environment variables
+      // Agent env (inline vars, then trigger-specific ones). Env profiles —
+      // global, folder-matched and the agent's explicit envSlug — are resolved
+      // by the launcher at every spawn/relaunch, like for any other session.
       let envVars: Record<string, string> | undefined;
-      if (agent.envSlug) {
-        const env = envManager.getEnv(agent.envSlug);
-        if (env) envVars = { ...env.variables };
-      }
       if (agent.env) {
-        envVars = { ...envVars, ...agent.env };
+        envVars = { ...agent.env };
       }
       if (opts?.additionalEnv) {
         envVars = { ...envVars, ...opts.additionalEnv };
       }
+      const envSlug = agent.envSlug && envManager.getEnv(agent.envSlug) ? agent.envSlug : undefined;
 
       // Resolve working directory
       let cwd = agent.cwd;
@@ -174,6 +173,7 @@ export class AgentExecutor {
         permissionMode: "bypassPermissions",
         cwd,
         env: envVars,
+        envSlug,
         allowedTools: agent.allowedTools,
         backendType: agent.backendType,
         codexInternetAccess: agent.backendType === "codex" ? (agent.codexInternetAccess ?? true) : undefined,

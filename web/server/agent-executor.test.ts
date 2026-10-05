@@ -572,10 +572,13 @@ describe("AgentExecutor", () => {
 
       await executor.executeAgent("env-agent");
 
-      // launch should be called with merged env vars (envSlug + inline)
+      // The profile is passed by slug (the launcher resolves it at every
+      // spawn, below the inline env, so inline vars override profile vars);
+      // the inline env travels as the request env.
       expect(launcher.launch).toHaveBeenCalledWith(
         expect.objectContaining({
-          env: { ENV_VAR: "env-value", INLINE_VAR: "inline-value" },
+          envSlug: "prod-env",
+          env: { INLINE_VAR: "inline-value" },
         }),
       );
     });
