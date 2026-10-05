@@ -316,6 +316,19 @@ describe("getAgent", () => {
 // updateAgent
 // ===========================================================================
 describe("updateAgent", () => {
+  // Turning the webhook on without a secret (the MCP tools send "") gets a
+  // fresh secret, or keeps the one the agent already had, so a URL handed out
+  // earlier keeps working.
+  it("fills in the webhook secret when one is enabled without it", () => {
+    agentStore.createAgent(makeAgentInput({ name: "Hook Target" }));
+    const first = agentStore.updateAgent("hook-target", { triggers: { webhook: { enabled: true, secret: "" } } })!;
+    expect(first.triggers?.webhook?.secret).toMatch(/^[0-9a-f]{48}$/);
+    const again = agentStore.updateAgent("hook-target", { triggers: { webhook: { enabled: true, secret: "" } } })!;
+    expect(again.triggers?.webhook?.secret).toBe(first.triggers?.webhook?.secret);
+    const off = agentStore.updateAgent("hook-target", { triggers: { webhook: { enabled: false, secret: "" } } })!;
+    expect(off.triggers?.webhook).toEqual({ enabled: false, secret: "" });
+  });
+
   it("updates fields correctly and preserves createdAt", async () => {
     const agent = agentStore.createAgent(makeAgentInput({ name: "Update Target" }));
     const originalCreatedAt = agent.createdAt;

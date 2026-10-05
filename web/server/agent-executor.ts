@@ -73,6 +73,52 @@ function resultErrorText(data: CLIResultMessage): string {
   return text.length > MAX_ERROR_LENGTH ? `${text.slice(0, MAX_ERROR_LENGTH)}…` : text;
 }
 
+/** A run and its final answer (see AgentExecutor.getRunResult). */
+export interface RunResult {
+  sessionId: string;
+  agentId: string;
+  triggerType: AgentExecution["triggerType"];
+  startedAt: number;
+  completedAt?: number;
+  status: "running" | "success" | "error";
+  success?: boolean;
+  error?: string;
+  subtype?: string;
+  /** The answer text (truncated to the requested size), or null if not available. */
+  result: string | null;
+  truncated: boolean;
+}
+
+function assistantText(entry: BrowserIncomingMessage): string {
+  if (entry.type !== "assistant" || entry.parent_tool_use_id) return "";
+  const content = entry.message?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => (block && block.type === "text" && typeof block.text === "string" ? block.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * The answer of a run's turn in a session history: the turn after the agent
+ * prompt (`[agent:…]`), or the first turn when that prompt is not found.
+ */
+export function runAnswerText(history: BrowserIncomingMessage[]): string | null {
+  const promptAt = history.findIndex((m) => m.type === "user_message" && m.content.startsWith("[agent:"));
+  const from = promptAt >= 0 ? promptAt + 1 : 0;
+  const resultAt = history.findIndex((m, i) => i >= from && m.type === "result");
+  if (resultAt < 0) return null;
+  const result = history[resultAt];
+  if (result.type === "result" && typeof result.data.result === "string" && result.data.result.trim()) {
+    return result.data.result;
+  }
+  for (let i = resultAt - 1; i >= from; i--) {
+    const text = assistantText(history[i]);
+    if (text.trim()) return text;
+  }
+  return null;
+}
+
 export class AgentExecutor {
   /**
    * After the CLI exits without a result, wait this long before failing the
@@ -210,6 +256,11 @@ export class AgentExecutor {
   /** True while a run of this agent is launching or waiting for its result. */
   isRunInProgress(agentId: string): boolean {
     return this.activeRunSession(agentId) !== undefined;
+  }
+
+  /** Session id of the agent's run in progress, once it has one. */
+  runSessionOf(agentId: string): string | undefined {
+    return this.activeRunSession(agentId) || undefined;
   }
 
   /** Session of the agent's run in progress ("" while launching), or undefined. */
@@ -464,6 +515,36 @@ export class AgentExecutor {
       subtype: data.subtype,
       error: success ? undefined : resultErrorText(data),
     });
+  }
+
+  /**
+   * A run and its final answer: the result of the run's turn (the first
+   * turn after the agent prompt), from the session's message history.
+   * Claude reports the answer in the result itself; Codex does not, so the
+   * text of the turn's last assistant message is used instead. `result` is
+   * null while the run is still going (or the history is gone). Returns null
+   * for an unknown run.
+   */
+  getRunResult(sessionId: string, maxChars: number): RunResult | null {
+    const exec = this.activeRuns.get(sessionId)
+      ?? [...this.executions.values()].flat().find((e) => e.sessionId === sessionId)
+      ?? this.executionStore.all().find((e) => e.sessionId === sessionId);
+    if (!exec || !sessionId) return null;
+    const text = exec.completedAt ? runAnswerText(this.wsBridge.getSession(sessionId)?.messageHistory ?? []) : null;
+    const truncated = text !== null && text.length > maxChars;
+    return {
+      sessionId,
+      agentId: exec.agentId,
+      triggerType: exec.triggerType,
+      startedAt: exec.startedAt,
+      completedAt: exec.completedAt,
+      status: !exec.completedAt ? "running" : exec.success ? "success" : "error",
+      success: exec.success,
+      error: exec.error,
+      subtype: exec.subtype,
+      result: truncated ? `${text.slice(0, maxChars)}…` : text,
+      truncated,
+    };
   }
 
   /**

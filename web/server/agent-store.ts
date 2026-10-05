@@ -148,6 +148,17 @@ export function updateAgent(
     throw new Error(`An agent with a similar name already exists ("${newId}")`);
   }
 
+  // Turning the webhook on without a secret (e.g. from the MCP tools) gets one.
+  if (updates.triggers?.webhook?.enabled && !updates.triggers.webhook.secret) {
+    updates = {
+      ...updates,
+      triggers: {
+        ...updates.triggers,
+        webhook: { ...updates.triggers.webhook, secret: existing.triggers?.webhook?.secret || generateWebhookSecret() },
+      },
+    };
+  }
+
   const agent: AgentConfig = {
     ...existing,
     ...updates,

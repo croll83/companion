@@ -15,6 +15,12 @@ const MAX_DEFER_MS = 30 * 60 * 1000;
 const SPENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** Armed wake-ups allowed per session. */
 const MAX_PENDING_PER_SESSION = 50;
+/**
+ * Armed wake-ups that sessions themselves (createdBy "session:<id>", i.e. the
+ * `companion` MCP tools) may have pending at once, across all sessions: a
+ * model in a loop must not be able to flood the scheduler.
+ */
+export const MAX_PENDING_BY_SESSIONS = 50;
 const MAX_MESSAGE_LENGTH = 64 * 1024;
 const CREATED_BY_PATTERN = /^(user|session:[A-Za-z0-9_-]+)$/;
 
@@ -149,6 +155,16 @@ export class WakeupScheduler {
     const pending = this.listForSession(input.sessionId).filter((w) => w.enabled).length;
     if (pending >= MAX_PENDING_PER_SESSION) {
       return { ok: false, status: 409, error: `This session already has ${MAX_PENDING_PER_SESSION} pending wake-ups` };
+    }
+    if (createdBy.startsWith("session:")) {
+      const bySessions = this.store.list().filter((w) => w.enabled && w.createdBy.startsWith("session:")).length;
+      if (bySessions >= MAX_PENDING_BY_SESSIONS) {
+        return {
+          ok: false,
+          status: 409,
+          error: `Sessions already have ${MAX_PENDING_BY_SESSIONS} pending wake-ups (the limit for wake-ups created by sessions). Cancel ones that are no longer needed, or ask the user to schedule this one from the Companion UI.`,
+        };
+      }
     }
 
     const wakeup: SessionWakeup = {

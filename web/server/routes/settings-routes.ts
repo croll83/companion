@@ -39,6 +39,7 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
+      companionMcpEnabled: settings.companionMcpEnabled !== false,
     });
   });
 
@@ -118,6 +119,9 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
         return c.json({ error: "timeZone must be empty (automatic) or a valid IANA time zone" }, 400);
       }
     }
+    if (body.companionMcpEnabled !== undefined && typeof body.companionMcpEnabled !== "boolean") {
+      return c.json({ error: "companionMcpEnabled must be a boolean" }, 400);
+    }
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
@@ -141,7 +145,8 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       || body.updateChannel !== undefined
       || body.cliBridgeMode !== undefined
       || body.telegramBotToken !== undefined
-      || body.timeZone !== undefined;
+      || body.timeZone !== undefined
+      || body.companionMcpEnabled !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -241,6 +246,10 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
         typeof body.timeZone === "string"
           ? body.timeZone.trim()
           : undefined,
+      companionMcpEnabled:
+        typeof body.companionMcpEnabled === "boolean"
+          ? body.companionMcpEnabled
+          : undefined,
     });
 
     // Token added/changed/cleared → spawn or stop the bridge child accordingly.
@@ -272,6 +281,7 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
+      companionMcpEnabled: settings.companionMcpEnabled !== false,
     });
   });
 

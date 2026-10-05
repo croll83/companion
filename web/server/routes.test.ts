@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
 vi.mock("./auth-manager.js", () => ({
@@ -230,7 +230,7 @@ vi.mock("./update-checker.js", () => ({
 
 import { Hono } from "hono";
 import { execSync, execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { createRoutes } from "./routes.js";
 import * as envManager from "./env-manager.js";
 import * as promptManager from "./prompt-manager.js";
@@ -239,6 +239,9 @@ import * as sessionNames from "./session-names.js";
 import * as settingsManager from "./settings-manager.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
+import { _setMcpSecretFileForTest, mcpTokenFor } from "./companion-mcp-auth.js";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 
 // ─── Mock factories ──────────────────────────────────────────────────────────
 
@@ -1408,6 +1411,7 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       telegramBotTokenConfigured: false,
       timeZone: "",
+      companionMcpEnabled: true,
     });
   });
 
@@ -1465,6 +1469,7 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       telegramBotTokenConfigured: false,
       timeZone: "",
+      companionMcpEnabled: true,
     });
   });
 
@@ -1595,6 +1600,7 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       telegramBotTokenConfigured: false,
       timeZone: "",
+      companionMcpEnabled: true,
     });
   });
 
@@ -4262,5 +4268,46 @@ describe("GET /api/sessions/:id/browser/host-proxy/:port/*", () => {
     // Should NOT leak the raw error message (e.g. "Connection refused 127.0.0.1:9999")
     expect(json.error).toBe("Proxy failed: upstream unreachable");
     fetchSpy.mockRestore();
+  });
+});
+
+// ─── Companion MCP tokens ───────────────────────────────────────────────────
+// A session's `companion` MCP server calls the API with its own token. The
+// middleware checks it BEFORE the localhost bypass (so a bad token fails
+// loudly) and lets it reach only the routes the MCP tools use.
+describe("auth middleware with Companion MCP tokens", () => {
+  const secretFile = joinPath(tmpdir(), `routes-mcp-secret-${process.pid}.key`);
+  beforeEach(() => {
+    _setMcpSecretFileForTest(secretFile);
+  });
+  afterEach(() => {
+    rmSync(secretFile, { force: true });
+  });
+
+  const bearer = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
+
+  it("accepts a valid token of a live session on the tool routes", async () => {
+    launcher.getSession.mockImplementation((id: string) => (id === "s1" ? { sessionId: "s1", cwd: "/repo" } : undefined));
+    const res = await app.request("/api/sessions/s1", bearer(mcpTokenFor("s1")));
+    expect(res.status).toBe(200);
+    expect((await res.json()).cwd).toBe("/repo");
+  });
+
+  // Session control, settings and the auth token stay out of reach.
+  it("refuses routes the MCP tools do not use", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1" });
+    for (const [method, path] of [["GET", "/api/auth/token"], ["GET", "/api/settings"], ["DELETE", "/api/sessions/s1"]]) {
+      const res = await app.request(path, { method, ...bearer(mcpTokenFor("s1")) });
+      expect(res.status, `${method} ${path}`).toBe(403);
+    }
+  });
+
+  // A forged token, or the token of a deleted session, is a 401 even though
+  // other bearer tokens would pass in this suite (verifyToken is mocked).
+  it("rejects forged tokens and tokens of sessions that no longer exist", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    expect((await app.request("/api/sessions/s1", bearer(mcpTokenFor("s1")))).status).toBe(401);
+    launcher.getSession.mockReturnValue({ sessionId: "s1" });
+    expect((await app.request("/api/sessions/s1", bearer(`${mcpTokenFor("s1").slice(0, -1)}x`))).status).toBe(401);
   });
 });

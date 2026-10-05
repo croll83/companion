@@ -108,7 +108,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 // ─── Import the class under test (after mocks are set up) ───────────────────
 
-import { AgentExecutor, buildAgentPrompt, isAgentTempDir } from "./agent-executor.js";
+import { AgentExecutor, buildAgentPrompt, isAgentTempDir, runAnswerText } from "./agent-executor.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1668,5 +1668,69 @@ describe("AgentExecutor", () => {
       expect(executor.forkSourceError("src-session", "claude")).toBeNull();
       expect(mockResolveForkSource).toHaveBeenCalledWith(launcher, "src-session", "codex");
     });
+  });
+
+  // =========================================================================
+  // Run results (MCP get_run_result / run_agent)
+  // =========================================================================
+  describe("run results", () => {
+    const assistant = (text: string, parent: string | null = null): BrowserIncomingMessage =>
+      ({ type: "assistant", parent_tool_use_id: parent, message: { content: [{ type: "text", text }] } }) as never;
+    const user = (content: string): BrowserIncomingMessage => ({ type: "user_message", content, timestamp: 1 });
+
+    it("exposes the run's session id while it runs", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "a" }));
+      expect(executor.runSessionOf("a")).toBeUndefined();
+      await executor.executeAgent("a");
+      expect(executor.runSessionOf("a")).toBe("session-123");
+    });
+
+    // Claude reports the answer in the result; Codex does not, so the turn's
+    // last top-level assistant text is used. Running and unknown runs differ.
+    it("returns the answer of the run's turn, truncated", async () => {
+      const history: BrowserIncomingMessage[] = [];
+      Object.assign(wsBridge, { getSession: vi.fn(() => ({ messageHistory: history })) });
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "a" }));
+      await executor.executeAgent("a");
+
+      expect(executor.getRunResult("unknown", 100)).toBeNull();
+      expect(executor.getRunResult("session-123", 100)).toMatchObject({ status: "running", result: null, agentId: "a" });
+
+      history.push(user("[agent:a Test Agent]\n\nGo"), assistant("Working"), assistant("sub-agent noise", "tool-1"), assistant("Final answer: 42"));
+      history.push(resultMessage({ is_error: false, subtype: "success" }));
+      executor.handleSessionResult("session-123", history[history.length - 1]);
+      expect(executor.getRunResult("session-123", 100)).toMatchObject({ status: "success", success: true, result: "Final answer: 42", truncated: false });
+      expect(executor.getRunResult("session-123", 5)).toMatchObject({ result: "Final…", truncated: true });
+
+      // Claude: the result text wins over assistant messages.
+      history[history.length - 1] = resultMessage({ is_error: false, subtype: "success", result: "Claude's result" });
+      expect(executor.getRunResult("session-123", 100)?.result).toBe("Claude's result");
+    });
+
+    it("reads finished runs from the execution store", () => {
+      mockExecutionStoreInstance.all.mockReturnValue([
+        { sessionId: "old", agentId: "a", triggerType: "schedule", startedAt: 1, completedAt: 2, success: false, error: "boom" },
+      ]);
+      Object.assign(wsBridge, { getSession: vi.fn(() => undefined) });
+      expect(executor.getRunResult("old", 100)).toMatchObject({ status: "error", error: "boom", result: null, triggerType: "schedule" });
+    });
+  });
+});
+
+describe("runAnswerText", () => {
+  const result = (text?: string): BrowserIncomingMessage => ({ type: "result", data: { type: "result", result: text } }) as never;
+  const say = (text: string): BrowserIncomingMessage =>
+    ({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use" }, { type: "text", text }] } }) as never;
+
+  // Without the agent prompt marker the first turn counts; no result → null;
+  // a turn with no text → null.
+  it("finds the answer of the first turn after the agent prompt", () => {
+    expect(runAnswerText([])).toBeNull();
+    expect(runAnswerText([say("only")])).toBeNull();
+    expect(runAnswerText([say("first"), result(), say("second"), result()])).toBe("first");
+    expect(runAnswerText([say("before"), result("old"), { type: "user_message", content: "[agent:x X]\n\np", timestamp: 1 }, say("after"), result()]))
+      .toBe("after");
+    expect(runAnswerText([result("  ")])).toBeNull();
+    expect(runAnswerText([{ type: "assistant", parent_tool_use_id: null, message: {} } as never, result()])).toBeNull();
   });
 });

@@ -105,6 +105,12 @@ export interface AgentConfig {
   };
 
   // ── Tracking ──
+  /**
+   * Who created the agent: absent or "user" (the UI/API), or "session:<id>"
+   * when a session created it through the `companion` MCP tools. Set by the
+   * server from the caller's MCP token, never from the request body.
+   */
+  createdBy?: string;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -123,7 +129,7 @@ export type AgentConfigCreateInput = Omit<
 /** The portable/shareable JSON format (no internal tracking fields) */
 export type AgentConfigExport = Omit<
   AgentConfig,
-  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled"
+  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "createdBy"
 >;
 
 /**

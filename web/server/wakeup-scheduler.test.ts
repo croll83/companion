@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 const settings = vi.hoisted(() => ({ timeZone: "UTC" }));
 vi.mock("./settings-manager.js", () => ({ getSettings: () => settings }));
 
-import { WakeupScheduler, wakeupMessageText } from "./wakeup-scheduler.js";
+import { MAX_PENDING_BY_SESSIONS, WakeupScheduler, wakeupMessageText } from "./wakeup-scheduler.js";
 import { WakeupStore, type SessionWakeup } from "./wakeup-store.js";
 import { companionBus } from "./event-bus.js";
 import type { DeliveryResult } from "./session-delivery.js";
@@ -98,6 +98,25 @@ describe("creating wake-ups", () => {
   it("caps the pending wake-ups of one session", () => {
     for (let i = 0; i < 50; i++) created(scheduler.create({ sessionId: "s1", message: `m${i}`, cron: "0 9 * * *" }));
     expect(scheduler.create({ sessionId: "s1", message: "one more", cron: "0 9 * * *" })).toMatchObject({ ok: false, status: 409 });
+  });
+
+  // Sessions (the companion MCP tools) may have at most 50 pending wake-ups
+  // across ALL sessions; the user's own wake-ups do not count and are never
+  // refused by this cap. Spent or cancelled ones free their slot.
+  it("caps the pending wake-ups created by sessions, all sessions together", () => {
+    for (const id of ["a", "b"]) sessions.set(id, {});
+    created(scheduler.create({ sessionId: "s1", message: "user", cron: "0 9 * * *" }));
+    const first = created(scheduler.create({ sessionId: "a", message: "a0", cron: "0 9 * * *", createdBy: "session:a" }));
+    for (let i = 1; i < MAX_PENDING_BY_SESSIONS; i++) {
+      const sid = i % 2 ? "a" : "b";
+      created(scheduler.create({ sessionId: sid, message: `m${i}`, cron: "0 9 * * *", createdBy: `session:${sid}` }));
+    }
+    const over = scheduler.create({ sessionId: "b", message: "over", cron: "0 9 * * *", createdBy: "session:b" });
+    expect(over).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/already have 50 pending wake-ups/) });
+    created(scheduler.create({ sessionId: "b", message: "the user can", cron: "0 9 * * *" }));
+
+    expect(scheduler.cancel("a", first.id)).toBe(true);
+    created(scheduler.create({ sessionId: "b", message: "fits again", cron: "0 9 * * *", createdBy: "session:b" }));
   });
 });
 

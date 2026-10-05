@@ -34,6 +34,7 @@ import { getSettings } from "./settings-manager.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
+import { isMcpRouteAllowed, isMcpToken, verifyMcpToken } from "./companion-mcp-auth.js";
 import QRCode from "qrcode";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
@@ -148,13 +149,29 @@ export function createRoutes(
       return next();
     }
 
+    const authHeader = c.req.header("Authorization");
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+    // A session's `companion` MCP server (companion-mcp-auth.ts). Checked
+    // before the localhost bypass: its calls come from loopback, but the
+    // routes use the token to know which session is calling, so a bad token
+    // must fail loudly rather than silently act as an anonymous user.
+    if (isMcpToken(token)) {
+      const caller = verifyMcpToken(token);
+      if (!caller || !launcher.getSession(caller)) {
+        return c.json({ error: "Invalid or expired Companion MCP token (the session no longer exists?)" }, 401);
+      }
+      if (!isMcpRouteAllowed(c.req.method, c.req.path)) {
+        return c.json({ error: "Not available to Companion MCP tokens" }, 403);
+      }
+      return next();
+    }
+
     // Localhost bypass — same machine as the server, always trusted
     if (isLocalhostRequest(c)) {
       return next();
     }
 
-    const authHeader = c.req.header("Authorization");
-    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
     // Also check the companion_auth cookie — iframes (browser preview) can't
     // send Authorization headers, but browsers do forward cookies automatically.
     const cookieToken = getCookie(c, "companion_auth") ?? null;
@@ -845,10 +862,10 @@ export function createRoutes(
     updateCheckStaleMs: UPDATE_CHECK_STALE_MS,
     resetRelaunchBudget: (sessionId) => orchestrator.clearAutoRelaunchCount(sessionId),
   });
-  if (wakeupScheduler) registerWakeupRoutes(api, wakeupScheduler);
+  if (wakeupScheduler) registerWakeupRoutes(api, wakeupScheduler, (id) => launcher.getSession(id));
 
   registerSkillRoutes(api);
-  registerAgentRoutes(api, agentExecutor);
+  registerAgentRoutes(api, agentExecutor, (id) => launcher.getSession(id));
   registerMetricsRoutes(api, { gaugeProvider: wsBridge });
 
   // ─── Recording Hub (hidden feature: COMPANION_RECORDING_HUB=1) ──────

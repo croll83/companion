@@ -8,7 +8,7 @@ process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -35,6 +35,7 @@ import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { telegramBridgeManager } from "./telegram-bridge-manager.js";
 import { isRunningAsService } from "./service.js";
 import { getToken, verifyToken } from "./auth-manager.js";
+import { mcpTokenFor } from "./companion-mcp-auth.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
@@ -85,6 +86,13 @@ wsBridge.setRecorder(recorder);
 wsBridge.setArchivedCheck((sessionId) => launcher.getSession(sessionId)?.archived === true);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
+// Every Claude Code / Codex session gets the built-in `companion` MCP server
+// (wake-ups, agents) unless turned off in Settings. Claude's --mcp-config
+// files live next to the session data and are removed with the session.
+launcher.setCompanionMcp({
+  tokenFor: mcpTokenFor,
+  claudeConfigDir: join(sessionStore.directory, "mcp-config"),
+});
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
 

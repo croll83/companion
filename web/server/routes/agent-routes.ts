@@ -8,6 +8,21 @@ import { getSettings, updateSettings } from "../settings-manager.js";
 import * as staging from "../linear-staging.js";
 import { getOAuthConnection, createOAuthConnection } from "../linear-oauth-connections.js";
 import { isTrustedRequest, socketAddress } from "../network-trust.js";
+import { accessDenied, agentAccessLevel, mcpCallerOf, sessionAccessLevel } from "../companion-mcp-auth.js";
+
+/** What the routes need to know about a session (the launcher's record). */
+export type AgentSessionLookup = (sessionId: string) => { backendType?: string; codexSandbox?: string } | undefined;
+
+/**
+ * Agents that sessions may have created through the `companion` MCP tools
+ * (createdBy "session:<id>"), all sessions together. Agents created by the
+ * user do not count.
+ */
+export const MAX_AGENTS_BY_SESSIONS = 20;
+
+/** Default and largest size of a run result returned by GET /executions/:sessionId/result. */
+const RESULT_DEFAULT_CHARS = 4000;
+const RESULT_MAX_CHARS = 20_000;
 
 /** Fields the user can set when creating/updating an agent */
 const EDITABLE_FIELDS = [
@@ -137,6 +152,7 @@ function toExport(agent: AgentConfig): AgentConfigExport {
     lastRunAt: _lr,
     lastSessionId: _ls,
     enabled: _en,
+    createdBy: _cb,
     ...exportable
   } = agent;
   // Strip Linear OAuth credentials from export (keep oauthConnectionId for reference)
@@ -150,7 +166,24 @@ function toExport(agent: AgentConfig): AgentConfigExport {
 export function registerAgentRoutes(
   api: Hono,
   agentExecutor?: AgentExecutor,
+  getSession?: AgentSessionLookup,
 ): void {
+  /**
+   * For a request from a session's `companion` MCP server: why it may not
+   * act on an agent that runs at `target` level (see accessDenied), or null.
+   */
+  const deniedForCaller = (caller: string | null, agents: Array<Partial<AgentConfig>>, what: string): string | null => {
+    if (!caller) return null;
+    const info = getSession?.(caller);
+    if (!info) return null;
+    const level = sessionAccessLevel(info);
+    for (const agent of agents) {
+      const denied = accessDenied(level, agentAccessLevel(agent), what);
+      if (denied) return denied;
+    }
+    return null;
+  };
+
   const forkSourceError: AgentExecutor["forkSourceError"] | undefined = agentExecutor
     ? (sourceSessionId, backendType) => agentExecutor.forkSourceError(sourceSessionId, backendType)
     : undefined;
@@ -181,6 +214,18 @@ export function registerAgentRoutes(
       const input = buildCreateInput(body);
       const invalid = validateAgentFields(input, { rejectPast: true, forkSourceError });
       if (invalid) return c.json({ error: invalid }, 400);
+      const caller = mcpCallerOf(c.req.header("Authorization"));
+      if (caller) {
+        const denied = deniedForCaller(caller, [input], "create an agent");
+        if (denied) return c.json({ error: denied }, 403);
+        const bySessions = agentStore.listAgents().filter((a) => a.createdBy?.startsWith("session:")).length;
+        if (bySessions >= MAX_AGENTS_BY_SESSIONS) {
+          return c.json({
+            error: `Sessions have already created ${MAX_AGENTS_BY_SESSIONS} agents (the limit for agents created by sessions). Delete agents that are no longer needed, or ask the user to create this one from the Agents page.`,
+          }, 409);
+        }
+        input.createdBy = `session:${caller}`;
+      }
       const agent = agentStore.createAgent(input);
 
       // If this is a Linear agent, resolve credentials:
@@ -320,12 +365,23 @@ export function registerAgentRoutes(
     const body = await c.req.json().catch(() => ({}));
     try {
       const allowed = pickEditable(body);
+      const saved = agentStore.getAgent(id) ?? undefined;
+      // `triggers` replaces the whole object. A client that does not send the
+      // Linear trigger (the MCP tools never do: they only see it without its
+      // credentials) must not wipe it.
+      if (allowed.triggers && saved?.triggers?.linear && !("linear" in allowed.triggers)) {
+        allowed.triggers = { ...allowed.triggers, linear: saved.triggers.linear };
+      }
       const invalid = validateAgentFields(allowed, {
         rejectPast: true,
-        saved: agentStore.getAgent(id) ?? undefined,
+        saved,
         forkSourceError,
       });
       if (invalid) return c.json({ error: invalid }, 400);
+      if (saved) {
+        const denied = deniedForCaller(mcpCallerOf(c.req.header("Authorization")), [saved, { ...saved, ...allowed }], "change an agent");
+        if (denied) return c.json({ error: denied }, 403);
+      }
       const agent = agentStore.updateAgent(id, allowed);
       if (!agent) return c.json({ error: "Agent not found" }, 404);
       // Stop old timer (id may differ after a rename)
@@ -346,6 +402,11 @@ export function registerAgentRoutes(
 
   api.delete("/agents/:id", (c) => {
     const id = c.req.param("id");
+    const existing = agentStore.getAgent(id);
+    if (existing) {
+      const denied = deniedForCaller(mcpCallerOf(c.req.header("Authorization")), [existing], "delete an agent");
+      if (denied) return c.json({ error: denied }, 403);
+    }
     agentExecutor?.stopAgent(id);
     const deleted = agentStore.deleteAgent(id);
     if (!deleted) return c.json({ error: "Agent not found" }, 404);
@@ -373,12 +434,17 @@ export function registerAgentRoutes(
     const id = c.req.param("id");
     const agent = agentStore.getAgent(id);
     if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const denied = deniedForCaller(mcpCallerOf(c.req.header("Authorization")), [agent], "run an agent");
+    if (denied) return c.json({ error: denied }, 403);
     const body = await c.req.json().catch(() => ({}));
     const input = typeof body.input === "string" ? body.input : undefined;
     // Runs even if the agent is disabled, but not on top of a run in progress.
     const result = agentExecutor?.executeAgentManually(id, input);
     if (result && !result.ok) return c.json({ error: result.error }, result.status);
-    return c.json({ ok: true, message: "Agent triggered" });
+    // The run's session exists as soon as the launch started (undefined if
+    // it failed synchronously; the run is then already recorded as failed).
+    const sessionId = agentExecutor?.runSessionOf?.(id);
+    return c.json({ ok: true, message: "Agent triggered", ...(sessionId ? { sessionId } : {}) });
   });
 
   // ── Executions ─────────────────────────────────────────────────────────
@@ -398,6 +464,17 @@ export function registerAgentRoutes(
     const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 500);
     const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
     return c.json(agentExecutor?.listAllExecutions({ agentId, triggerType, status, limit, offset }) ?? { executions: [], total: 0 });
+  });
+
+  /** The final answer of a run (the result of its first turn), truncated to ?maxChars. */
+  api.get("/executions/:sessionId/result", (c) => {
+    const requested = Number(c.req.query("maxChars"));
+    const maxChars = Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.floor(requested), RESULT_MAX_CHARS)
+      : RESULT_DEFAULT_CHARS;
+    const result = agentExecutor?.getRunResult(c.req.param("sessionId"), maxChars);
+    if (!result) return c.json({ error: "Run not found" }, 404);
+    return c.json(result);
   });
 
   // ── Import / Export ────────────────────────────────────────────────────

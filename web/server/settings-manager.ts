@@ -59,6 +59,13 @@ export interface CompanionSettings {
    * fixtures; normalize() applies the default.
    */
   timeZone?: string;
+  /**
+   * "Companion MCP tools for sessions": give every Claude Code and Codex
+   * session the built-in `companion` MCP server (wake-ups, agents). Read at
+   * each spawn, so a change applies to sessions launched or relaunched after
+   * it. Optional in fixtures; normalize() applies the default (on).
+   */
+  companionMcpEnabled?: boolean;
   updatedAt: number;
 }
 
@@ -93,6 +100,7 @@ let settings: CompanionSettings = {
   cliBridgeMode: DEFAULT_CLI_BRIDGE_MODE,
   telegramBotToken: "",
   timeZone: "",
+  companionMcpEnabled: true,
   updatedAt: 0,
 };
 
@@ -129,6 +137,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
       typeof raw?.timeZone === "string" && isValidTimeZoneSetting(raw.timeZone.trim())
         ? raw.timeZone.trim()
         : "",
+    companionMcpEnabled: typeof raw?.companionMcpEnabled === "boolean" ? raw.companionMcpEnabled : true,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -157,7 +166,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "timeZone">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "timeZone" | "companionMcpEnabled">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -186,6 +195,7 @@ export function updateSettings(
     cliBridgeMode: patch.cliBridgeMode ?? settings.cliBridgeMode,
     telegramBotToken: patch.telegramBotToken ?? settings.telegramBotToken,
     timeZone: patch.timeZone ?? settings.timeZone,
+    companionMcpEnabled: patch.companionMcpEnabled ?? settings.companionMcpEnabled,
     updatedAt: Date.now(),
   });
   persist();
