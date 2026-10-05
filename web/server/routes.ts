@@ -34,7 +34,7 @@ import { getSettings } from "./settings-manager.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
-import { isMcpRouteAllowed, isMcpToken, verifyMcpToken } from "./companion-mcp-auth.js";
+import { isMcpRouteAllowed, isMcpToken, mcpCallerRefusal, verifyMcpToken } from "./companion-mcp-auth.js";
 import QRCode from "qrcode";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
@@ -158,9 +158,12 @@ export function createRoutes(
     // must fail loudly rather than silently act as an anonymous user.
     if (isMcpToken(token)) {
       const caller = verifyMcpToken(token);
-      if (!caller || !launcher.getSession(caller)) {
+      const callerInfo = caller ? launcher.getSession(caller) : undefined;
+      if (!caller || !callerInfo) {
         return c.json({ error: "Invalid or expired Companion MCP token (the session no longer exists?)" }, 401);
       }
+      const refusal = mcpCallerRefusal(callerInfo);
+      if (refusal) return c.json({ error: refusal }, 403);
       if (!isMcpRouteAllowed(c.req.method, c.req.path, caller)) {
         return c.json({ error: "Not available to Companion MCP tokens" }, 403);
       }
@@ -862,7 +865,7 @@ export function createRoutes(
     updateCheckStaleMs: UPDATE_CHECK_STALE_MS,
     resetRelaunchBudget: (sessionId) => orchestrator.clearAutoRelaunchCount(sessionId),
   });
-  if (wakeupScheduler) registerWakeupRoutes(api, wakeupScheduler, (id) => launcher.getSession(id));
+  if (wakeupScheduler) registerWakeupRoutes(api, wakeupScheduler);
 
   registerSkillRoutes(api);
   registerAgentRoutes(api, agentExecutor, (id) => launcher.getSession(id));

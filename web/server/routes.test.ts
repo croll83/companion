@@ -4296,9 +4296,26 @@ describe("auth middleware with Companion MCP tokens", () => {
   // Session control, settings and the auth token stay out of reach.
   it("refuses routes the MCP tools do not use", async () => {
     launcher.getSession.mockReturnValue({ sessionId: "s1" });
-    for (const [method, path] of [["GET", "/api/auth/token"], ["GET", "/api/settings"], ["DELETE", "/api/sessions/s1"], ["GET", "/api/sessions/other"]]) {
+    for (const [method, path] of [
+      ["GET", "/api/auth/token"], ["GET", "/api/settings"], ["DELETE", "/api/sessions/s1"], ["GET", "/api/sessions/other"],
+      // Another session's wake-ups (review finding: tokens were not scoped).
+      ["GET", "/api/sessions/other/wakeups"], ["POST", "/api/sessions/other/wakeups"], ["DELETE", "/api/sessions/other/wakeups/wk-1"],
+    ]) {
       const res = await app.request(path, { method, ...bearer(mcpTokenFor("s1")) });
       expect(res.status, `${method} ${path}`).toBe(403);
+    }
+  });
+
+  // Review finding: a tool-restricted session (agents' allowedTools → --tools)
+  // must not use the companion tools to create or run an unrestricted agent.
+  // The launcher does not inject the server there; a token that reached such
+  // a session anyway is refused on every route.
+  it("refuses the token of a tool-restricted session", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1", tools: ["Read"] });
+    for (const [method, path] of [["GET", "/api/sessions/s1"], ["POST", "/api/agents"], ["POST", "/api/agents/a/run"]]) {
+      const res = await app.request(path, { method, ...bearer(mcpTokenFor("s1")) });
+      expect(res.status, `${method} ${path}`).toBe(403);
+      expect((await res.json()).error).toMatch(/restricted tool set/);
     }
   });
 

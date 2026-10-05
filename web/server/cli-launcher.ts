@@ -122,6 +122,16 @@ const COMPANION_PRIVATE_ENV: Record<string, undefined> = {
   COMPANION_API_URL: undefined,
 };
 
+/**
+ * Claude Code's built-in scheduling tools. Their wake-ups and cron jobs live
+ * only inside the running CLI process: an idle-kill, relaunch or server
+ * restart silently drops them, and Companion never shows them. Sessions that
+ * get the companion MCP server (whose schedule_wakeup is persisted, shown on
+ * the session and survives restarts) do not get these, so the model cannot
+ * pick the fragile one.
+ */
+const CLAUDE_BUILTIN_SCHEDULING_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList"];
+
 const CODEX_WS_PROXY_PATH = fileURLToPath(new URL("./codex-ws-proxy.cjs", import.meta.url));
 
 /**
@@ -407,16 +417,25 @@ export class CliLauncher {
     });
   }
 
-  /** `--mcp-config <file>` for a Claude spawn (empty when not injected). */
-  private claudeMcpArgs(sessionId: string): string[] {
+  /**
+   * `--mcp-config <file>` for a Claude spawn, plus `--disallowedTools` for
+   * Claude Code's own scheduling tools, which the companion tools replace
+   * (empty when not injected). Never injected into a session restricted to
+   * some built-in tools (`--tools`): that flag does not limit MCP tools, and
+   * with them such a session could create and run an unrestricted agent.
+   */
+  private claudeMcpArgs(sessionId: string, info: Pick<SdkSessionInfo, "tools">): string[] {
     if (!this.companionMcp) return [];
-    const entry = this.companionMcpEntry(sessionId);
+    const entry = info.tools && info.tools.length > 0 ? null : this.companionMcpEntry(sessionId);
     if (!entry) {
       removeClaudeMcpConfig(this.companionMcp.claudeConfigDir, sessionId);
       return [];
     }
     try {
-      return ["--mcp-config", writeClaudeMcpConfig(this.companionMcp.claudeConfigDir, sessionId, entry)];
+      return [
+        "--mcp-config", writeClaudeMcpConfig(this.companionMcp.claudeConfigDir, sessionId, entry),
+        "--disallowedTools", CLAUDE_BUILTIN_SCHEDULING_TOOLS.join(","),
+      ];
     } catch (err) {
       console.warn(`[cli-launcher] Could not write the companion MCP config for ${sessionId}; starting without it:`, err);
       return [];
@@ -807,7 +826,7 @@ export class CliLauncher {
     }
     // The built-in `companion` MCP server, added to (never replacing) the
     // user's own MCP servers: no --strict-mcp-config.
-    args.push(...this.claudeMcpArgs(sessionId));
+    args.push(...this.claudeMcpArgs(sessionId, info));
     // Fork: start from a COPY of another session's transcript, until this
     // session has a transcript of its own (then --resume below takes over).
     const forkFrom = !options.resumeSessionId && !info.cliSessionId ? info.forkSource?.cliSessionId : undefined;

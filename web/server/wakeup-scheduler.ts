@@ -2,7 +2,7 @@ import { Cron } from "croner";
 import { randomBytes } from "node:crypto";
 import type { DeliveryResult } from "./session-delivery.js";
 import { companionBus } from "./event-bus.js";
-import { nextScheduledRun, scheduleTimeZone, validateSchedule } from "./agent-schedule.js";
+import { cronRunsMoreOftenThan, MCP_MIN_CRON_INTERVAL_MINUTES, nextScheduledRun, scheduleTimeZone, validateSchedule } from "./agent-schedule.js";
 import { WakeupStore, type SessionWakeup, type WakeupSchedule } from "./wakeup-store.js";
 
 /** A one-shot missed by less than this while the server was down still fires at startup. */
@@ -151,6 +151,14 @@ export class WakeupScheduler {
       { rejectPast: true },
     );
     if (invalid) return { ok: false, status: 400, error: invalid };
+    // Each firing is a turn of the session: sessions may not set a tight loop.
+    if (hasCron && createdBy.startsWith("session:") && cronRunsMoreOftenThan(expression, MCP_MIN_CRON_INTERVAL_MINUTES)) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Repeating wake-ups set by sessions must be at least ${MCP_MIN_CRON_INTERVAL_MINUTES} minutes apart ("${expression}" fires more often). To poll more often, schedule a one-time wake-up and set the next one when it fires.`,
+      };
+    }
 
     const pending = this.listForSession(input.sessionId).filter((w) => w.enabled).length;
     if (pending >= MAX_PENDING_PER_SESSION) {

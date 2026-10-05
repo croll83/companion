@@ -49,7 +49,7 @@ The source must be a session of the same backend as the agent, with at least one
 Agent runs are unattended: nobody is there to answer an approval prompt.
 
 - **Claude Code** agents always run with full permissions (`bypassPermissions`). The editor shows this as a fixed **Full permissions** badge. To limit what an agent can do, use **Allowed tools** (see Advanced configuration).
-- **Codex** never asks for approvals in agent runs. The mode you pick selects the sandbox: **Full Auto** runs without a sandbox (`danger-full-access`), **Supervised** runs in the `workspace-write` sandbox.
+- **Codex** never asks for approvals in agent runs. The mode you pick selects the sandbox: **Full Auto** runs without a sandbox (`danger-full-access`), **Supervised** runs in the `workspace-write` sandbox on every turn: it writes only inside the agent's folder, and reaches the network only when the **Internet** toggle is on.
 
 ## Runs
 
@@ -196,7 +196,7 @@ Add [Model Context Protocol](https://modelcontextprotocol.io/) servers to give t
 Limit the agent to a set of Claude Code's built-in tools. Type a tool name (for example `Read`, `Grep`, `Glob`, `Bash`, `Edit`, `Write`, `WebFetch`) and press Enter. The agent then has **only** those built-in tools: The Companion starts Claude Code with `--tools`. Leave the list empty to allow all tools.
 
 - Only plain tool names are accepted. Permission patterns such as `Bash(git *)` are not supported.
-- MCP server tools are not affected by this list.
+- MCP server tools are not affected by this list. For that reason an agent with allowed tools does not get the built-in `companion` MCP server (see [Companion MCP tools](#/docs/guides/companion-mcp)): it cannot schedule wake-ups or create, change or run agents, so it cannot start an agent without the limit. MCP servers you add to the agent yourself are still available to it.
 - Codex has no per-tool restriction, so the option is hidden for Codex agents. Use the Codex sandbox mode instead.
 
 ### Per-agent environment variables

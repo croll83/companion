@@ -104,7 +104,7 @@ describe("wake-up routes called by a session", () => {
       isBusy: () => false,
     });
     const api = new Hono();
-    registerWakeupRoutes(api, mcpScheduler, (id) => SESSIONS[id]);
+    registerWakeupRoutes(api, mcpScheduler);
     mcpApp = new Hono();
     mcpApp.route("/api", api);
   });
@@ -125,20 +125,25 @@ describe("wake-up routes called by a session", () => {
     expect((await res.json()).wakeup.createdBy).toBe("session:full");
   });
 
-  // A sandboxed session cannot push messages into (or cancel the plans of)
-  // a full-access session; same-level and own-session targets are fine.
-  it("keeps sandboxed sessions out of full-access sessions", async () => {
+  // An MCP token only reaches its own session's wake-ups, whatever the
+  // access levels (review finding: any full-access session could push
+  // messages into, read or cancel the wake-ups of any other session).
+  // Requests without a token (the user) are not restricted.
+  it("keeps every session to its own wake-ups", async () => {
     const denied = await mcpApp.request("/api/sessions/full/wakeups", as("boxed", "POST", { message: "m", cron: "0 9 * * *" }));
     expect(denied.status).toBe(403);
-    expect((await denied.json()).error).toMatch(/runs sandboxed/);
+    expect((await denied.json()).error).toMatch(/only manage this session's own wake-ups/);
     expect((await mcpApp.request("/api/sessions/boxed/wakeups", as("boxed", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(201);
-    expect((await mcpApp.request("/api/sessions/boxed2/wakeups", as("boxed", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(201);
-    expect((await mcpApp.request("/api/sessions/boxed/wakeups", as("full", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(201);
-    // Unknown target: the scheduler's 404, not a permission error.
-    expect((await mcpApp.request("/api/sessions/gone/wakeups", as("boxed", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(404);
+    expect((await mcpApp.request("/api/sessions/boxed2/wakeups", as("boxed", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(403);
+    expect((await mcpApp.request("/api/sessions/boxed/wakeups", as("full", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(403);
+    expect((await mcpApp.request("/api/sessions/gone/wakeups", as("boxed", "POST", { message: "m", cron: "0 9 * * *" }))).status).toBe(403);
 
     const created = await mcpApp.request("/api/sessions/full/wakeups", json("POST", { message: "user's", cron: "0 8 * * *" }));
     const { wakeup } = await created.json();
+    // Listing another session's wake-ups would leak their messages.
+    expect((await mcpApp.request("/api/sessions/full/wakeups", as("boxed", "GET"))).status).toBe(403);
+    const ownList = await (await mcpApp.request("/api/sessions/full/wakeups", as("full", "GET"))).json();
+    expect(ownList.wakeups.map((w: { id: string }) => w.id)).toContain(wakeup.id);
     expect((await mcpApp.request(`/api/sessions/full/wakeups/${wakeup.id}`, as("boxed", "DELETE"))).status).toBe(403);
     expect((await mcpApp.request(`/api/sessions/full/wakeups/${wakeup.id}`, as("full", "DELETE"))).status).toBe(200);
   });

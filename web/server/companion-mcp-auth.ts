@@ -100,14 +100,30 @@ const MCP_ROUTES: Array<[method: string, pattern: RegExp]> = [
 
 /**
  * Whether the MCP token of session `caller` may call `method path` (path
- * with or without the /api prefix). The full session record is readable for
- * the caller's own session only (the tools need its folder, backend, model).
+ * with or without the /api prefix). Session routes (its record, which the
+ * tools need for folder/backend/model, and its wake-ups) are open for the
+ * caller's own session only.
  */
 export function isMcpRouteAllowed(method: string, path: string, caller: string): boolean {
   const rel = path.replace(/^\/api(?=\/)/, "");
-  const own = /^\/sessions\/([^/]+)$/.exec(rel);
+  const own = /^\/sessions\/([^/]+)(\/|$)/.exec(rel);
   if (own && decodeURIComponent(own[1]) !== caller) return false;
   return MCP_ROUTES.some(([m, re]) => m === method.toUpperCase() && re.test(rel));
+}
+
+/**
+ * Why the session `info` may not use its MCP token at all, or null. A
+ * session restricted to some built-in tools (`--tools`, agents' allowedTools)
+ * does not get the companion MCP server: `--tools` does not limit MCP tools,
+ * and with them such a session could create and run an unrestricted agent.
+ * The launcher does not inject the server there; this refuses a token that
+ * reached such a session anyway (e.g. one spawned before the change).
+ */
+export function mcpCallerRefusal(info: { tools?: string[] }): string | null {
+  if (info.tools && info.tools.length > 0) {
+    return "This session runs with a restricted tool set, so the Companion MCP tools are not available to it.";
+  }
+  return null;
 }
 
 // ── Access levels ───────────────────────────────────────────────────────────

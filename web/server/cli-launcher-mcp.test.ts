@@ -169,6 +169,48 @@ describe("companion MCP for Claude sessions", () => {
     expect(existsSync(path)).toBe(false);
   });
 
+  // Review finding: with the companion tools listed, a real Claude CLI still
+  // picked its built-in ScheduleWakeup, whose wake-up lives only in the CLI
+  // process (lost on idle-kill/restart, invisible in Companion). With the
+  // MCP server injected those built-ins are denied, at every relaunch; with
+  // the setting off they stay available.
+  it("disallows Claude's built-in scheduling tools only while the MCP server is injected", async () => {
+    const launcher = wiredLauncher();
+    const info = launcher.launch({ cwd: "/work" });
+    const flagValue = (n: number) => {
+      const args = spawnArgs(n);
+      const at = args.indexOf("--disallowedTools");
+      return at < 0 ? undefined : args[at + 1];
+    };
+    expect(flagValue(0)).toBe("ScheduleWakeup,CronCreate,CronDelete,CronList");
+
+    await launcher.relaunch(info.sessionId);
+    expect(flagValue(1)).toBe("ScheduleWakeup,CronCreate,CronDelete,CronList");
+
+    h.settings.companionMcpEnabled = false;
+    await launcher.relaunch(info.sessionId);
+    expect(spawnArgs(2)).not.toContain("--mcp-config");
+    expect(flagValue(2)).toBeUndefined();
+  });
+
+  // Review finding: `--tools` limits only built-in tools, and agents run with
+  // bypassPermissions, so a "read-only" agent (allowedTools) that got the
+  // companion MCP could create and run an unrestricted agent. Such sessions
+  // get no MCP server at all, at launch and at relaunch.
+  it("does not inject the MCP server into a tool-restricted session", async () => {
+    const launcher = wiredLauncher();
+    const info = launcher.launch({ cwd: "/work", tools: ["Read", "WebFetch"], permissionMode: "bypassPermissions" });
+    const args = spawnArgs(0);
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read,WebFetch");
+    expect(args).not.toContain("--mcp-config");
+    expect(args).not.toContain("--disallowedTools");
+    expect(existsSync(join(configDir(), `${info.sessionId}.json`))).toBe(false);
+
+    await launcher.relaunch(info.sessionId);
+    expect(spawnArgs(1)).toContain("--tools");
+    expect(spawnArgs(1)).not.toContain("--mcp-config");
+  });
+
   // Not wired (embedders, older tests): behaviour is unchanged.
   it("injects nothing when the launcher is not wired", () => {
     const launcher = new CliLauncher(3456);

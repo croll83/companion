@@ -3,15 +3,28 @@ import type { Context, Hono } from "hono";
 import * as agentStore from "../agent-store.js";
 import type { AgentExecutor } from "../agent-executor.js";
 import type { AgentConfig, AgentConfigCreateInput, AgentConfigExport } from "../agent-types.js";
-import { validateSchedule } from "../agent-schedule.js";
+import { cronRunsMoreOftenThan, MCP_MIN_CRON_INTERVAL_MINUTES, validateSchedule } from "../agent-schedule.js";
 import { getSettings, updateSettings } from "../settings-manager.js";
 import * as staging from "../linear-staging.js";
 import { getOAuthConnection, createOAuthConnection } from "../linear-oauth-connections.js";
 import { isTrustedRequest, socketAddress } from "../network-trust.js";
 import { accessDenied, agentAccessLevel, mcpCallerOf, sessionAccessLevel } from "../companion-mcp-auth.js";
+import { isPathWithin } from "../path-scope.js";
 
 /** What the routes need to know about a session (the launcher's record). */
-export type AgentSessionLookup = (sessionId: string) => { backendType?: string; codexSandbox?: string } | undefined;
+export type AgentSessionLookup = (sessionId: string) => {
+  backendType?: string;
+  codexSandbox?: string;
+  codexInternetAccess?: boolean;
+  cwd?: string;
+} | undefined;
+
+/**
+ * Agent fields a session's MCP token may never set: they run outside any
+ * sandbox (MCP servers are started by the CLI itself) or change the spawn
+ * environment (NODE_OPTIONS, PATH, ...). The MCP tools never send them.
+ */
+const MCP_FORBIDDEN_FIELDS = ["env", "envSlug", "mcpServers"] as const;
 
 /**
  * Agents that sessions may have created through the `companion` MCP tools
@@ -184,6 +197,55 @@ export function registerAgentRoutes(
     return null;
   };
 
+  /**
+   * For a request from a session's MCP token that sets agent fields: why it
+   * may not, or null. Applied to create and update alike:
+   *  - env, envSlug and mcpServers are off limits to every session;
+   *  - a repeating schedule must leave MCP_MIN_CRON_INTERVAL_MINUTES between
+   *    runs (each run is a new CLI process);
+   *  - a sandboxed session keeps its agents inside its own folder (or a
+   *    fresh "temp" one) and gives them its own network access, which is
+   *    forced here rather than refused.
+   */
+  const fieldsDeniedForCaller = (caller: string, fields: Partial<AgentConfig>): string | null => {
+    const forbidden = MCP_FORBIDDEN_FIELDS.find((key) => fields[key] !== undefined);
+    if (forbidden) return `Companion MCP tools cannot set "${forbidden}" on an agent. Ask the user to set it from the Agents page.`;
+    const schedule = fields.triggers?.schedule;
+    if (schedule?.enabled && schedule.recurring && cronRunsMoreOftenThan(schedule.expression, MCP_MIN_CRON_INTERVAL_MINUTES)) {
+      return `Schedules set by sessions must be at least ${MCP_MIN_CRON_INTERVAL_MINUTES} minutes apart ("${schedule.expression}" runs more often).`;
+    }
+    const info = getSession?.(caller);
+    if (info && sessionAccessLevel(info) === "sandboxed") {
+      const cwd = fields.cwd?.trim();
+      if (cwd && cwd !== "temp" && !(info.cwd && isPathWithin(cwd, info.cwd))) {
+        return `This session runs sandboxed (Codex workspace-write), so its agents must work inside its folder ${info.cwd ?? ""} (or "temp").`;
+      }
+      fields.codexInternetAccess = info.codexInternetAccess === true;
+    }
+    return null;
+  };
+
+  /** Whether the MCP token of `caller` created this agent. */
+  const createdByCaller = (caller: string, agent: Partial<AgentConfig>) => agent.createdBy === `session:${caller}`;
+
+  /**
+   * MCP tokens may change, delete or run only the agents their own session
+   * created; everything else stays with the user (the UI).
+   */
+  const notOwnAgent = (caller: string | null, agent: Partial<AgentConfig>, what: string): string | null => {
+    if (!caller || createdByCaller(caller, agent)) return null;
+    return `Companion MCP tools can only ${what} agents this session created. Ask the user to do it from the Agents page.`;
+  };
+
+  /** What an MCP token sees of an agent: no webhook secret unless its session created the agent. */
+  const presentFor = (caller: string | null, agent: AgentConfig) => {
+    const shown = present(agent);
+    const webhook = agent.triggers?.webhook;
+    if (!caller || !webhook || createdByCaller(caller, agent)) return shown;
+    const { secret: _secret, ...rest } = webhook;
+    return { ...shown, triggers: { ...(shown.triggers as object), webhook: rest } };
+  };
+
   const forkSourceError: AgentExecutor["forkSourceError"] | undefined = agentExecutor
     ? (sourceSessionId, backendType) => agentExecutor.forkSourceError(sourceSessionId, backendType)
     : undefined;
@@ -199,13 +261,14 @@ export function registerAgentRoutes(
   // ── CRUD ────────────────────────────────────────────────────────────────
 
   api.get("/agents", (c) => {
-    return c.json(agentStore.listAgents().map(present));
+    const caller = mcpCallerOf(c.req.header("Authorization"));
+    return c.json(agentStore.listAgents().map((agent) => presentFor(caller, agent)));
   });
 
   api.get("/agents/:id", (c) => {
     const agent = agentStore.getAgent(c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    return c.json(present(agent));
+    return c.json(presentFor(mcpCallerOf(c.req.header("Authorization")), agent));
   });
 
   api.post("/agents", async (c) => {
@@ -216,7 +279,7 @@ export function registerAgentRoutes(
       if (invalid) return c.json({ error: invalid }, 400);
       const caller = mcpCallerOf(c.req.header("Authorization"));
       if (caller) {
-        const denied = deniedForCaller(caller, [input], "create an agent");
+        const denied = fieldsDeniedForCaller(caller, input) ?? deniedForCaller(caller, [input], "create an agent");
         if (denied) return c.json({ error: denied }, 403);
         const bySessions = agentStore.listAgents().filter((a) => a.createdBy?.startsWith("session:")).length;
         if (bySessions >= MAX_AGENTS_BY_SESSIONS) {
@@ -378,8 +441,11 @@ export function registerAgentRoutes(
         forkSourceError,
       });
       if (invalid) return c.json({ error: invalid }, 400);
-      if (saved) {
-        const denied = deniedForCaller(mcpCallerOf(c.req.header("Authorization")), [saved, { ...saved, ...allowed }], "change an agent");
+      const caller = mcpCallerOf(c.req.header("Authorization"));
+      if (saved && caller) {
+        const denied = notOwnAgent(caller, saved, "change")
+          ?? fieldsDeniedForCaller(caller, allowed)
+          ?? deniedForCaller(caller, [saved, { ...saved, ...allowed }], "change an agent");
         if (denied) return c.json({ error: denied }, 403);
       }
       const agent = agentStore.updateAgent(id, allowed);
@@ -404,7 +470,8 @@ export function registerAgentRoutes(
     const id = c.req.param("id");
     const existing = agentStore.getAgent(id);
     if (existing) {
-      const denied = deniedForCaller(mcpCallerOf(c.req.header("Authorization")), [existing], "delete an agent");
+      const caller = mcpCallerOf(c.req.header("Authorization"));
+      const denied = notOwnAgent(caller, existing, "delete") ?? deniedForCaller(caller, [existing], "delete an agent");
       if (denied) return c.json({ error: denied }, 403);
     }
     agentExecutor?.stopAgent(id);
@@ -434,7 +501,8 @@ export function registerAgentRoutes(
     const id = c.req.param("id");
     const agent = agentStore.getAgent(id);
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const denied = deniedForCaller(mcpCallerOf(c.req.header("Authorization")), [agent], "run an agent");
+    const caller = mcpCallerOf(c.req.header("Authorization"));
+    const denied = notOwnAgent(caller, agent, "run") ?? deniedForCaller(caller, [agent], "run an agent");
     if (denied) return c.json({ error: denied }, 403);
     const body = await c.req.json().catch(() => ({}));
     const input = typeof body.input === "string" ? body.input : undefined;

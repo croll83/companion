@@ -21,10 +21,11 @@ import * as agentStore from "../agent-store.js";
 import { _setMcpSecretFileForTest, mcpTokenFor } from "../companion-mcp-auth.js";
 import { MAX_AGENTS_BY_SESSIONS, registerAgentRoutes } from "./agent-routes.js";
 
-const SESSIONS: Record<string, { backendType: string; codexSandbox?: string }> = {
-  claude: { backendType: "claude" },
-  codexFull: { backendType: "codex", codexSandbox: "danger-full-access" },
-  codexSandboxed: { backendType: "codex", codexSandbox: "workspace-write" },
+const SESSIONS: Record<string, { backendType: string; codexSandbox?: string; cwd?: string; codexInternetAccess?: boolean }> = {
+  claude: { backendType: "claude", cwd: "/w" },
+  claude2: { backendType: "claude", cwd: "/w" },
+  codexFull: { backendType: "codex", codexSandbox: "danger-full-access", cwd: "/w" },
+  codexSandboxed: { backendType: "codex", codexSandbox: "workspace-write", cwd: "/w", codexInternetAccess: false },
 };
 
 function mockExecutor() {
@@ -106,8 +107,8 @@ describe("agents created by sessions", () => {
     expect((await over.json()).error).toMatch(/already created 20 agents/);
     expect((await req("POST", "/agents", claudeAgent("Still Fine For User"))).status).toBe(201);
 
-    // Deleting one frees a slot.
-    expect((await req("DELETE", "/agents/session-agent-0", undefined, "claude")).status).toBe(200);
+    // Deleting one frees a slot (session-agent-0 was created by codexFull).
+    expect((await req("DELETE", "/agents/session-agent-0", undefined, "codexFull")).status).toBe(200);
     expect((await req("POST", "/agents", claudeAgent("Now It Fits"), "claude")).status).toBe(201);
   });
 });
@@ -126,7 +127,7 @@ describe("sandboxed sessions", () => {
 
   it("may not change, run or delete full-access agents", async () => {
     await req("POST", "/agents", claudeAgent("Full"));
-    await req("POST", "/agents", codexAgent("Boxed"));
+    await req("POST", "/agents", codexAgent("Boxed"), "codexSandboxed");
 
     expect((await req("PUT", "/agents/full", { prompt: "rm -rf /" }, "codexSandboxed")).status).toBe(403);
     expect((await req("POST", "/agents/full/run", { input: "x" }, "codexSandboxed")).status).toBe(403);
@@ -140,16 +141,109 @@ describe("sandboxed sessions", () => {
     expect((await req("POST", "/agents/boxed/run", {}, "codexSandboxed")).status).toBe(200);
     expect((await req("DELETE", "/agents/boxed", undefined, "codexSandboxed")).status).toBe(200);
 
-    // Full-access sessions and the user are not restricted.
-    expect((await req("PUT", "/agents/full", { prompt: "ok" }, "codexFull")).status).toBe(200);
-    expect((await req("POST", "/agents/full/run", {}, "claude")).status).toBe(200);
+    // The user is not restricted.
+    expect((await req("PUT", "/agents/full", { prompt: "ok" })).status).toBe(200);
+    expect((await req("POST", "/agents/full/run", {})).status).toBe(200);
+  });
+
+  // Review finding: "sandboxed" agents could be pointed anywhere and given
+  // network, MCP servers or env (NODE_OPTIONS...) by a sandboxed session.
+  // Their folder must be inside the caller's (or a fresh "temp" one), and
+  // they get the caller's network access whatever the request says.
+  it("keeps its agents inside its folder and its network access", async () => {
+    const outside = await req("POST", "/agents", { ...codexAgent("Outside"), cwd: "/" }, "codexSandboxed");
+    expect(outside.status).toBe(403);
+    expect((await outside.json()).error).toMatch(/inside its folder \/w/);
+    expect((await req("POST", "/agents", { ...codexAgent("Sibling"), cwd: "/wx" }, "codexSandboxed")).status).toBe(403);
+    expect((await req("POST", "/agents", { ...codexAgent("Temp"), cwd: "temp" }, "codexSandboxed")).status).toBe(201);
+    const inside = await req("POST", "/agents", { ...codexAgent("Inside"), cwd: "/w/sub", codexInternetAccess: true }, "codexSandboxed");
+    expect(inside.status).toBe(201);
+    expect(agentStore.getAgent("inside")?.codexInternetAccess).toBe(false);
+
+    expect((await req("PUT", "/agents/inside", { cwd: "/etc" }, "codexSandboxed")).status).toBe(403);
+    expect((await req("PUT", "/agents/inside", { codexInternetAccess: true }, "codexSandboxed")).status).toBe(200);
+    expect(agentStore.getAgent("inside")?.codexInternetAccess).toBe(false);
+  });
+});
+
+// Review finding: MCP tokens were not limited to their own agents, so a
+// (prompt-injected) session could rewrite, delete or run the user's
+// full-permission agents, and read every agent's webhook secret.
+describe("agents of other creators", () => {
+  it("may only be changed, run or deleted by the session that created them", async () => {
+    await req("POST", "/agents", claudeAgent("User Agent"));
+    await req("POST", "/agents", claudeAgent("Mine"), "claude");
+
+    for (const caller of ["claude", "claude2"]) {
+      const put = await req("PUT", "/agents/user-agent", { prompt: "exfiltrate" }, caller);
+      expect(put.status).toBe(403);
+      expect((await put.json()).error).toMatch(/only change agents this session created/);
+      expect((await req("POST", "/agents/user-agent/run", { input: "x" }, caller)).status).toBe(403);
+      expect((await req("DELETE", "/agents/user-agent", undefined, caller)).status).toBe(403);
+    }
+    expect(agentStore.getAgent("user-agent")?.prompt).toBe("do it");
+    expect(executor.executeAgentManually).not.toHaveBeenCalled();
+
+    // Another session's agent is just as off limits.
+    expect((await req("PUT", "/agents/mine", { prompt: "x" }, "claude2")).status).toBe(403);
+    expect((await req("PUT", "/agents/mine", { prompt: "mine" }, "claude")).status).toBe(200);
+    expect((await req("POST", "/agents/mine/run", {}, "claude")).status).toBe(200);
+    expect((await req("DELETE", "/agents/mine", undefined, "claude")).status).toBe(200);
+  });
+
+  it("hides webhook secrets of agents the calling session did not create", async () => {
+    const hook = { triggers: { webhook: { enabled: true, secret: "" } } };
+    await req("POST", "/agents", { ...claudeAgent("User Hook"), ...hook });
+    await req("POST", "/agents", { ...claudeAgent("Own Hook"), ...hook }, "claude");
+    const userSecret = agentStore.getAgent("user-hook")?.triggers?.webhook?.secret;
+    const ownSecret = agentStore.getAgent("own-hook")?.triggers?.webhook?.secret;
+    expect(userSecret).toBeTruthy();
+
+    const list = await (await req("GET", "/agents", undefined, "claude")).json() as Array<{ id: string; triggers: { webhook: { enabled: boolean; secret?: string } } }>;
+    const byId = Object.fromEntries(list.map((a) => [a.id, a]));
+    expect(byId["user-hook"].triggers.webhook).toEqual({ enabled: true });
+    expect(byId["own-hook"].triggers.webhook.secret).toBe(ownSecret);
+    const one = await (await req("GET", "/agents/user-hook", undefined, "claude")).json();
+    expect(one.triggers.webhook.secret).toBeUndefined();
+    expect(JSON.stringify(list)).not.toContain(userSecret);
+
+    // The user (no MCP token) still sees it.
+    expect((await (await req("GET", "/agents/user-hook")).json()).triggers.webhook.secret).toBe(userSecret);
+  });
+
+  // env, envSlug and mcpServers change what runs outside any sandbox (MCP
+  // servers, NODE_OPTIONS...): never settable through an MCP token.
+  it("refuses env, envSlug and mcpServers from MCP tokens", async () => {
+    for (const extra of [{ env: { NODE_OPTIONS: "--require /tmp/x.js" } }, { envSlug: "prod" }, { mcpServers: { x: { type: "stdio", command: "sh" } } }]) {
+      const res = await req("POST", "/agents", { ...claudeAgent(`Extra ${Object.keys(extra)[0]}`), ...extra }, "claude");
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toMatch(/cannot set "(env|envSlug|mcpServers)"/);
+    }
+    await req("POST", "/agents", claudeAgent("Own"), "claude");
+    expect((await req("PUT", "/agents/own", { env: { A: "1" } }, "claude")).status).toBe(403);
+    // The user can.
+    expect((await req("POST", "/agents", { ...claudeAgent("User Env"), env: { A: "1" } })).status).toBe(201);
+  });
+
+  // Review finding: within the caps, per-minute schedules from sessions
+  // could start a CLI per agent every minute. Sessions get a 15-minute floor.
+  it("refuses repeating schedules under 15 minutes from sessions", async () => {
+    const every = (expression: string) => ({ triggers: { schedule: { enabled: true, expression, recurring: true } } });
+    const tight = await req("POST", "/agents", { ...claudeAgent("Tight"), ...every("*/5 * * * *") }, "claude");
+    expect(tight.status).toBe(403);
+    expect((await tight.json()).error).toMatch(/at least 15 minutes apart/);
+    expect((await req("POST", "/agents", { ...claudeAgent("Burst"), ...every("0,1 9 * * *") }, "claude")).status).toBe(403);
+    expect((await req("POST", "/agents", { ...claudeAgent("Quarter"), ...every("*/15 * * * *") }, "claude")).status).toBe(201);
+    expect((await req("PUT", "/agents/quarter", every("* * * * *"), "claude")).status).toBe(403);
+    // One-time runs and the user are not limited.
+    expect((await req("POST", "/agents", { ...claudeAgent("User Tight"), ...every("* * * * *") })).status).toBe(201);
   });
 });
 
 describe("runs", () => {
   // The run's session id is returned so the caller can follow the run.
   it("returns the session of the started run", async () => {
-    await req("POST", "/agents", claudeAgent("Runner"));
+    await req("POST", "/agents", claudeAgent("Runner"), "claude");
     const res = await req("POST", "/agents/runner/run", { input: "go" }, "claude");
     expect(await res.json()).toEqual({ ok: true, message: "Agent triggered", sessionId: "run-session-1" });
     executor.runSessionOf.mockReturnValue(undefined);
@@ -177,7 +271,7 @@ describe("PUT triggers", () => {
   it("keeps a saved Linear trigger the request does not mention and fills a webhook secret", async () => {
     agentStore.createAgent({
       version: 1, name: "Linear Agent", description: "", backendType: "claude", model: "", permissionMode: "bypassPermissions",
-      cwd: "/w", prompt: "p", enabled: true,
+      cwd: "/w", prompt: "p", enabled: true, createdBy: "session:claude",
       triggers: { linear: { enabled: true, oauthConnectionId: "conn-1" } },
     });
     const res = await req("PUT", "/agents/linear-agent", { triggers: { webhook: { enabled: true, secret: "" } } }, "claude");

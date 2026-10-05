@@ -104,3 +104,32 @@ export function validateSchedule(
 export function nextScheduledRun(schedule: ScheduleTrigger, timezone: string | undefined): Date | null {
   return parseSchedule(schedule, timezone).nextRun();
 }
+
+/**
+ * Smallest gap between two runs of a repeating schedule that a session may
+ * set through its `companion` MCP tools (agents and wake-ups). Each agent
+ * run is a new CLI process and each wake-up a new turn: without a floor, a
+ * handful of per-minute schedules could start hundreds of CLIs.
+ */
+export const MCP_MIN_CRON_INTERVAL_MINUTES = 15;
+
+/** How many upcoming runs are compared; enough to catch "0-1 9 * * *"-style bursts. */
+const INTERVAL_SAMPLE_RUNS = 100;
+
+/**
+ * True when two consecutive upcoming runs of the 5-field cron `expression`
+ * are less than `minutes` apart. An invalid expression is not judged here
+ * (validateSchedule reports it) and returns false.
+ */
+export function cronRunsMoreOftenThan(expression: string, minutes: number, timezone = scheduleTimeZone()): boolean {
+  let runs: Date[];
+  try {
+    runs = buildCron({ enabled: true, expression, recurring: true }, timezone).nextRuns(INTERVAL_SAMPLE_RUNS);
+  } catch {
+    return false;
+  }
+  for (let i = 1; i < runs.length; i++) {
+    if (runs[i].getTime() - runs[i - 1].getTime() < minutes * 60_000) return true;
+  }
+  return false;
+}

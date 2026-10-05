@@ -84,6 +84,7 @@ describe("protocol", () => {
       },
     });
     expect((init as { result: { instructions: string } }).result.instructions).toContain("sess-me");
+    expect((init as { result: { instructions: string } }).result.instructions).toMatch(/built-in ScheduleWakeup/);
 
     const future = await mcp.handle({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: "2099-01-01" } });
     expect((future as { result: { protocolVersion: string } }).result.protocolVersion).toBe("2025-11-25");
@@ -136,6 +137,13 @@ describe("protocol", () => {
     expect(byName.schedule_wakeup.description).toMatch(/while nobody is watching/);
     expect(byName.create_agent.description).toMatch(/brief.*fork/s);
     expect(byName.create_agent.inputSchema.required).toEqual(["name", "prompt"]);
+    // Claude Code also has built-in ScheduleWakeup/Cron tools that die with the
+    // CLI: the description and the server instructions steer away from them.
+    expect(byName.schedule_wakeup.description).toMatch(/over the CLI's own ScheduleWakeup/);
+    // No tool can target another session's wake-ups.
+    for (const name of ["schedule_wakeup", "list_wakeups", "cancel_wakeup"]) {
+      expect(Object.keys((byName[name].inputSchema as unknown as { properties: object }).properties)).not.toContain("session_id");
+    }
   });
 });
 
@@ -158,13 +166,21 @@ describe("wake-up tools", () => {
     expect(cron.text).toMatch(/on cron "0 9 \* \* 1-5"/);
   });
 
-  it("schedule_wakeup can target another session and validates its arguments", async () => {
+  // The wake-up tools act on THIS session only (review finding: a session
+  // could inject messages into, list or cancel other sessions' wake-ups).
+  // A session_id is refused instead of silently ignored, and nothing is sent.
+  it("schedule_wakeup acts on this session only and validates its arguments", async () => {
     const { mcp, calls } = server({
-      "POST /sessions/other/wakeups": () => ({ status: 201, body: { wakeup: { id: "wk-2", nextRunAt: NOW + 60_000 } } }),
+      "POST /sessions/sess-me/wakeups": () => ({ status: 201, body: { wakeup: { id: "wk-2", nextRunAt: NOW + 60_000 } } }),
     });
     const other = await callTool(mcp, "schedule_wakeup", { message: "m", in_minutes: 1, session_id: "other" });
-    expect(other.text).toMatch(/for session other/);
-    expect(calls[0].path).toBe("/sessions/other/wakeups");
+    expect(other).toEqual({ text: "Unknown argument(s) for schedule_wakeup: session_id", isError: true });
+    expect((await callTool(mcp, "list_wakeups", { session_id: "other" })).isError).toBe(true);
+    expect((await callTool(mcp, "cancel_wakeup", { wakeup_id: "wk-1", session_id: "other" })).isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    const own = await callTool(mcp, "schedule_wakeup", { message: "m", in_minutes: 1 });
+    expect(own.text).toMatch(/for this session/);
+    expect(calls[0].path).toBe("/sessions/sess-me/wakeups");
 
     expect(await callTool(mcp, "schedule_wakeup", { message: "m" })).toEqual({ text: "Give one of at, in_minutes or cron", isError: true });
     expect((await callTool(mcp, "schedule_wakeup", { at: "x" })).text).toBe('"message" is required');
@@ -270,6 +286,8 @@ describe("agent tools", () => {
       { webhookHost: async () => "localhost" },
     );
     const res = await callTool(mcp, "get_agent", { agent_id: "a" });
+    // The headline reads "Agent "A"", not "Agent agent "A"" (review finding).
+    expect(res.text).toMatch(/^Agent "A" \(id: a\)\./);
     expect(res.text).toContain("POST http://localhost:3456/api/agents/a/webhook/k");
     expect(res.text).toMatch(/Prompt:\ndo it$/);
   });

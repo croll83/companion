@@ -8,7 +8,14 @@ vi.mock("./settings-manager.js", () => ({
   getSettings: () => ({ timeZone: mockSettings.timeZone }),
 }));
 
-import { nextScheduledRun, scheduleTimeZone, scheduleTimeZoneLabel, validateSchedule } from "./agent-schedule.js";
+import {
+  cronRunsMoreOftenThan,
+  MCP_MIN_CRON_INTERVAL_MINUTES,
+  nextScheduledRun,
+  scheduleTimeZone,
+  scheduleTimeZoneLabel,
+  validateSchedule,
+} from "./agent-schedule.js";
 
 const recurring = (expression: string) => ({ enabled: true, expression, recurring: true });
 const oneShot = (expression: string) => ({ enabled: true, expression, recurring: false });
@@ -96,5 +103,22 @@ describe("nextScheduledRun", () => {
 
   it("throws a readable error for an invalid schedule", () => {
     expect(() => nextScheduledRun(recurring("nope"), undefined)).toThrow(/^Invalid cron expression "nope"/);
+  });
+});
+
+// The floor for schedules set by sessions (MCP tools): judged on the actual
+// gaps between upcoming runs, so a burst inside an otherwise daily schedule
+// counts too. Invalid expressions are left to validateSchedule.
+describe("cronRunsMoreOftenThan", () => {
+  it("compares the gaps between consecutive runs with the floor", () => {
+    expect(MCP_MIN_CRON_INTERVAL_MINUTES).toBe(15);
+    expect(cronRunsMoreOftenThan("* * * * *", 15)).toBe(true);
+    expect(cronRunsMoreOftenThan("*/5 * * * *", 15)).toBe(true);
+    expect(cronRunsMoreOftenThan("0,1 9 * * *", 15)).toBe(true);
+    expect(cronRunsMoreOftenThan("*/15 * * * *", 15)).toBe(false);
+    expect(cronRunsMoreOftenThan("0 9 * * 1-5", 15)).toBe(false);
+    expect(cronRunsMoreOftenThan("@hourly", 15)).toBe(false);
+    expect(cronRunsMoreOftenThan("nope", 15)).toBe(false);
+    expect(cronRunsMoreOftenThan("0 9 * * *", 15, "Europe/Rome")).toBe(false);
   });
 });

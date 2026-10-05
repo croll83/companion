@@ -197,12 +197,8 @@ const SCHEDULE_PROPS = {
   in_minutes: { type: "number", description: "Run once, this many minutes from now (alternative to at)." },
   cron: {
     type: "string",
-    description: "Repeat on a 5-field cron expression: minute hour day-of-month month day-of-week (e.g. \"0 9 * * 1-5\" = weekdays at 09:00), in Companion's time zone setting.",
+    description: "Repeat on a 5-field cron expression: minute hour day-of-month month day-of-week (e.g. \"0 9 * * 1-5\" = weekdays at 09:00), in Companion's time zone setting. Runs must be at least 15 minutes apart; to poll more often, schedule one-time follow-ups instead.",
   },
-} as const;
-
-const SESSION_ID_PROP = {
-  session_id: { type: "string", description: "Target Companion session id. Default: this session." },
 } as const;
 
 const AGENT_ID_PROP = { agent_id: { type: "string", description: "Agent id (from list_agents or create_agent)." } } as const;
@@ -273,8 +269,9 @@ function buildTriggers(
   return { triggers, changed };
 }
 
-async function describeAgent(agent: JsonObject, ctx: ToolContext, verb: string): Promise<string> {
-  const lines = [`${verb} agent "${agent.name}" (id: ${agent.id}).`];
+/** `headline` starts the reply, e.g. "Created agent" → `Created agent "x" (id: x).` */
+async function describeAgent(agent: JsonObject, ctx: ToolContext, headline: string): Promise<string> {
+  const lines = [`${headline} "${agent.name}" (id: ${agent.id}).`];
   const summary = agentSummary(agent);
   const webhook = ((agent.triggers ?? {}) as JsonObject).webhook as JsonObject | undefined;
   if (webhook?.enabled && typeof webhook.secret === "string" && webhook.secret) {
@@ -293,18 +290,18 @@ const TOOLS: ToolDef[] = [
   {
     name: "schedule_wakeup",
     description: [
-      "Schedule a message to be delivered into a Companion session later — by default THIS session, which then continues with its whole conversation context.",
+      "Schedule a message to be delivered into THIS Companion session later; the session then continues with its whole conversation context.",
       "Use when the user asks for something to happen at a later time or on a schedule (\"check the deploy in 30 minutes\", \"every morning at 9 summarize the open PRs\"), or when work must continue while nobody is watching: waiting for a long build, CI or a download, polling something, following up later.",
       "Write the message as instructions to your future self: what to check, what to do next, where your notes are. It arrives as a user message starting with \"[scheduled wake-up …]\".",
       "Give exactly one of at, in_minutes (one time) or cron (repeating). If the session is busy at that time the message waits for the current turn to end; if its CLI was stopped it is restarted on this conversation first.",
       "Prefer this over create_agent whenever the follow-up needs this conversation's context.",
+      "Prefer it also over the CLI's own ScheduleWakeup / Cron tools: those live only inside the running CLI process (lost when it stops or Companion restarts) and the user cannot see them in Companion; these wake-ups are saved, shown on the session and survive restarts.",
     ].join(" "),
     inputSchema: {
       type: "object",
       properties: {
         message: { type: "string", description: "What the session should do when it wakes up." },
         ...SCHEDULE_PROPS,
-        ...SESSION_ID_PROP,
       },
       required: ["message"],
       additionalProperties: false,
@@ -313,24 +310,21 @@ const TOOLS: ToolDef[] = [
       const message = str(args, "message", true);
       const schedule = scheduleArgs(args, ctx.now());
       if (!schedule) throw new ToolError("Give one of at, in_minutes or cron");
-      const target = str(args, "session_id") ?? ctx.sessionId;
-      const res = await ctx.api("POST", `/sessions/${enc(target)}/wakeups`, { message, ...schedule });
+      const res = await ctx.api("POST", `/sessions/${enc(ctx.sessionId)}/wakeups`, { message, ...schedule });
       const w = res.wakeup as JsonObject;
       const when = "cron" in schedule ? `on cron "${schedule.cron}" (next: ${iso(w.nextRunAt) ?? "?"})` : `at ${iso(w.nextRunAt) ?? schedule.at}`;
-      const whose = target === ctx.sessionId ? "this session" : `session ${target}`;
       return reply(
-        `Scheduled wake-up ${w.id} for ${whose} ${when}. Now: ${new Date(ctx.now()).toISOString()}. Cancel it with cancel_wakeup if it is no longer needed.`,
+        `Scheduled wake-up ${w.id} for this session ${when}. Now: ${new Date(ctx.now()).toISOString()}. Cancel it with cancel_wakeup if it is no longer needed.`,
         wakeupSummary(w),
       );
     },
   },
   {
     name: "list_wakeups",
-    description: "List the scheduled wake-ups of this session (or of session_id): pending ones with their next time, and recently delivered, skipped or missed ones with the reason. Use before scheduling a follow-up to avoid duplicates, or when the user asks what is scheduled.",
-    inputSchema: { type: "object", properties: { ...SESSION_ID_PROP }, additionalProperties: false },
-    async run(args, ctx) {
-      const target = str(args, "session_id") ?? ctx.sessionId;
-      const res = await ctx.api("GET", `/sessions/${enc(target)}/wakeups`);
+    description: "List the scheduled wake-ups of this session: pending ones with their next time, and recently delivered, skipped or missed ones with the reason. Use before scheduling a follow-up to avoid duplicates, or when the user asks what is scheduled.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    async run(_args, ctx) {
+      const res = await ctx.api("GET", `/sessions/${enc(ctx.sessionId)}/wakeups`);
       const list = ((res.wakeups ?? []) as JsonObject[]).map(wakeupSummary);
       const pending = list.filter((w) => w.status === "pending").length;
       return reply(`${list.length} wake-up(s), ${pending} pending. Now: ${new Date(ctx.now()).toISOString()}.`, list);
@@ -338,17 +332,16 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "cancel_wakeup",
-    description: "Cancel a scheduled wake-up by id (from schedule_wakeup or list_wakeups). Use when the follow-up is no longer needed: what you were waiting for already happened, or the user changed their mind.",
+    description: "Cancel a scheduled wake-up of this session by id (from schedule_wakeup or list_wakeups). Use when the follow-up is no longer needed: what you were waiting for already happened, or the user changed their mind.",
     inputSchema: {
       type: "object",
-      properties: { wakeup_id: { type: "string", description: "Wake-up id (wk-…)." }, ...SESSION_ID_PROP },
+      properties: { wakeup_id: { type: "string", description: "Wake-up id (wk-…)." } },
       required: ["wakeup_id"],
       additionalProperties: false,
     },
     async run(args, ctx) {
       const id = str(args, "wakeup_id", true)!;
-      const target = str(args, "session_id") ?? ctx.sessionId;
-      await ctx.api("DELETE", `/sessions/${enc(target)}/wakeups/${enc(id)}`);
+      await ctx.api("DELETE", `/sessions/${enc(ctx.sessionId)}/wakeups/${enc(id)}`);
       return `Cancelled wake-up ${id}.`;
     },
   },
@@ -358,7 +351,7 @@ const TOOLS: ToolDef[] = [
       "Create a Companion agent: a saved prompt that runs as its OWN new session — on a schedule, when its webhook is called, or on demand with run_agent — and keeps running when this conversation is over.",
       "Use for recurring or independent jobs (a nightly report, a periodic check, work triggered by another system), or when the user asks for an agent, a cron job or an automation. For a follow-up that needs this conversation, use schedule_wakeup instead.",
       "context_mode: \"brief\" (default) — every run starts fresh and sees ONLY the prompt: make it self-contained (goal, paths, commands, what done means) and tell it to write its results to a file path, so they can be read later; \"fork\" — every run starts from a COPY of this session's conversation (this session is never changed).",
-      "Defaults: this session's folder (cwd; \"temp\" = a throwaway folder per run), backend and model. Runs are unattended: Claude agents run with full permissions.",
+      "Defaults: this session's folder (cwd; \"temp\" = a throwaway folder per run), backend and model. Runs are unattended: Claude agents run with full permissions. From a sandboxed Codex session only sandboxed Codex agents inside this session's folder can be created.",
       "Give at most one of at, in_minutes or cron; webhook: true returns the URL to call. Without a schedule or webhook the agent only runs via run_agent or the UI.",
     ].join(" "),
     inputSchema: {
@@ -404,7 +397,7 @@ const TOOLS: ToolDef[] = [
         enabled: bool(args, "enabled") ?? true,
       };
       const agent = await ctx.api("POST", "/agents", body) as JsonObject;
-      return describeAgent(agent, ctx, "Created");
+      return describeAgent(agent, ctx, "Created agent");
     },
   },
   {
@@ -429,7 +422,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "update_agent",
-    description: "Change an agent: name, prompt, schedule (at / in_minutes / cron, or clear_schedule), webhook on/off, folder, model, context mode, enabled. Only the given fields change. Only touch agents the user asked about or that you created for the task at hand. Renaming changes the id (the new one is returned).",
+    description: "Change an agent THIS session created: name, prompt, schedule (at / in_minutes / cron, or clear_schedule), webhook on/off, folder, model, context mode, enabled. Only the given fields change. Agents created by the user or by other sessions can only be changed from the Companion UI. Renaming changes the id (the new one is returned).",
     inputSchema: {
       type: "object",
       properties: {
@@ -467,12 +460,12 @@ const TOOLS: ToolDef[] = [
       if (changed) body.triggers = triggers;
       if (Object.keys(body).length === 0) throw new ToolError("Nothing to change: give at least one field");
       const agent = await ctx.api("PUT", `/agents/${enc(id)}`, body) as JsonObject;
-      return describeAgent(agent, ctx, "Updated");
+      return describeAgent(agent, ctx, "Updated agent");
     },
   },
   {
     name: "delete_agent",
-    description: "Delete an agent and its schedule and webhook (its past runs and their sessions are kept). Only when the user asks, or for an agent you created that is no longer needed.",
+    description: "Delete an agent THIS session created, with its schedule and webhook (its past runs and their sessions are kept). Use when the user asks, or when an agent you created is no longer needed. Other agents can only be deleted from the Companion UI.",
     inputSchema: { type: "object", properties: { ...AGENT_ID_PROP }, required: ["agent_id"], additionalProperties: false },
     async run(args, ctx) {
       const id = str(args, "agent_id", true)!;
@@ -482,7 +475,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "run_agent",
-    description: "Start a run of an agent now (even if it is disabled). The optional input replaces {{input}} in its prompt, or is appended. Returns at once with the run's session id; follow it with list_agent_runs or get_run_result. Refused while another run of the same agent is in progress.",
+    description: "Start a run of an agent THIS session created, now (even if it is disabled). The optional input replaces {{input}} in its prompt, or is appended. Returns at once with the run's session id; follow it with list_agent_runs or get_run_result. Refused while another run of the same agent is in progress. Other agents can only be run from the Companion UI.",
     inputSchema: {
       type: "object",
       properties: { ...AGENT_ID_PROP, input: { type: "string", description: "Input for this run." } },
@@ -603,7 +596,8 @@ export function createCompanionMcp(config: CompanionMcpConfig): CompanionMcpServ
             instructions:
               `You run inside Companion session ${config.sessionId}. Use schedule_wakeup to continue this conversation later ` +
               "(at a time, on a schedule, or to follow up on long-running work), and create_agent for jobs that should run " +
-              "on their own as separate sessions (scheduled, webhook-triggered or on demand).",
+              "on their own as separate sessions (scheduled, webhook-triggered or on demand). Prefer these tools over the " +
+              "CLI's built-in ScheduleWakeup / Cron tools: those are lost when the CLI stops and are invisible in Companion.",
           },
         };
       }
@@ -620,6 +614,14 @@ export function createCompanionMcp(config: CompanionMcpConfig): CompanionMcpServ
         if (!tool) return rpcError(id, INVALID_PARAMS, `Unknown tool: ${String(params.name)}`);
         const args = (params.arguments && typeof params.arguments === "object" ? params.arguments : {}) as JsonObject;
         try {
+          // The schemas say additionalProperties: false; enforce it, so an
+          // argument the tool does not take (e.g. a session_id) is not
+          // silently ignored.
+          const known = Object.keys((tool.inputSchema.properties ?? {}) as JsonObject);
+          const unknown = Object.keys(args).filter((key) => !known.includes(key));
+          if (unknown.length > 0) {
+            throw new ToolError(`Unknown argument(s) for ${tool.name}: ${unknown.join(", ")}`);
+          }
           const text = await tool.run(args, ctx);
           return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } };
         } catch (err) {

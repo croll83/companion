@@ -118,6 +118,17 @@ describe("creating wake-ups", () => {
     expect(scheduler.cancel("a", first.id)).toBe(true);
     created(scheduler.create({ sessionId: "b", message: "fits again", cron: "0 9 * * *", createdBy: "session:b" }));
   });
+
+  // Review finding: 50 per-minute wake-ups would force ~50 turns a minute.
+  // Repeating wake-ups set by sessions must be 15+ minutes apart; one-shots
+  // (the way to poll more often) and the user's own are not limited.
+  it("refuses repeating wake-ups under 15 minutes from sessions", () => {
+    const tight = scheduler.create({ sessionId: "s1", message: "poll", cron: "*/5 * * * *", createdBy: "session:s1" });
+    expect(tight).toMatchObject({ ok: false, status: 400, error: expect.stringMatching(/at least 15 minutes apart.*one-time wake-up/) });
+    created(scheduler.create({ sessionId: "s1", message: "poll", cron: "*/15 * * * *", createdBy: "session:s1" }));
+    created(scheduler.create({ sessionId: "s1", message: "soon", at: "2026-10-05T10:01", createdBy: "session:s1" }));
+    created(scheduler.create({ sessionId: "s1", message: "user poll", cron: "* * * * *" }));
+  });
 });
 
 describe("firing", () => {
