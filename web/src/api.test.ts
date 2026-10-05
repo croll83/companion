@@ -259,6 +259,16 @@ describe("createEnv", () => {
     expect(JSON.parse(opts.body)).toEqual({ name: "Prod", variables: { KEY: "val" } });
     expect(result).toEqual(envData);
   });
+
+  // The scope editor sends the placement (scope + folders) with the profile.
+  it("sends scope and folders when a placement is given", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({}));
+
+    await api.createEnv("Prod", {}, { scope: "project", folders: ["/repo"] });
+
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(JSON.parse(opts.body)).toEqual({ name: "Prod", variables: {}, scope: "project", folders: ["/repo"] });
+  });
 });
 
 // ===========================================================================

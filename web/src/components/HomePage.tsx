@@ -1000,6 +1000,9 @@ export function HomePage() {
               </button>
               {showEnvDropdown && (
                 <div className="absolute left-0 bottom-full mb-1 w-56 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1 overflow-hidden">
+                  <p className="px-3 pt-1.5 pb-1 text-[11px] leading-snug text-cc-muted">
+                    Global and folder-matched environments apply automatically. Pick one to add it on top.
+                  </p>
                   <button
                     onClick={() => {
                       setSelectedEnv("");

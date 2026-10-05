@@ -3,6 +3,7 @@ import { api, type SavedPrompt } from "../api.js";
 import { useStore } from "../store.js";
 import { navigateHome, navigateToSession } from "../utils/routing.js";
 import { FolderPicker } from "./FolderPicker.js";
+import { FolderScopeSelector } from "./FolderScopeSelector.js";
 
 interface PromptsPageProps {
   embedded?: boolean;
@@ -375,102 +376,6 @@ export function PromptsPage({ embedded = false }: PromptsPageProps) {
   );
 }
 
-/* ─── Scope Selector ─────────────────────────────────────────────── */
-
-interface ScopeSelectorProps {
-  scope: "global" | "project";
-  onScopeChange: (scope: "global" | "project") => void;
-  folders: string[];
-  onRemoveFolder: (path: string) => void;
-  onAddFolder: () => void;
-}
-
-function ScopeSelector({ scope, onScopeChange, folders, onRemoveFolder, onAddFolder }: ScopeSelectorProps) {
-  return (
-    <div className="space-y-3">
-      <div>
-        <label className="block text-xs font-medium uppercase tracking-[0.24em] text-cc-muted">Scope</label>
-        <p className="mt-1 text-xs text-cc-muted/80">
-          Choose whether this prompt should be available everywhere or only inside specific repos.
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          aria-pressed={scope === "global"}
-          onClick={() => onScopeChange("global")}
-          className={`inline-flex min-h-[40px] items-center rounded-full border px-4 py-2 text-sm transition-colors cursor-pointer ${
-            scope === "global"
-              ? "border-cc-primary/40 text-cc-primary bg-cc-primary/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
-              : "border-cc-border text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
-          }`}
-        >
-          Global
-        </button>
-        <button
-          type="button"
-          aria-pressed={scope === "project"}
-          onClick={() => onScopeChange("project")}
-          className={`inline-flex min-h-[40px] items-center rounded-full border px-4 py-2 text-sm transition-colors cursor-pointer ${
-            scope === "project"
-              ? "border-cc-primary/40 text-cc-primary bg-cc-primary/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
-              : "border-cc-border text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
-          }`}
-        >
-          Project folders
-        </button>
-      </div>
-
-      {scope === "project" && (
-        <div className="rounded-2xl border border-cc-border/70 bg-cc-bg/60 p-3 space-y-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium text-cc-fg">Project folders</p>
-              <p className="mt-1 text-xs text-cc-muted">
-                Prompts scoped to folders only appear when the active session is inside one of those paths.
-              </p>
-            </div>
-          </div>
-          {folders.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {folders.map((folder) => (
-                <span
-                  key={folder}
-                  className="inline-flex min-h-[32px] items-center gap-1.5 rounded-full border border-cc-border/80 bg-cc-hover px-3 py-1.5 text-xs font-mono-code text-cc-fg"
-                >
-                  <span className="truncate max-w-[200px]" title={folder}>
-                    {folder.split("/").pop() || folder}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onRemoveFolder(folder)}
-                    className="text-cc-muted hover:text-cc-error cursor-pointer shrink-0"
-                    aria-label={`Remove folder ${folder}`}
-                  >
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
-                      <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={onAddFolder}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-full border border-dashed border-cc-border px-3 py-2 text-sm text-cc-muted transition-colors cursor-pointer hover:text-cc-fg hover:bg-cc-hover"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3">
-              <path d="M8 3v10M3 8h10" strokeLinecap="round" />
-            </svg>
-            Add folder
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 interface PromptEditorCardProps {
   mode: "create" | "edit";
   name: string;
@@ -558,12 +463,14 @@ function PromptEditorCard({
               </p>
             </div>
 
-            <ScopeSelector
+            <FolderScopeSelector
               scope={scope}
               onScopeChange={onScopeChange}
               folders={folders}
               onRemoveFolder={onRemoveFolder}
               onAddFolder={onAddFolder}
+              description="Choose whether this prompt should be available everywhere or only inside specific repos."
+              folderHint="Prompts scoped to folders only appear when the active session is inside one of those paths."
             />
 
             <div className="rounded-2xl border border-dashed border-cc-border/70 bg-cc-bg/40 p-4">

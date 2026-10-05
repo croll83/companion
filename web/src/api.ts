@@ -288,10 +288,16 @@ export interface WorktreeCreateResult {
   isNew: boolean;
 }
 
+/** Where an env profile applies automatically. Absent = unassigned (explicit pick only). */
+export type EnvScope = "global" | "project";
+
 export interface CompanionEnv {
   name: string;
   slug: string;
   variables: Record<string, string>;
+  scope?: EnvScope;
+  /** Project folders, when scope === "project". */
+  folders?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -946,13 +952,18 @@ export const api = {
   listEnvs: () => get<CompanionEnv[]>("/envs"),
   getEnv: (slug: string) =>
     get<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`),
-  createEnv: (name: string, variables: Record<string, string>) =>
-    post<CompanionEnv>("/envs", { name, variables }),
+  createEnv: (
+    name: string,
+    variables: Record<string, string>,
+    placement?: { scope: EnvScope; folders?: string[] },
+  ) => post<CompanionEnv>("/envs", { name, variables, ...placement }),
   updateEnv: (
     slug: string,
     data: {
       name?: string;
       variables?: Record<string, string>;
+      scope?: EnvScope;
+      folders?: string[];
     },
   ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),

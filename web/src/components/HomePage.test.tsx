@@ -568,6 +568,8 @@ describe("HomePage", () => {
     // Should show variable counts
     expect(screen.getByText("1 var")).toBeInTheDocument();
     expect(screen.getByText("2 vars")).toBeInTheDocument();
+    // Explains that the pick is optional: scoped environments apply on their own.
+    expect(screen.getByText(/apply automatically/)).toBeInTheDocument();
 
     // Select "Development"
     fireEvent.click(screen.getByText("Development"));
