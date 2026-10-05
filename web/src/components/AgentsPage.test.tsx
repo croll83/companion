@@ -49,9 +49,11 @@ vi.mock("./FolderPicker.js", () => ({ FolderPicker: () => null }));
 // value in tests. The mock supports Zustand's selector pattern: when called
 // with a function, it invokes that function against the mock state.
 let mockPublicUrl = "";
+// sdkSessions/sessionNames feed the editor's fork-source picker.
+const mockSessionNames = new Map<string, string>();
 vi.mock("../store.js", () => ({
-  useStore: (selector: (state: { publicUrl: string }) => unknown) =>
-    selector({ publicUrl: mockPublicUrl }),
+  useStore: (selector: (state: { publicUrl: string; sdkSessions: unknown[]; sessionNames: Map<string, string> }) => unknown) =>
+    selector({ publicUrl: mockPublicUrl, sdkSessions: [], sessionNames: mockSessionNames }),
 }));
 
 import { AgentsPage } from "./AgentsPage.js";
@@ -2377,6 +2379,32 @@ describe("AgentsPage", () => {
     const codexPayload = mockApi.updateAgent.mock.calls[1][1];
     expect(codexPayload.permissionMode).toBe("default");
     expect(codexPayload.allowedTools).toBeUndefined();
+  });
+
+  // The context mode round-trips through the editor: a fork agent keeps its
+  // source session; a brief agent saves no source.
+  it("loads and saves the context mode and the fork source", async () => {
+    const forker = makeAgent({ id: "f1", name: "Fork Agent", contextMode: "fork", sourceSessionId: "src-1" });
+    const brief = makeAgent({ id: "b1", name: "Brief Agent" });
+    mockApi.listAgents.mockResolvedValue([forker, brief]);
+    mockApi.updateAgent.mockResolvedValue(forker);
+    render(<AgentsPage route={defaultRoute} />);
+
+    await screen.findByText("Fork Agent");
+    fireEvent.click(screen.getAllByLabelText("More actions")[0]);
+    fireEvent.click(screen.getByText("Edit"));
+    expect(screen.getByLabelText("Fork a session")).toBeChecked();
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateAgent.mock.calls[0][1]).toMatchObject({ contextMode: "fork", sourceSessionId: "src-1" });
+
+    await screen.findByText("Brief Agent");
+    fireEvent.click(screen.getAllByLabelText("More actions")[1]);
+    fireEvent.click(screen.getByText("Edit"));
+    expect(screen.getByLabelText("Brief")).toBeChecked();
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(2));
+    expect(mockApi.updateAgent.mock.calls[1][1]).toMatchObject({ contextMode: "brief", sourceSessionId: undefined });
   });
 });
 

@@ -23,7 +23,9 @@ Agents work with Claude Code and Codex. The few options that only one backend su
    - Example: `Review the following pull request and provide feedback: {{input}}`
    - If the prompt has no `{{input}}` and a trigger provides input, the input is appended after the prompt in a delimited `<trigger_input>` block, so it is never dropped
 
-4. Configure the **controls row**:
+4. Pick the **context** each run starts from (see **Context** below): **Brief** (default) or **Fork a session**
+
+5. Configure the **controls row**:
    - **Backend**: Claude Code or Codex
    - **Model**: Which model to use
    - **Permissions**: see **Permissions** below
@@ -31,7 +33,14 @@ Agents work with Claude Code and Codex. The few options that only one backend su
    - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/environments) explicitly. Global and folder-matched profiles apply anyway
    - **Internet access** (Codex only): Toggle network access
 
-5. Click **Create**
+6. Click **Create**
+
+## Context
+
+- **Brief** (default): every run starts a new, empty session. The prompt must say everything the agent needs to know.
+- **Fork a session**: every run starts from a **copy** of another session's conversation, so the agent knows everything that session discussed. Pick the source session in the editor. The run works in the source session's folder (the agent's own folder is not used). The source session is never changed: Claude Code runs with `--resume <source> --fork-session`, and Codex runs `thread/fork`, which writes a new thread.
+
+The source must be a session of the same backend as the agent, with at least one message. The editor refuses a source that cannot be forked. If the source can no longer be resumed when a run starts (its transcript was cleaned up, the session was deleted, or its folder is gone), the run fails with the reason.
 
 ## Permissions
 

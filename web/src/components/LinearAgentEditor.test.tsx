@@ -56,6 +56,8 @@ const defaultForm: AgentFormData = {
   permissionMode: "allowEdits",
   cwd: "",
   prompt: "",
+  contextMode: "brief",
+  sourceSessionId: "",
   envSlug: "",
   env: [],
   codexInternetAccess: false,

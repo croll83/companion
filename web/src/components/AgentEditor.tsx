@@ -25,6 +25,9 @@ export interface AgentFormData {
   permissionMode: string;
   cwd: string;
   prompt: string;
+  // "brief": fresh session per run; "fork": copy of sourceSessionId's conversation
+  contextMode: "brief" | "fork";
+  sourceSessionId: string;
   envSlug: string;
   // Environment variables (key-value pairs)
   env: { key: string; value: string }[];
@@ -53,6 +56,8 @@ export const EMPTY_FORM: AgentFormData = {
   permissionMode: getDefaultAgentMode("claude"),
   cwd: "",
   prompt: "",
+  contextMode: "brief",
+  sourceSessionId: "",
   envSlug: "",
   env: [],
   codexInternetAccess: false,
@@ -126,6 +131,8 @@ export function AgentEditor({
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showEnvDropdown, setShowEnvDropdown] = useState(false);
   const scheduleTimeZone = useStore((s) => s.timeZone);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  const sessionNames = useStore((s) => s.sessionNames);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const iconPickerRef = useRef<HTMLDivElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
@@ -244,6 +251,16 @@ export function AgentEditor({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // Sessions a fork agent can copy: same backend, with a conversation, not archived.
+  const forkableSessions = sdkSessions.filter(
+    (s) => (s.backendType ?? "claude") === form.backendType && !!s.cliSessionId && !s.archived,
+  );
+  const sessionLabel = (s: (typeof sdkSessions)[number]) =>
+    `${sessionNames.get(s.sessionId) || s.name || s.cwd.split("/").pop() || s.cwd} (${s.sessionId.slice(0, 8)})`;
+  const sourceMissing = form.contextMode === "fork" && !!form.sourceSessionId
+    && !forkableSessions.some((s) => s.sessionId === form.sourceSessionId);
+  const isFork = form.contextMode === "fork";
+
   // Derive labels for pills
   const selectedModel = models.find((m) => m.value === form.model) || models[0];
   const selectedEnv = envProfiles.find((e) => e.slug === form.envSlug);
@@ -356,6 +373,59 @@ export function AgentEditor({
             </p>
           </div>
 
+          {/* ── Context ── */}
+          <section aria-labelledby="agent-context-heading">
+            <h2 id="agent-context-heading" className="text-xs text-cc-muted mb-2">Context</h2>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-cc-fg cursor-pointer">
+                <input
+                  type="radio"
+                  name="agent-context-mode"
+                  checked={!isFork}
+                  onChange={() => updateField("contextMode", "brief")}
+                />
+                Brief
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-cc-fg cursor-pointer">
+                <input
+                  type="radio"
+                  name="agent-context-mode"
+                  checked={isFork}
+                  onChange={() => updateField("contextMode", "fork")}
+                />
+                Fork a session
+              </label>
+            </div>
+            {isFork ? (
+              <div className="mt-2 space-y-1">
+                <label className="block text-xs text-cc-muted">
+                  Source session
+                  <select
+                    value={form.sourceSessionId}
+                    onChange={(e) => updateField("sourceSessionId", e.target.value)}
+                    className="mt-1 block w-full px-2 py-1.5 rounded-lg bg-cc-input-bg border border-cc-border text-cc-fg text-xs focus:outline-none focus:ring-1 focus:ring-cc-primary"
+                  >
+                    <option value="">Choose a session…</option>
+                    {sourceMissing && (
+                      <option value={form.sourceSessionId}>{`Unavailable session (${form.sourceSessionId.slice(0, 8)})`}</option>
+                    )}
+                    {forkableSessions.map((s) => (
+                      <option key={s.sessionId} value={s.sessionId}>{sessionLabel(s)}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-[10px] text-cc-muted" data-testid="context-note">
+                  Each run starts from a copy of this session&apos;s conversation and works in its folder. The source session is never changed.
+                  {forkableSessions.length === 0 && ` No ${form.backendType === "codex" ? "Codex" : "Claude Code"} session with a conversation is open.`}
+                </p>
+              </div>
+            ) : (
+              <p className="text-[10px] text-cc-muted mt-1" data-testid="context-note">
+                Each run starts a new session: the prompt must contain everything the agent needs.
+              </p>
+            )}
+          </section>
+
           {/* ── Controls Row ── */}
           <div className="flex items-center gap-1 sm:gap-2 flex-wrap" data-testid="controls-row">
             {/* Backend toggle */}
@@ -408,11 +478,12 @@ export function AgentEditor({
               onChange={(mode) => updateField("permissionMode", mode)}
             />
 
-            {/* Folder pill */}
+            {/* Folder pill (a fork run works in the source session's folder) */}
             <button
               onClick={() => setShowFolderPicker(true)}
-              className={form.cwd ? pillActive : pillDefault}
-              title={form.cwd || "Temporary directory"}
+              disabled={isFork}
+              className={`${form.cwd ? pillActive : pillDefault} disabled:opacity-50 disabled:cursor-not-allowed`}
+              title={isFork ? "Fork runs work in the source session's folder" : form.cwd || "Temporary directory"}
             >
               <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 opacity-60">
                 <path d="M1 3.5A1.5 1.5 0 012.5 2h3.879a1.5 1.5 0 011.06.44l1.122 1.12A1.5 1.5 0 009.62 4H13.5A1.5 1.5 0 0115 5.5v7a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z" />

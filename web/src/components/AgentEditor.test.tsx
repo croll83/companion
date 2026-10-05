@@ -460,3 +460,78 @@ describe("AgentEditor — run semantics shown to the user", () => {
     expect(results).toHaveNoViolations();
   });
 });
+
+// Context modes: "Brief" (fresh session per run) or "Fork a session" (each
+// run copies a source session's conversation and works in its folder).
+describe("AgentEditor — context mode", () => {
+  const session = (overrides: Record<string, unknown>) => ({
+    sessionId: "aaaaaaaa-1111", state: "exited", cwd: "/work/repo", createdAt: 1,
+    backendType: "claude", cliSessionId: "cli-1", ...overrides,
+  });
+
+  beforeEach(() => {
+    useStore.setState({
+      sdkSessions: [
+        session({}),
+        session({ sessionId: "bbbbbbbb-2222", backendType: "codex", cliSessionId: "thr-1", cwd: "/work/codex" }),
+        session({ sessionId: "cccccccc-3333", cliSessionId: undefined }),
+        session({ sessionId: "dddddddd-4444", archived: true }),
+      ] as never,
+      sessionNames: new Map([["aaaaaaaa-1111", "Release prep"]]),
+    });
+  });
+
+  afterEach(() => {
+    useStore.setState({ sdkSessions: [], sessionNames: new Map() });
+  });
+
+  it("defaults to Brief and explains that the prompt must be self-contained", () => {
+    renderEditor();
+    expect(screen.getByLabelText("Brief")).toBeChecked();
+    expect(screen.getByTestId("context-note")).toHaveTextContent(/prompt must contain everything/);
+    expect(screen.queryByLabelText("Source session")).not.toBeInTheDocument();
+  });
+
+  it("switches to fork mode via the radio button", () => {
+    const { getForm } = renderEditor();
+    fireEvent.click(screen.getByLabelText("Fork a session"));
+    expect(getForm().contextMode).toBe("fork");
+  });
+
+  it("switches back to Brief", () => {
+    const { getForm } = renderEditor({ contextMode: "fork" });
+    fireEvent.click(screen.getByLabelText("Brief"));
+    expect(getForm().contextMode).toBe("brief");
+  });
+
+  // Only sessions of the agent's backend that have a conversation (and are
+  // not archived) can be forked; the folder pill is disabled because the
+  // run works in the source session's folder.
+  it("offers only forkable sessions of the same backend and picks one", () => {
+    const { getForm } = renderEditor({ contextMode: "fork" });
+    const select = screen.getByLabelText("Source session") as HTMLSelectElement;
+    const options = Array.from(select.options).map((o) => o.textContent);
+    expect(options).toEqual(["Choose a session…", "Release prep (aaaaaaaa)"]);
+    fireEvent.change(select, { target: { value: "aaaaaaaa-1111" } });
+    expect(getForm().sourceSessionId).toBe("aaaaaaaa-1111");
+    expect(screen.getByTitle("Fork runs work in the source session's folder")).toBeDisabled();
+  });
+
+  it("lists Codex sessions for a Codex agent and names a source that is gone", () => {
+    renderEditor({ backendType: "codex", contextMode: "fork", sourceSessionId: "eeeeeeee-5555" });
+    const options = Array.from((screen.getByLabelText("Source session") as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(options).toEqual(["Choose a session…", "Unavailable session (eeeeeeee)", "codex (bbbbbbbb)"]);
+  });
+
+  it("says so when no session can be forked", () => {
+    useStore.setState({ sdkSessions: [] });
+    renderEditor({ contextMode: "fork" });
+    expect(screen.getByTestId("context-note")).toHaveTextContent("No Claude Code session with a conversation is open.");
+  });
+
+  it("passes axe accessibility checks in fork mode", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = renderEditor({ name: "Forker", prompt: "Continue", contextMode: "fork", sourceSessionId: "aaaaaaaa-1111" });
+    expect(await axe(container, axeRules)).toHaveNoViolations();
+  });
+});

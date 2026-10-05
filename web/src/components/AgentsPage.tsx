@@ -135,6 +135,8 @@ export function AgentsPage({ route }: Props) {
       permissionMode: agent.permissionMode,
       cwd: agent.cwd === "temp" ? "" : agent.cwd,
       prompt: agent.prompt,
+      contextMode: agent.contextMode === "fork" ? "fork" : "brief",
+      sourceSessionId: agent.sourceSessionId || "",
       envSlug: agent.envSlug || "",
       env: agent.env
         ? Object.entries(agent.env).map(([key, value]) => ({ key, value }))
@@ -245,6 +247,8 @@ export function AgentsPage({ route }: Props) {
         permissionMode: form.backendType === "claude" ? "bypassPermissions" : form.permissionMode,
         cwd: form.cwd || "temp",
         prompt: form.prompt,
+        contextMode: form.contextMode,
+        sourceSessionId: form.contextMode === "fork" ? form.sourceSessionId || undefined : undefined,
         envSlug: form.envSlug || undefined,
         env: Object.keys(envRecord).length > 0 ? envRecord : undefined,
         codexInternetAccess: form.backendType === "codex" ? form.codexInternetAccess : undefined,

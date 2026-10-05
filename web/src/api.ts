@@ -582,6 +582,9 @@ export interface AgentInfo {
   allowedTools?: string[];
   codexInternetAccess?: boolean;
   prompt: string;
+  /** "brief" (default): fresh session. "fork": each run copies sourceSessionId's conversation. */
+  contextMode?: "brief" | "fork";
+  sourceSessionId?: string;
   mcpServers?: Record<string, McpServerConfigAgent>;
   triggers?: {
     webhook?: {
