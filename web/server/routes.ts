@@ -25,7 +25,6 @@ import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } f
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
 import { registerSettingsRoutes } from "./routes/settings-routes.js";
 import { registerTelegramRoutes } from "./routes/telegram-routes.js";
-import { registerTailscaleRoutes } from "./routes/tailscale-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
@@ -1221,10 +1220,6 @@ export function createRoutes(
   registerPromptRoutes(api);
   registerSettingsRoutes(api);
   registerTelegramRoutes(api);
-
-  // ─── Tailscale ──────────────────────────────────────────────────────
-
-  if (port !== undefined) registerTailscaleRoutes(api, port);
 
   // ─── Linear ────────────────────────────────────────────────────────
 

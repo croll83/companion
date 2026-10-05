@@ -37,7 +37,6 @@ import { NoVncProxy } from "./novnc-proxy.js";
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { telegramBridgeManager } from "./telegram-bridge-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
-import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
 import { getToken, verifyToken } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
@@ -385,11 +384,6 @@ agentExecutor.startAll();
 // ── Image pull manager — pre-pull missing Docker images for environments ────
 imagePullManager.initFromEnvironments();
 
-// ── Tailscale Funnel restoration ────────────────────────────────────────────
-restoreTailscaleFunnel(port).catch((err) => {
-  console.warn("[server] Tailscale Funnel restoration failed:", err);
-});
-
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).
 telegramBridgeManager.start(port);
@@ -436,7 +430,6 @@ function gracefulShutdown() {
   console.log("[server] Persisting container state before shutdown...");
   telegramBridgeManager.stop();
   containerManager.persistState(CONTAINER_STATE_PATH);
-  cleanupTailscaleFunnel(port);
   closeLogFile();
   process.exit(0);
 }
