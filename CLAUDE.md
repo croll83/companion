@@ -1,201 +1,107 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code & Codex when working with code in this repository.
+Standing instructions for Claude Code and Codex sessions in this repo (`AGENTS.md` is a symlink to this file).
 
-## What This Is
+## What this is
 
-The Companion — a web UI for Claude Code & Codex. 
-It reverse-engineers the undocumented `--sdk-url` WebSocket protocol in the Claude Code CLI to provide a browser-based interface for running multiple Claude Code sessions with streaming, tool call visibility, and permission control.
+The Companion is a web UI for Claude Code and Codex sessions. This is Marco's independent fork `croll83/companion`, and its only remote is `origin`. The upstream TypeScript app is archived. Do not sync from upstream, re-add it as a remote, or treat it as maintained.
 
-## Development Commands
-
-```bash
-# Dev server (Hono backend on :3456 + Vite HMR on :5174)
-cd web && bun install && bun run dev
-
-# Or from repo root
-make dev
-
-# Type checking
-cd web && bun run typecheck
-
-# Production build + serve
-cd web && bun run build && bun run start
-
-# Auth token management
-cd web && bun run generate-token          # show current token
-cd web && bun run generate-token --force  # regenerate a new token
-
-# Landing page (thecompanion.sh) — idempotent: starts if down, no-op if up
-# IMPORTANT: Always use this script to run the landing page. Never cd into landing/ and run bun/vite manually.
-./scripts/landing-start.sh          # start
-./scripts/landing-start.sh --stop   # stop
-```
-
-## Testing
-
-```bash
-# Run tests
-cd web && bun run test
-
-# Watch mode
-cd web && bun run test:watch
-```
-
-- All new backend (`web/server/`) and frontend (`web/src/`) code **must** include tests when possible.
-- **Every new or modified frontend component** (`web/src/components/`) **must** have an accompanying `.test.tsx` file with at minimum: a render test, an axe accessibility scan (`toHaveNoViolations()`), and tests for any interactive behavior (clicks, keyboard shortcuts, state changes).
-- Tests use Vitest. Server tests live alongside source files (e.g. `routes.test.ts` next to `routes.ts`).
-- A husky pre-commit hook runs typecheck and tests automatically before each commit.
-- **Never remove or delete existing tests.** If a test is failing, fix the code or the test. If you believe a test should be removed, you must first explain to the user why and get explicit approval before removing it.
-- When creating test, make sure to document what the test is validating, and any important context or edge cases in comments within the test code.
-
-## Component Playground
-
-All UI components used in the message/chat flow **must** be represented in the Playground page (`web/src/components/Playground.tsx`, accessible at `#/playground`). When adding or modifying a message-related component (e.g. `MessageBubble`, `ToolBlock`, `PermissionBanner`, `Composer`, streaming indicators, tool groups, subagent groups), update the Playground to include a mock of the new or changed state.
+All code is under `web/`:
+- `server/`: Hono on Bun. It listens on port 3456 in production and 3457 in dev.
+- `src/`: React 19 + Zustand, served by Vite on 5174 in dev. The in-app docs (`#/docs`) are in `src/docs/content/`.
+- `bin/cli.ts`: the `the-companion` CLI (`start`, `stop`, `restart`, `status`, `logs`).
 
 ## Architecture
 
-### Data Flow
+Messages flow browser <-> `/ws/browser/:id` <-> server <-> CLI process.
+- Claude Code speaks NDJSON (see `WEBSOCKET_PROTOCOL_REVERSED.md`).
+  - `cliBridgeMode` (`server/cli-bridge-mode.ts`) picks the transport.
+  - This host runs `"stdio"`, set in `~/.companion/settings.json`. The CLI is spawned without `--sdk-url`, and the protocol runs over its stdin/stdout. Keep this host on stdio.
+  - The code default is still `"loopback"` (`--sdk-url` to `/ws/cli/:id`), which current Claude CLIs reject.
+  - Containerized sessions never use stdio.
+- Codex speaks JSON-RPC to `codex app-server`. `COMPANION_CODEX_TRANSPORT` picks the transport (default `ws`). Mapping notes are in `web/CODEX_MAPPING.md`.
+- To add a Claude model, add it to `CLAUDE_MODELS` (`src/utils/backends.ts`).
+  - Add it to `MODEL_EFFORT_LEVELS` (`server/effort.ts`) only if it accepts `--effort`. Models missing from that map never receive the flag.
+  - For flagship models, check `REFUSAL_CHAIN` in `src/utils/refusal-fallback.ts`.
+- Sessions persist to `COMPANION_SESSION_DIR`. The service sets it to `~/.companion/sessions/`. That directory includes `launcher.json`, which holds each `cliSessionId` used for `--resume`. If the variable is unset, sessions go to `$TMPDIR/vibe-sessions`.
+- All other state lives under `COMPANION_HOME`, which defaults to `~/.companion/`.
+- Every raw protocol message is recorded to `~/.companion/recordings/<sessionId>_<backend>_<ISO-time>_<rand>.jsonl`.
+  - The first line is a header. Each later line is `{ts (ms), dir: in|out, ch: cli|browser, raw}`.
+  - These files are the fastest way to see what happened before a failure.
+  - Code: `server/recorder.ts`, `server/replay.ts`.
 
-```
-Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ WebSocket (NDJSON) ←→ Claude Code CLI
-     :5174              /ws/browser/:id        :3456        /ws/cli/:id         (--sdk-url)
-```
+## The live service hosts this session
 
-1. Browser sends a "create session" REST call to the server
-2. Server spawns `claude --sdk-url ws://localhost:3456/ws/cli/SESSION_ID` as a subprocess
-3. CLI connects back to the server over WebSocket using NDJSON protocol
-4. Server bridges messages between CLI WebSocket and browser WebSocket
-5. Tool calls arrive as `control_request` (subtype `can_use_tool`) — browser renders approval UI, server relays `control_response` back
+- `the-companion.service` (user systemd, drop-in `persistent-sessions.conf`) runs every Claude and Codex CLI, including the one running this session. Anything those CLIs start shares its cgroup (`KillMode=control-group`).
+- The following kill every session, including yours:
+  - stopping or restarting the service (`systemctl` or `the-companion stop|restart`)
+  - applying an in-app update (it restarts the unit)
+  - killing its main bun process
 
-### All code lives under `web/`
+  Killing a claude or codex child kills that session. Never do any of these without Marco's explicit approval.
+- Once Marco approves a restart, run it detached and log a check:
+  `systemd-run --user --collect --unit=companion-restart-$(date +%s) bash -c 'sleep 3; systemctl --user restart the-companion; sleep 20; { systemctl --user is-active the-companion; curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3456/; } > /tmp/companion-restart.log 2>&1'`
+- Jobs started from a session also die on restart. If a job must survive, launch it with `systemd-run --user`.
+- Logs do not go to the journal. They go to `~/.companion/logs/companion.log` and `companion.error.log`, and `console.warn`/`console.error` output lands in the error log.
+  - The server's log rotation (over 2M lines across `logs/*.log`) can delete these two files while the service is still writing to them.
+  - If the files are missing, read `/proc/$(systemctl --user show -p MainPID --value the-companion)/fd/1` (and `fd/2`).
+  - The per-boot `companion_<ISO>_<pid>.log` contains only `log.*` lines.
 
-- **`web/server/`** — Hono + Bun backend (runs on port 3456)
-  - `index.ts` — Server bootstrap, Bun.serve with dual WebSocket upgrade (CLI vs browser)
-  - `ws-bridge.ts` — Core message router. Maintains per-session state (CLI socket, browser sockets, message history, pending permissions). Parses NDJSON from CLI, translates to typed JSON for browsers.
-  - `cli-launcher.ts` — Spawns/kills/relaunches Claude Code CLI processes. Handles `--resume` for session recovery. Persists session state across server restarts.
-  - `session-store.ts` — JSON file persistence to `$TMPDIR/vibe-sessions/`. Debounced writes.
-  - `session-types.ts` — All TypeScript types for CLI messages (NDJSON), browser messages, session state, permissions.
-  - `routes.ts` — REST API: session CRUD, filesystem browsing, environment management.
-  - `env-manager.ts` — CRUD for environment profiles stored in `~/.companion/envs/`.
+## Deploy without a release
 
-- **`web/src/`** — React 19 frontend
-  - `store.ts` — Zustand store. All state keyed by session ID (messages, streaming text, permissions, tasks, connection status).
-  - `ws.ts` — Browser WebSocket client. Connects per-session, handles all incoming message types, auto-reconnects. Extracts task items from `TaskCreate`/`TaskUpdate`/`TodoWrite` tool calls.
-  - `types.ts` — Re-exports server types + client-only types (`ChatMessage`, `TaskItem`, `SdkSessionInfo`).
-  - `api.ts` — REST client for session management.
-  - `App.tsx` — Root layout with sidebar, chat view, task panel. Hash routing (`#/playground`).
-  - `components/` — UI: `ChatView`, `MessageFeed`, `MessageBubble`, `ToolBlock`, `Composer`, `Sidebar`, `TopBar`, `HomePage`, `TaskPanel`, `PermissionBanner`, `EnvManager`, `Playground`.
-
-- **`web/bin/cli.ts`** — CLI entry point (`bunx the-companion`). Sets `__COMPANION_PACKAGE_ROOT` and imports the server.
-
-### WebSocket Protocol
-
-The CLI uses NDJSON (newline-delimited JSON). Key message types from CLI: `system` (init/status), `assistant`, `result`, `stream_event`, `control_request`, `tool_progress`, `tool_use_summary`, `keep_alive`. Messages to CLI: `user`, `control_response`, `control_request` (for interrupt/set_model/set_permission_mode).
-
-Full protocol documentation is in `WEBSOCKET_PROTOCOL_REVERSED.md`.
-
-### Session Lifecycle
-
-Sessions persist to disk (`$TMPDIR/vibe-sessions/`) and survive server restarts. On restart, live CLI processes are detected by PID and given a grace period to reconnect their WebSocket. If they don't, they're killed and relaunched with `--resume` using the CLI's internal session ID.
-
-### Raw Protocol Recordings
-
-The server automatically records **all raw protocol messages** (both Claude Code NDJSON and Codex JSON-RPC) to JSONL files. This is useful for debugging, understanding the protocol, and building replay-based tests.
-
-- **Location**: `~/.companion/recordings/` (override with `COMPANION_RECORDINGS_DIR`)
-- **Format**: JSONL — one JSON object per line. First line is a header with session metadata, subsequent lines are raw message entries.
-- **File naming**: `{sessionId}_{backendType}_{ISO-timestamp}_{randomSuffix}.jsonl`
-- **Disable**: set `COMPANION_RECORD=0` or `COMPANION_RECORD=false`
-- **Rotation**: automatic cleanup when total lines exceed 1M (configurable via `COMPANION_RECORDINGS_MAX_LINES`)
-
-Each entry captures:
-```json
-{"ts": 1771153996875, "dir": "in", "raw": "{\"type\":\"system\",...}", "ch": "cli"}
-```
-- `dir`: `"in"` (received by server) or `"out"` (sent by server)
-- `ch`: `"cli"` (Claude Code / Codex process) or `"browser"` (frontend WebSocket)
-- `raw`: the exact original string — never re-serialized, preserving the true protocol payload
-
-**REST API**:
-- `GET /api/recordings` — list all recording files with metadata
-- `GET /api/sessions/:id/recording/status` — check if a session is recording + file path
-- `POST /api/sessions/:id/recording/start` / `stop` — enable/disable per session
-
-**Code**: `web/server/recorder.ts` (recorder + manager), `web/server/replay.ts` (load & filter utilities).
-
-## Browser Exploration
-
-Always use `agent-browser` CLI command to explore the browser. Never use playwright or other browser automation libraries.
-
-## Pull Requests
-
-When submitting a pull request:
-- use commitzen to format the commit message and the PR title
-- Add a screenshot of the changes in the PR description if its a visual change
-- Explain simply what the PR does and why it's needed
-- Tell me if the code was reviewed by a human or simply generated directly by an AI. 
-
-## Linear Issues
-
-When creating or updating Linear issues:
-- do not use commitzen-style titles in Linear
-- use clear product-style titles that describe user value/outcome
-
-### How To Open A PR With GitHub CLI
-
-Use this flow from the repository root:
-
-```bash
-# 1) Create a branch
-git checkout -b fix/short-description (commitzen)
-
-# 2) Commit using commitzen format
-git add <files>
-git commit -m "fix(scope): short summary" (commitzen)
-
-# 3) Push and set upstream
-git push -u origin fix/short-description
-
-# 4) Create PR (title should follow commitzen style)
-gh pr create --base main --head fix/short-description --title "fix(scope): short summary"
-```
-
-For multi-line PR descriptions, prefer a body file to avoid shell quoting issues:
-
-```bash
-cat > /tmp/pr_body.md <<'EOF'
-## Summary
-- what changed
-
-## Why
-- why this is needed
+1. From `web/`, build and copy:
+   `bun run build && rsync -a bin server dist package.json ~/.bun/install/global/node_modules/the-companion/`
+2. `dist/` is served from disk, so frontend changes appear on a browser refresh. Server changes need a restart, which requires approval (see above).
+3. Neither this copy nor the in-app updater installs dependencies. They resolve from `~/.bun/install/global/node_modules/`, so install any new runtime dependency there separately.
 
 ## Testing
-- what was run
 
-## Review provenance
-- Implemented by AI agent / Human
-- Human review: yes/no
-EOF
+- Session shells inherit the service environment:
+  - `COMPANION_IDLE_KILL_MINUTES=30` breaks the ws-bridge idle-kill tests. Unset it for every vitest run.
+  - `PORT=3456`, `NODE_ENV=production`, `__COMPANION_PACKAGE_ROOT` and `COMPANION_SESSION_DIR` would point a dev server at the live service and its data.
+- Run a dev server only like this:
+  `env -u PORT -u NODE_ENV -u __COMPANION_PACKAGE_ROOT -u COMPANION_SESSION_DIR -u COMPANION_IDLE_KILL_MINUTES COMPANION_HOME=/tmp/companion-dev bun run dev`
+  The default `~/.companion` holds the live settings, including the Telegram bot token.
+- A single full `bun run test` can OOM this host. From `web/`, run two passes:
+  - `env -u COMPANION_IDLE_KILL_MINUTES npx vitest run server/ --maxWorkers=2`
+  - `env -u COMPANION_IDLE_KILL_MINUTES npx vitest run src/ --maxWorkers=2`
+- No pre-commit hook runs: husky is not installed (no `core.hooksPath`). Before pushing, run from `web/` everything CI runs:
+  - `bun run typecheck`
+  - `bun run deadcode:check`
+  - `bun run dry:check`
+  - `bun run test:codex-contract`
+  - the two test passes above
+  - `bun run build`
+- `coverage-gate.yml` requires at least 80% line coverage on every new or changed non-test `.ts`/`.tsx` file under `web/server` and `web/src`. A file that no test imports counts as 0%. Check one file with:
+  `env -u COMPANION_IDLE_KILL_MINUTES npx vitest run <tests> --coverage --coverage.include=<file> --coverage.reportsDirectory=/tmp/cov`
+- New backend and frontend code must have tests: Vitest, with `foo.test.ts` next to `foo.ts`. In comments, say what each test validates and why.
+- Every new or modified component in `web/src/components/` needs a `.test.tsx` with:
+  - a render test
+  - an axe scan (`toHaveNoViolations()`) in a test whose name contains `axe accessibility`, because `a11y.yml` selects tests by name
+  - tests for its interactive behavior
+- Never delete or weaken existing tests. Fix the code or the test instead. If you think a test should go, explain why and get Marco's explicit approval first.
+- `companionBus` is a singleton. Always `off()` any handler a test subscribes.
 
-gh pr edit --body-file /tmp/pr_body.md
-```
+## Product rules
 
-## Codex & Claude Code
-- All features must be compatible with both Codex and Claude Code. If a feature is only compatible with one, it must be gated behind a clear UI affordance (e.g. "This feature requires Claude Code") and the incompatible option should be hidden or disabled.
-- When implementing a new feature, always consider how it will work with both models and test with both if possible. If a feature is only implemented for one model, document that clearly in the code and in the UI.
+- Playground: every message or chat-flow component needs a mock in `web/src/components/Playground.tsx` (`#/playground`). This covers `MessageBubble`, `ToolBlock`, `PermissionBanner`, `Composer`, streaming indicators, tool and subagent groups, and similar components. Add or update the mock whenever you add or change one.
+- Codex and Claude Code parity: features must work with both backends. If a feature supports only one, gate it in the UI by hiding or disabling it, with a note such as "Requires Claude Code". Also document the limitation in the code.
+- Bun >= 1.4 is required (`engines`). Older Bun has oven-sh/bun#32743, which can end a live CLI's stdout and kill its session.
+- Never leave a spawned subprocess's stdout or stderr piped and unread. Drain it, or use `"ignore"` (see `runGh` in `server/github-pr.ts`).
 
-## Cursor Cloud specific instructions
+## Commits, PRs, releases
 
-### Services
-- **Hono backend** (port 3457 in dev): `cd web && bun run dev:api` or via `./scripts/dev-start.sh`
-- **Vite frontend** (port 5174 in dev): `cd web && bun run dev:vite` or via `./scripts/dev-start.sh`
-- Both start together with `cd web && bun run dev` (or `make dev`), but that runs in foreground. Use `./scripts/dev-start.sh` for background mode.
+- Use Conventional Commits for every commit and for the PR title. Every commit on the branch ends up in the changelog. Name branches `type/short-description`.
+- Write the PR body to a file and pass it with `gh pr create --body-file`. It has these sections:
+  - `## Summary`
+  - `## Why`
+  - `## Testing`
+  - `## Review provenance`: who implemented the change (AI agent or human) and whether a human reviewed it
 
-### Caveats
-- `./scripts/dev-start.sh` health-checks the backend on `/` which returns 404. If the script times out, the backend is still running — verify with `curl http://localhost:3457/api/sessions`. You can start the servers manually as background processes instead.
-- The app requires Claude Code CLI or Codex CLI to create functional sessions. Without them, the UI loads but session creation will fail. The component playground at `#/playground` works without any CLI.
-- No external databases or services are needed. Session state persists to `$TMPDIR/vibe-sessions/` as JSON files.
-- The pre-commit hook (`.husky/pre-commit`) runs `cd web && bun run typecheck && bun run test -- --coverage`. Run these before committing.
-- Two blocked postinstalls (`core-js`, `protobufjs`) are harmless and do not affect functionality.
+  Add a screenshot for visual changes. `agent-browser` is not installed here, so if you have no screenshot, say so and point to `#/playground`.
+- Merge with merge commits, not squash, because release-please reads the individual commits.
+- Release flow:
+  1. Every push to `main` makes release-please (`publish.yml`) open or update a release PR.
+  2. Merging that PR creates tag `the-companion-vX.Y.Z` and a GitHub Release.
+  3. CI attaches `the-companion-X.Y.Z.tgz` to the release. The in-app updater needs that asset: without it, no update is offered.
+- To force a version, push a commit with the footer `Release-As: X.Y.Z`. release-please bumps `.release-please-manifest.json`, `package.json` and `web/package.json` together. If you ever edit versions by hand, keep all three in sync.
