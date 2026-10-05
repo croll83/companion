@@ -123,11 +123,27 @@ describe("POST /api/envs", () => {
 
     expect(res.status).toBe(201);
     expect(await res.json()).toEqual(created);
-    // Verify createEnv was called with the correct arguments (name + variables only)
+    // Verify createEnv was called with the correct arguments: name, variables
+    // and no scope (an old client creates an unassigned profile).
     expect(envManager.createEnv).toHaveBeenCalledWith(
       "Test Env",
       { FOO: "bar" },
+      { scope: undefined, folders: undefined },
     );
+  });
+
+  // The scope editor sends scope + folders; both must reach the manager.
+  it("passes scope and folders through to createEnv", async () => {
+    vi.mocked(envManager.createEnv).mockReturnValue(makeEnv({ scope: "project", folders: ["/repo"] }) as any);
+
+    const res = await app.request("/api/envs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Test Env", variables: {}, scope: "project", folders: ["/repo"] }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(envManager.createEnv).toHaveBeenCalledWith("Test Env", {}, { scope: "project", folders: ["/repo"] });
   });
 
   it("returns 400 when createEnv throws a validation error", async () => {
@@ -167,6 +183,23 @@ describe("PUT /api/envs/:slug", () => {
     expect(envManager.updateEnv).toHaveBeenCalledWith(
       "test-env",
       expect.objectContaining({ name: "Updated" }),
+    );
+  });
+
+  // Scope changes (e.g. assigning a legacy profile) go through the update API.
+  it("passes scope and folders through to updateEnv", async () => {
+    vi.mocked(envManager.updateEnv).mockReturnValue(makeEnv({ scope: "global" }) as any);
+
+    const res = await app.request("/api/envs/test-env", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "global", folders: [] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(envManager.updateEnv).toHaveBeenCalledWith(
+      "test-env",
+      expect.objectContaining({ scope: "global", folders: [] }),
     );
   });
 

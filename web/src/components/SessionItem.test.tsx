@@ -25,7 +25,6 @@ function makeSession(overrides: Partial<SessionItemType> = {}): SessionItemType 
     permCount: 0,
     backendType: "claude",
     repoRoot: "/workspace/app",
-    cronJobId: undefined,
     ...overrides,
   };
 }
@@ -128,12 +127,6 @@ describe("SessionItem", () => {
     expect(screen.getByText("CC")).toBeInTheDocument();
   });
 
-  // --- Cron badge ---
-
-  it("shows scheduled badge when session has a cronJobId", () => {
-    render(<SessionItem {...buildProps({ session: makeSession({ cronJobId: "cron-123" }) })} />);
-    expect(screen.getByTitle("Scheduled")).toBeInTheDocument();
-  });
 
   // --- Active state styling ---
 

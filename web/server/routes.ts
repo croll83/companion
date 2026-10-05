@@ -15,8 +15,7 @@ import * as sessionLinearIssues from "./session-linear-issues.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
-import { registerCronRoutes } from "./routes/cron-routes.js";
-import { registerAgentRoutes } from "./routes/agent-routes.js";
+import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
@@ -24,6 +23,7 @@ import { registerSettingsRoutes } from "./routes/settings-routes.js";
 import { registerTelegramRoutes } from "./routes/telegram-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
+import { registerWakeupRoutes } from "./routes/wakeup-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
 import { registerHubRoutes } from "./recording-hub/hub-routes.js";
 import { registerLinearRoutes, fetchLinearTeamStates } from "./routes/linear-routes.js";
@@ -34,6 +34,7 @@ import { getSettings } from "./settings-manager.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
+import { isMcpRouteAllowed, isMcpToken, mcpCallerRefusal, verifyMcpToken } from "./companion-mcp-auth.js";
 import QRCode from "qrcode";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
@@ -50,10 +51,10 @@ export function createRoutes(
   terminalManager: TerminalManager,
   prPoller?: import("./pr-poller.js").PRPoller,
   recorder?: import("./recorder.js").RecorderManager,
-  cronScheduler?: import("./cron-scheduler.js").CronScheduler,
   agentExecutor?: import("./agent-executor.js").AgentExecutor,
   linearAgentBridge?: import("./linear-agent-bridge.js").LinearAgentBridge,
   port?: number,
+  wakeupScheduler?: import("./wakeup-scheduler.js").WakeupScheduler,
 ) {
   const api = new Hono();
 
@@ -135,6 +136,11 @@ export function createRoutes(
     registerLinearAgentWebhookRoute(api, linearAgentBridge);
   }
 
+  // ─── Agent webhook trigger (exempt from auth middleware) ─────────────
+  // Authenticated by the per-agent secret; accepted only from loopback and
+  // the tailnet (see registerAgentWebhookRoute).
+  registerAgentWebhookRoute(api, agentExecutor);
+
   // ─── Auth middleware (protects all routes below) ───────────────────
 
   api.use("/*", async (c, next) => {
@@ -143,13 +149,32 @@ export function createRoutes(
       return next();
     }
 
+    const authHeader = c.req.header("Authorization");
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+    // A session's `companion` MCP server (companion-mcp-auth.ts). Checked
+    // before the localhost bypass: its calls come from loopback, but the
+    // routes use the token to know which session is calling, so a bad token
+    // must fail loudly rather than silently act as an anonymous user.
+    if (isMcpToken(token)) {
+      const caller = verifyMcpToken(token);
+      const callerInfo = caller ? launcher.getSession(caller) : undefined;
+      if (!caller || !callerInfo) {
+        return c.json({ error: "Invalid or expired Companion MCP token (the session no longer exists?)" }, 401);
+      }
+      const refusal = mcpCallerRefusal(callerInfo);
+      if (refusal) return c.json({ error: refusal }, 403);
+      if (!isMcpRouteAllowed(c.req.method, c.req.path, caller)) {
+        return c.json({ error: "Not available to Companion MCP tokens" }, 403);
+      }
+      return next();
+    }
+
     // Localhost bypass — same machine as the server, always trusted
     if (isLocalhostRequest(c)) {
       return next();
     }
 
-    const authHeader = c.req.header("Authorization");
-    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
     // Also check the companion_auth cookie — iframes (browser preview) can't
     // send Authorization headers, but browsers do forward cookies automatically.
     const cookieToken = getCookie(c, "companion_auth") ?? null;
@@ -818,7 +843,12 @@ export function createRoutes(
   registerEnvRoutes(api);
 
   registerPromptRoutes(api);
-  registerSettingsRoutes(api);
+  registerSettingsRoutes(api, {
+    onTimeZoneChanged: () => {
+      agentExecutor?.rescheduleAll();
+      wakeupScheduler?.rescheduleAll();
+    },
+  });
   registerTelegramRoutes(api);
 
   // ─── Linear ────────────────────────────────────────────────────────
@@ -833,11 +863,12 @@ export function createRoutes(
     wsBridge,
     terminalManager,
     updateCheckStaleMs: UPDATE_CHECK_STALE_MS,
+    resetRelaunchBudget: (sessionId) => orchestrator.clearAutoRelaunchCount(sessionId),
   });
+  if (wakeupScheduler) registerWakeupRoutes(api, wakeupScheduler);
 
   registerSkillRoutes(api);
-  registerCronRoutes(api, cronScheduler);
-  registerAgentRoutes(api, agentExecutor);
+  registerAgentRoutes(api, agentExecutor, (id) => launcher.getSession(id));
   registerMetricsRoutes(api, { gaugeProvider: wsBridge });
 
   // ─── Recording Hub (hidden feature: COMPANION_RECORDING_HUB=1) ──────

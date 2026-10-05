@@ -27,7 +27,6 @@ const LinearSettingsPage = lazy(() => import("./components/LinearSettingsPage.js
 const LinearOAuthSettingsPage = lazy(() => import("./components/LinearOAuthSettingsPage.js").then((m) => ({ default: m.LinearOAuthSettingsPage })));
 const PromptsPage = lazy(() => import("./components/PromptsPage.js").then((m) => ({ default: m.PromptsPage })));
 const EnvManager = lazy(() => import("./components/EnvManager.js").then((m) => ({ default: m.EnvManager })));
-const CronManager = lazy(() => import("./components/CronManager.js").then((m) => ({ default: m.CronManager })));
 const AgentsPage = lazy(() => import("./components/AgentsPage.js").then((m) => ({ default: m.AgentsPage })));
 const RunsPage = lazy(() => import("./components/RunsPage.js").then((m) => ({ default: m.RunsPage })));
 
@@ -68,7 +67,6 @@ export default function App() {
   const isLinearIntegrationPage = route.page === "integration-linear";
   const isLinearOAuthIntegrationPage = route.page === "integration-linear-oauth";
   const isEnvironmentsPage = route.page === "environments";
-  const isScheduledPage = route.page === "scheduled";
   const isAgentsPage = route.page === "agents" || route.page === "agent-detail";
   const isRunsPage = route.page === "runs";
   const isSessionView = route.page === "session" || route.page === "home";
@@ -242,12 +240,6 @@ export default function App() {
           {isEnvironmentsPage && (
             <div className="absolute inset-0">
               <Suspense fallback={<LazyFallback />}><EnvManager embedded /></Suspense>
-            </div>
-          )}
-
-          {isScheduledPage && (
-            <div className="absolute inset-0">
-              <Suspense fallback={<LazyFallback />}><CronManager embedded /></Suspense>
             </div>
           )}
 

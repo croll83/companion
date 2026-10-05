@@ -166,17 +166,36 @@ const RPC_METHOD_TIMEOUTS: Record<string, number> = {
   "codex/configureSession": 30_000,
   "thread/start": 30_000,
   "thread/resume": 30_000,
+  // Copies the whole source rollout: give long conversations more time.
+  "thread/fork": 60_000,
 };
 
 // ─── Adapter Options ──────────────────────────────────────────────────────────
+
+/** The SandboxPolicy shapes Companion sends (v2/SandboxPolicy in the app-server protocol). */
+type CodexSandboxPolicy =
+  | { type: "dangerFullAccess" }
+  | { type: "workspaceWrite"; writableRoots: string[]; networkAccess: boolean; excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean };
 
 export interface CodexAdapterOptions {
   model?: string;
   cwd?: string;
   approvalMode?: string;
   sandbox?: "workspace-write" | "danger-full-access";
+  /**
+   * Network access inside a "workspace-write" sandbox (agents'
+   * codexInternetAccess). Ignored with full access, which always has it.
+   */
+  networkAccess?: boolean;
   /** If provided, resume an existing thread instead of starting a new one. */
   threadId?: string;
+  /**
+   * Without a threadId: start from a COPY of this thread (`thread/fork`).
+   * Its rollout must be in this app-server's CODEX_HOME (the launcher copies
+   * it there). A failed fork fails the session; it never falls back to a
+   * fresh thread, which would silently drop the context the agent relies on.
+   */
+  forkFromThreadId?: string;
   /** Optional recorder for raw message capture. */
   recorder?: RecorderManager;
   /** Callback to kill the underlying process/connection on disconnect. */
@@ -1082,6 +1101,11 @@ export class CodexAdapter implements IBackendAdapter {
                 message: `Session context could not be restored (${resumeErrMsg}). Started a fresh thread — Codex won't remember prior messages.`,
               });
             }
+          } else if (this.options.forkFromThreadId) {
+            this.threadId = await this.forkThread(this.options.forkFromThreadId);
+            // From now on a reconnect resumes the fork, never the source.
+            this.options.threadId = this.threadId;
+            this.options.forkFromThreadId = undefined;
           } else {
             const threadResult = await this.transport.call("thread/start", {
               model: this.options.model,
@@ -1190,6 +1214,31 @@ export class CodexAdapter implements IBackendAdapter {
     }
   }
 
+  /**
+   * Fork the source thread into a new one (`thread/fork`, ThreadForkParams).
+   * The source rollout is only read. `excludeTurns` keeps the response small:
+   * the copied history is not needed here, only the new thread id.
+   */
+  private async forkThread(sourceThreadId: string): Promise<string> {
+    try {
+      const result = await this.transport.call("thread/fork", {
+        threadId: sourceThreadId,
+        model: this.options.model,
+        cwd: this.getExecutionCwd(),
+        approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
+        sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
+        ...(this.options.systemPrompt ? { developerInstructions: this.options.systemPrompt } : {}),
+        excludeTurns: true,
+      }) as { thread: { id: string } };
+      console.log(`[codex-adapter] Session ${this.sessionId} forked thread ${sourceThreadId} into ${result.thread.id}`);
+      return result.thread.id;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === "Transport closed" || message === "Transport reconnected") throw err;
+      throw new Error(`Could not fork the source conversation (thread ${sourceThreadId}): ${message}`);
+    }
+  }
+
   // ── Outgoing message handlers ───────────────────────────────────────────
 
   private async handleOutgoingUserMessage(
@@ -1236,9 +1285,10 @@ export class CodexAdapter implements IBackendAdapter {
       // in "default" mode overrides approvalPolicy and re-enables permission prompts.
       // The server persists collaborationMode across turns, so we only need to send
       // it when switching (e.g. auto→plan or plan→auto).
-      // approvalPolicy and sandboxPolicy are static ("never" / dangerFullAccess) so
-      // resending them each turn is idempotent and ensures consistency if the server
-      // resets state. collaborationMode is only sent on transitions (see below).
+      // approvalPolicy and sandboxPolicy are static for a session ("never" / the
+      // session's sandbox) so resending them each turn is idempotent and ensures
+      // consistency if the server resets state. collaborationMode is only sent on
+      // transitions (see below).
       const turnParams: Record<string, unknown> = {
         threadId: this.threadId,
         input,
@@ -3077,9 +3127,26 @@ export class CodexAdapter implements IBackendAdapter {
     return "danger-full-access";
   }
 
-  /** Map permission mode to SandboxPolicy object (for turn/start's sandboxPolicy field). */
-  private mapSandboxPolicyObject(_mode?: string): { type: string } {
-    // Always full access — matches approvalPolicy: "never" for full autonomy.
+  /**
+   * The session's SandboxPolicy object (turn/start's sandboxPolicy field,
+   * which overrides the sandbox "for this turn and subsequent turns").
+   * Interactive sessions run with full access ("never" approvals, full
+   * autonomy); a "workspace-write" session (sandboxed Codex agents) must stay
+   * in its sandbox on every turn, writing only to its folder, with network
+   * only when allowed. Sending full access here regardless would silently
+   * lift the sandbox chosen at thread/start.
+   */
+  private mapSandboxPolicyObject(_mode?: string): CodexSandboxPolicy {
+    if (this.options.sandbox === "workspace-write") {
+      const cwd = this.getExecutionCwd();
+      return {
+        type: "workspaceWrite",
+        writableRoots: cwd ? [cwd] : [],
+        networkAccess: this.options.networkAccess === true,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    }
     return { type: "dangerFullAccess" };
   }
 

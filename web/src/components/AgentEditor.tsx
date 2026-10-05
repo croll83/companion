@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { api, type McpServerConfigAgent, type CompanionEnv, type LinearOAuthConnectionSummary } from "../api.js";
-import { getModelsForBackend, getDefaultModel, getAgentModesForBackend, getDefaultAgentMode } from "../utils/backends.js";
+import { useStore } from "../store.js";
+import { getModelsForBackend, getDefaultModel, getDefaultAgentMode } from "../utils/backends.js";
+import { AgentPermissionPill } from "./AgentPermissionPill.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { AgentIcon, AGENT_ICON_OPTIONS } from "./AgentIcon.js";
 
@@ -23,20 +25,17 @@ export interface AgentFormData {
   permissionMode: string;
   cwd: string;
   prompt: string;
+  // "brief": fresh session per run; "fork": copy of sourceSessionId's conversation
+  contextMode: "brief" | "fork";
+  sourceSessionId: string;
   envSlug: string;
   // Environment variables (key-value pairs)
   env: { key: string; value: string }[];
   // Codex internet access
   codexInternetAccess: boolean;
-  // Git
-  branch: string;
-  createBranch: boolean;
-  useWorktree: boolean;
   // MCP Servers
   mcpServers: Record<string, McpServerConfigAgent>;
-  // Skills
-  skills: string[];
-  // Allowed tools
+  // Claude only: built-in tools the agent is limited to (empty = all)
   allowedTools: string[];
   // Triggers
   webhookEnabled: boolean;
@@ -57,14 +56,12 @@ export const EMPTY_FORM: AgentFormData = {
   permissionMode: getDefaultAgentMode("claude"),
   cwd: "",
   prompt: "",
+  contextMode: "brief",
+  sourceSessionId: "",
   envSlug: "",
   env: [],
   codexInternetAccess: false,
-  branch: "",
-  createBranch: false,
-  useWorktree: false,
   mcpServers: {},
-  skills: [],
   allowedTools: [],
   webhookEnabled: false,
   scheduleEnabled: false,
@@ -87,8 +84,7 @@ const CRON_PRESETS: { label: string; value: string }[] = [
 function countAdvancedFeatures(form: AgentFormData): number {
   let count = 0;
   if (Object.keys(form.mcpServers).length > 0) count++;
-  if (form.skills.length > 0) count++;
-  if (form.allowedTools.length > 0) count++;
+  if (form.backendType === "claude" && form.allowedTools.length > 0) count++;
   if (form.env.length > 0) count++;
   return count;
 }
@@ -117,7 +113,6 @@ export function AgentEditor({
   linearOAuthConfigured: boolean;
 }) {
   const models = getModelsForBackend(form.backendType);
-  const modes = getAgentModesForBackend(form.backendType);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(() => countAdvancedFeatures(form) > 0);
   const [showMcpForm, setShowMcpForm] = useState(false);
@@ -129,24 +124,22 @@ export function AgentEditor({
     url: "",
     env: "",
   });
-  const [availableSkills, setAvailableSkills] = useState<{ slug: string; name: string; description: string }[]>([]);
   const [envProfiles, setEnvProfiles] = useState<CompanionEnv[]>([]);
   const [linearConnections, setLinearConnections] = useState<LinearOAuthConnectionSummary[]>([]);
   const [linearConnectionsLoading, setLinearConnectionsLoading] = useState(false);
   const [allowedToolInput, setAllowedToolInput] = useState("");
   const [showModelDropdown, setShowModelDropdown] = useState(false);
-  const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showEnvDropdown, setShowEnvDropdown] = useState(false);
-  const [showBranchInput, setShowBranchInput] = useState(!!form.branch);
+  const scheduleTimeZone = useStore((s) => s.timeZone);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  const sessionNames = useStore((s) => s.sessionNames);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const iconPickerRef = useRef<HTMLDivElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
-  const modeDropdownRef = useRef<HTMLDivElement>(null);
   const envDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Fetch skills and env profiles on mount
+  // Fetch env profiles on mount
   useEffect(() => {
-    api.listSkills().then(setAvailableSkills).catch(() => {});
     api.listEnvs().then(setEnvProfiles).catch(() => {});
   }, []);
 
@@ -226,16 +219,6 @@ export function AgentEditor({
     });
   }
 
-  // ── Skills toggle ──
-  function toggleSkill(slug: string) {
-    setForm((prev) => ({
-      ...prev,
-      skills: prev.skills.includes(slug)
-        ? prev.skills.filter((s) => s !== slug)
-        : [...prev.skills, slug],
-    }));
-  }
-
   // ── Allowed tools helpers ──
   function addAllowedTool(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter" && allowedToolInput.trim()) {
@@ -257,9 +240,6 @@ export function AgentEditor({
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
         setShowModelDropdown(false);
       }
-      if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
-        setShowModeDropdown(false);
-      }
       if (envDropdownRef.current && !envDropdownRef.current.contains(e.target as Node)) {
         setShowEnvDropdown(false);
       }
@@ -271,9 +251,18 @@ export function AgentEditor({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // Sessions a fork agent can copy: same backend, with a conversation, not archived.
+  const forkableSessions = sdkSessions.filter(
+    (s) => (s.backendType ?? "claude") === form.backendType && !!s.cliSessionId && !s.archived,
+  );
+  const sessionLabel = (s: (typeof sdkSessions)[number]) =>
+    `${sessionNames.get(s.sessionId) || s.name || s.cwd.split("/").pop() || s.cwd} (${s.sessionId.slice(0, 8)})`;
+  const sourceMissing = form.contextMode === "fork" && !!form.sourceSessionId
+    && !forkableSessions.some((s) => s.sessionId === form.sourceSessionId);
+  const isFork = form.contextMode === "fork";
+
   // Derive labels for pills
   const selectedModel = models.find((m) => m.value === form.model) || models[0];
-  const selectedMode = modes.find((m) => m.value === form.permissionMode) || modes[0];
   const selectedEnv = envProfiles.find((e) => e.slug === form.envSlug);
   const folderLabel = form.cwd ? form.cwd.split("/").pop() || form.cwd : "temp";
   const webhookBaseUrl = publicUrl || (typeof window !== "undefined" ? window.location.origin : "");
@@ -384,6 +373,59 @@ export function AgentEditor({
             </p>
           </div>
 
+          {/* ── Context ── */}
+          <section aria-labelledby="agent-context-heading">
+            <h2 id="agent-context-heading" className="text-xs text-cc-muted mb-2">Context</h2>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-cc-fg cursor-pointer">
+                <input
+                  type="radio"
+                  name="agent-context-mode"
+                  checked={!isFork}
+                  onChange={() => updateField("contextMode", "brief")}
+                />
+                Brief
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-cc-fg cursor-pointer">
+                <input
+                  type="radio"
+                  name="agent-context-mode"
+                  checked={isFork}
+                  onChange={() => updateField("contextMode", "fork")}
+                />
+                Fork a session
+              </label>
+            </div>
+            {isFork ? (
+              <div className="mt-2 space-y-1">
+                <label className="block text-xs text-cc-muted">
+                  Source session
+                  <select
+                    value={form.sourceSessionId}
+                    onChange={(e) => updateField("sourceSessionId", e.target.value)}
+                    className="mt-1 block w-full px-2 py-1.5 rounded-lg bg-cc-input-bg border border-cc-border text-cc-fg text-xs focus:outline-none focus:ring-1 focus:ring-cc-primary"
+                  >
+                    <option value="">Choose a session…</option>
+                    {sourceMissing && (
+                      <option value={form.sourceSessionId}>{`Unavailable session (${form.sourceSessionId.slice(0, 8)})`}</option>
+                    )}
+                    {forkableSessions.map((s) => (
+                      <option key={s.sessionId} value={s.sessionId}>{sessionLabel(s)}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-[10px] text-cc-muted" data-testid="context-note">
+                  Each run starts from a copy of this session&apos;s conversation and works in its folder. The source session is never changed.
+                  {forkableSessions.length === 0 && ` No ${form.backendType === "codex" ? "Codex" : "Claude Code"} session with a conversation is open.`}
+                </p>
+              </div>
+            ) : (
+              <p className="text-[10px] text-cc-muted mt-1" data-testid="context-note">
+                Each run starts a new session: the prompt must contain everything the agent needs.
+              </p>
+            )}
+          </section>
+
           {/* ── Controls Row ── */}
           <div className="flex items-center gap-1 sm:gap-2 flex-wrap" data-testid="controls-row">
             {/* Backend toggle */}
@@ -405,7 +447,7 @@ export function AgentEditor({
             {/* Model dropdown pill */}
             <div className="relative" ref={modelDropdownRef}>
               <button
-                onClick={() => { setShowModelDropdown(!showModelDropdown); setShowModeDropdown(false); setShowEnvDropdown(false); }}
+                onClick={() => { setShowModelDropdown(!showModelDropdown); setShowEnvDropdown(false); }}
                 aria-expanded={showModelDropdown}
                 className={pillDefault}
               >
@@ -429,36 +471,19 @@ export function AgentEditor({
               )}
             </div>
 
-            {/* Mode dropdown pill */}
-            <div className="relative" ref={modeDropdownRef}>
-              <button
-                onClick={() => { setShowModeDropdown(!showModeDropdown); setShowModelDropdown(false); setShowEnvDropdown(false); }}
-                aria-expanded={showModeDropdown}
-                className={pillDefault}
-              >
-                <span>{selectedMode?.label}</span>
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 opacity-50"><path d="M4 6l4 4 4-4" /></svg>
-              </button>
-              {showModeDropdown && (
-                <div className="absolute left-0 top-full mt-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
-                  {modes.map((m) => (
-                    <button
-                      key={m.value}
-                      onClick={() => { updateField("permissionMode", m.value); setShowModeDropdown(false); }}
-                      className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${m.value === form.permissionMode ? "text-cc-primary font-medium" : "text-cc-fg"}`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Permissions: fixed for Claude, the sandbox for Codex */}
+            <AgentPermissionPill
+              backendType={form.backendType}
+              permissionMode={form.permissionMode}
+              onChange={(mode) => updateField("permissionMode", mode)}
+            />
 
-            {/* Folder pill */}
+            {/* Folder pill (a fork run works in the source session's folder) */}
             <button
               onClick={() => setShowFolderPicker(true)}
-              className={form.cwd ? pillActive : pillDefault}
-              title={form.cwd || "Temporary directory"}
+              disabled={isFork}
+              className={`${form.cwd ? pillActive : pillDefault} disabled:opacity-50 disabled:cursor-not-allowed`}
+              title={isFork ? "Fork runs work in the source session's folder" : form.cwd || "Temporary directory"}
             >
               <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 opacity-60">
                 <path d="M1 3.5A1.5 1.5 0 012.5 2h3.879a1.5 1.5 0 011.06.44l1.122 1.12A1.5 1.5 0 009.62 4H13.5A1.5 1.5 0 0115 5.5v7a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z" />
@@ -474,62 +499,10 @@ export function AgentEditor({
               )}
             </button>
 
-            {/* Branch pill — only visible when folder is set */}
-            {form.cwd && (
-              showBranchInput ? (
-                <div className="flex items-center gap-1">
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-muted opacity-60">
-                    <path d="M9.5 3.25a2.25 2.25 0 113 2.122V6.5A2.5 2.5 0 0110 9H6a1 1 0 00-1 1v1.128a2.251 2.251 0 11-1.5 0V5.372a2.25 2.25 0 111.5 0v1.836A2.492 2.492 0 016 7h4a1 1 0 001-1v-.878A2.25 2.25 0 019.5 3.25z" />
-                  </svg>
-                  <input
-                    value={form.branch}
-                    onChange={(e) => updateField("branch", e.target.value)}
-                    placeholder="branch name"
-                    className="w-28 px-1.5 py-1 text-xs rounded-md bg-cc-input-bg border border-cc-border text-cc-fg font-mono-code focus:outline-none focus:ring-1 focus:ring-cc-primary"
-                    autoFocus
-                    onBlur={() => { if (!form.branch) setShowBranchInput(false); }}
-                  />
-                  {form.branch && (
-                    <>
-                      <label className="flex items-center gap-1 text-[10px] text-cc-muted cursor-pointer" title="Create branch if it doesn't exist">
-                        <input
-                          type="checkbox"
-                          checked={form.createBranch}
-                          onChange={(e) => updateField("createBranch", e.target.checked)}
-                          className="rounded w-3 h-3"
-                        />
-                        create
-                      </label>
-                      <label className="flex items-center gap-1 text-[10px] text-cc-muted cursor-pointer" title="Use git worktree">
-                        <input
-                          type="checkbox"
-                          checked={form.useWorktree}
-                          onChange={(e) => updateField("useWorktree", e.target.checked)}
-                          className="rounded w-3 h-3"
-                        />
-                        worktree
-                      </label>
-                    </>
-                  )}
-                </div>
-              ) : (
-                <button
-                  onClick={() => setShowBranchInput(true)}
-                  className={pillDefault}
-                  title="Set a git branch"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 opacity-60">
-                    <path d="M9.5 3.25a2.25 2.25 0 113 2.122V6.5A2.5 2.5 0 0110 9H6a1 1 0 00-1 1v1.128a2.251 2.251 0 11-1.5 0V5.372a2.25 2.25 0 111.5 0v1.836A2.492 2.492 0 016 7h4a1 1 0 001-1v-.878A2.25 2.25 0 019.5 3.25z" />
-                  </svg>
-                  <span>branch</span>
-                </button>
-              )
-            )}
-
             {/* Env profile pill */}
             <div className="relative" ref={envDropdownRef}>
               <button
-                onClick={() => { setShowEnvDropdown(!showEnvDropdown); setShowModelDropdown(false); setShowModeDropdown(false); }}
+                onClick={() => { setShowEnvDropdown(!showEnvDropdown); setShowModelDropdown(false); }}
                 aria-expanded={showEnvDropdown}
                 className={form.envSlug ? pillActive : pillDefault}
               >
@@ -574,6 +547,12 @@ export function AgentEditor({
               </button>
             )}
           </div>
+
+          <p className="text-[10px] text-cc-muted -mt-3" data-testid="permissions-note">
+            {form.backendType === "claude"
+              ? "Claude agents run unattended with full permissions (no approval prompts). Limit them with Allowed tools under Advanced."
+              : "Codex never asks for approvals in agent runs. Full Auto runs without a sandbox (danger-full-access); Supervised runs in the workspace-write sandbox."}
+          </p>
 
           {showFolderPicker && (
             <FolderPicker
@@ -633,6 +612,9 @@ export function AgentEditor({
               <div className="mt-2 space-y-1">
                 <p className="text-[10px] text-cc-muted">
                   A unique URL will be generated after saving. POST to it with <code className="px-1 py-0.5 rounded bg-cc-hover">{`{"input": "..."}`}</code>.
+                </p>
+                <p className="text-[10px] text-cc-muted">
+                  Accepted only from this machine or your Tailscale network, never from the internet. A disabled agent or one with a run in progress refuses the call.
                 </p>
                 {webhookBaseUrl && (
                   <p className="text-[10px] text-cc-muted">
@@ -715,6 +697,11 @@ export function AgentEditor({
                     One-time
                   </label>
                 </div>
+                <p className="text-[10px] text-cc-muted" data-testid="schedule-timezone">
+                  {scheduleTimeZone
+                    ? `Times are in ${scheduleTimeZone} (the time zone set in Settings).`
+                    : "Times are in the server's local time zone. Pick a time zone in Settings to pin it."}
+                </p>
                 {form.scheduleRecurring ? (
                   <div className="space-y-2">
                     <div className="flex flex-wrap gap-1">
@@ -731,13 +718,15 @@ export function AgentEditor({
                     <input
                       value={form.scheduleExpression}
                       onChange={(e) => updateField("scheduleExpression", e.target.value)}
-                      placeholder="Cron expression (e.g. 0 8 * * *)"
+                      placeholder="Cron expression, 5 fields (e.g. 0 8 * * *)"
+                      aria-label="Cron expression"
                       className="w-full px-3 py-2 rounded-lg bg-cc-input-bg border border-cc-border text-cc-fg text-sm font-mono-code focus:outline-none focus:ring-1 focus:ring-cc-primary"
                     />
                   </div>
                 ) : (
                   <input
                     type="datetime-local"
+                    aria-label="One-time run date and time"
                     value={form.scheduleExpression}
                     onChange={(e) => updateField("scheduleExpression", e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-cc-input-bg border border-cc-border text-cc-fg text-sm focus:outline-none focus:ring-1 focus:ring-cc-primary"
@@ -872,39 +861,15 @@ export function AgentEditor({
                   )}
                 </div>
 
-                {/* ── Skills ── */}
-                <div>
-                  <h3 className="text-xs font-medium text-cc-muted mb-2">Skills</h3>
-                  {availableSkills.length === 0 ? (
-                    <p className="text-[10px] text-cc-muted">No skills found in ~/.claude/skills/</p>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {availableSkills.map((skill) => (
-                        <label
-                          key={skill.slug}
-                          className="flex items-start gap-2 text-sm text-cc-fg cursor-pointer"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={form.skills.includes(skill.slug)}
-                            onChange={() => toggleSkill(skill.slug)}
-                            className="rounded mt-0.5"
-                          />
-                          <div>
-                            <span className="text-xs">{skill.name}</span>
-                            {skill.description && (
-                              <p className="text-[10px] text-cc-muted">{skill.description}</p>
-                            )}
-                          </div>
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* ── Allowed Tools ── */}
+                {/* ── Allowed Tools (Claude only: passed as --tools; Codex has
+                    no per-tool switch, only its sandbox) ── */}
                 <div>
                   <h3 className="text-xs font-medium text-cc-muted mb-2">Allowed Tools</h3>
+                  {form.backendType === "codex" ? (
+                    <p className="text-[10px] text-cc-muted" data-testid="allowed-tools-codex-note">
+                      Requires Claude Code. Codex has no per-tool restriction; use the sandbox mode instead.
+                    </p>
+                  ) : (
                   <div className="space-y-2">
                     {form.allowedTools.length > 0 && (
                       <div className="flex flex-wrap gap-1.5">
@@ -913,6 +878,7 @@ export function AgentEditor({
                             {tool}
                             <button
                               onClick={() => removeAllowedTool(tool)}
+                              aria-label={`Remove ${tool}`}
                               className="text-cc-muted hover:text-cc-error transition-colors cursor-pointer"
                             >
                               <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
@@ -928,10 +894,15 @@ export function AgentEditor({
                       onChange={(e) => setAllowedToolInput(e.target.value)}
                       onKeyDown={addAllowedTool}
                       placeholder="Type tool name and press Enter"
+                      aria-label="Add allowed tool"
                       className="w-full px-2 py-1.5 rounded-lg bg-cc-input-bg border border-cc-border text-cc-fg text-xs font-mono-code focus:outline-none focus:ring-1 focus:ring-cc-primary"
                     />
                     <p className="text-[10px] text-cc-muted">Leave empty to allow all tools.</p>
+                    <p className="text-[10px] text-cc-muted">
+                      Built-in tool names (e.g. Read, Grep, Bash): the agent gets only these. MCP server tools are not affected.
+                    </p>
                   </div>
+                  )}
                 </div>
 
                 {/* ── Environment Variables ── */}

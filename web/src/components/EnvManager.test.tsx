@@ -18,7 +18,7 @@
  * - VarEditor: add/remove rows
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 // ─── API Mocks ─────────────────────────────────────────────────
@@ -36,7 +36,19 @@ vi.mock("../api.js", () => ({
   },
 }));
 
+// FolderPicker browses the server filesystem; it has its own tests. Here a
+// stub picks "/picked/folder" or closes, so the scope editor can be driven.
+vi.mock("./FolderPicker.js", () => ({
+  FolderPicker: ({ onSelect, onClose }: { onSelect: (p: string) => void; onClose: () => void }) => (
+    <div role="dialog" aria-label="Pick folder">
+      <button type="button" onClick={() => onSelect("/picked/folder")}>Pick stub folder</button>
+      <button type="button" onClick={onClose}>Close stub picker</button>
+    </div>
+  ),
+}));
+
 import { EnvManager } from "./EnvManager.js";
+import { useStore } from "../store.js";
 
 // ─── Helpers ───────────────────────────────────────────────────
 
@@ -206,6 +218,7 @@ describe("EnvManager create flow (embedded)", () => {
       expect(mockCreateEnv).toHaveBeenCalledWith(
         "staging",
         { DB_HOST: "localhost" },
+        { scope: "global" },
       );
     });
   });
@@ -305,7 +318,7 @@ describe("EnvManager create flow (modal)", () => {
     fireEvent.keyDown(nameInput, { key: "Enter" });
 
     await waitFor(() => {
-      expect(mockCreateEnv).toHaveBeenCalledWith("modal-env", {});
+      expect(mockCreateEnv).toHaveBeenCalledWith("modal-env", {}, { scope: "global" });
     });
   });
 });
@@ -573,6 +586,7 @@ describe("EnvManager VarEditor", () => {
       expect(mockCreateEnv).toHaveBeenCalledWith(
         "filter-test",
         { VALID: "yes" },
+        { scope: "global" },
       );
     });
   });
@@ -636,6 +650,244 @@ describe("EnvManager save edit with cleared name", () => {
         "production",
         expect.objectContaining({ name: undefined }),
       );
+    });
+  });
+});
+
+// ─── Scopes: global / project folders / unassigned ─────────────
+
+/** One profile of each kind, as the server returns them. */
+function scopedEnvs() {
+  return [
+    makeEnv({ name: "Everywhere", slug: "everywhere", scope: "global", variables: { G: "1" } }),
+    makeEnv({ name: "Repo Env", slug: "repo-env", scope: "project", folders: ["/work/repo"], variables: { R: "1" } }),
+    makeEnv({ name: "Jarvis", slug: "jarvis", variables: { J: "1" } }),
+  ];
+}
+
+describe("EnvManager scopes", () => {
+  beforeEach(() => {
+    useStore.setState({ currentSessionId: null });
+  });
+
+  it("passes axe accessibility scan with grouped list, unassigned notice and project scope editor", async () => {
+    const { axe } = await import("vitest-axe");
+    mockListEnvs.mockResolvedValue(scopedEnvs());
+    const { container } = render(<EnvManager embedded />);
+    await screen.findByText("Jarvis");
+    fireEvent.click(screen.getByRole("button", { name: /new environment/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick stub folder" }));
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("passes axe accessibility scan in modal mode while assigning a profile", async () => {
+    const { axe } = await import("vitest-axe");
+    mockListEnvs.mockResolvedValue(scopedEnvs());
+    render(<EnvManager onClose={vi.fn()} />);
+    await screen.findByText("Jarvis");
+    fireEvent.click(within(screen.getByRole("region", { name: "Unassigned" })).getByText("Edit"));
+    const results = await axe(document.body, { rules: { region: { enabled: false } } });
+    expect(results).toHaveNoViolations();
+  });
+
+  // Global first, then one section per folder set, then unassigned profiles.
+  it("groups environments into Global, project folder and Unassigned sections", async () => {
+    mockListEnvs.mockResolvedValue(scopedEnvs());
+    render(<EnvManager embedded />);
+    await screen.findByText("Jarvis");
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Global", "repo", "Unassigned"]);
+    expect(within(screen.getByRole("region", { name: "Global" })).getByText("Everywhere")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "repo" })).getByText("Repo Env")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Unassigned" })).getByText("Jarvis")).toBeInTheDocument();
+  });
+
+  it("groups by scope in modal mode too", async () => {
+    mockListEnvs.mockResolvedValue(scopedEnvs());
+    render(<EnvManager onClose={vi.fn()} />);
+    await screen.findByText("Jarvis");
+    expect(screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent)).toEqual(["Global", "repo", "Unassigned"]);
+  });
+
+  // Legacy profiles never auto-apply; the UI must say so and ask to assign them.
+  it("shows the unassigned notice only when some profile has no scope", async () => {
+    mockListEnvs.mockResolvedValue(scopedEnvs());
+    const { unmount } = render(<EnvManager embedded />);
+    expect(await screen.findByRole("note")).toHaveTextContent("1 environment is unassigned");
+
+    unmount();
+    mockListEnvs.mockResolvedValue(scopedEnvs().slice(0, 2));
+    render(<EnvManager embedded />);
+    await screen.findByText("Repo Env");
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("pluralizes the unassigned notice", async () => {
+    mockListEnvs.mockResolvedValue([makeEnv(), makeEnv({ name: "Other", slug: "other" })]);
+    render(<EnvManager embedded />);
+    expect(await screen.findByRole("note")).toHaveTextContent("2 environments are unassigned");
+  });
+
+  it("creates a project-scoped environment with folders from the folder picker", async () => {
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+
+    fireEvent.click(screen.getByRole("button", { name: /new environment/i }));
+    fireEvent.change(screen.getByPlaceholderText("Environment name (e.g. production)"), { target: { value: "repo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    expect(screen.getByRole("button", { name: "Project folders" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick stub folder" }));
+    // Picking the same folder twice keeps a single chip.
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick stub folder" }));
+    expect(screen.getAllByLabelText("Remove folder /picked/folder")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => {
+      expect(mockCreateEnv).toHaveBeenCalledWith("repo", {}, { scope: "project", folders: ["/picked/folder"] });
+    });
+  });
+
+  it("refuses to create a project environment without folders", async () => {
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+
+    fireEvent.click(screen.getByRole("button", { name: /new environment/i }));
+    fireEvent.change(screen.getByPlaceholderText("Environment name (e.g. production)"), { target: { value: "repo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("Select at least one project folder")).toBeInTheDocument();
+    expect(mockCreateEnv).not.toHaveBeenCalled();
+  });
+
+  it("closes the folder picker without adding a folder", async () => {
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+    fireEvent.click(screen.getByRole("button", { name: /new environment/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close stub picker" }));
+    expect(screen.queryByRole("dialog", { name: "Pick folder" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Remove folder/)).not.toBeInTheDocument();
+  });
+
+  // Same convenience as Prompts: switching to project scope pre-fills the
+  // folder of the session the user is looking at.
+  it("pre-fills the current session folder when switching to project scope", async () => {
+    useStore.setState({
+      currentSessionId: "s1",
+      sessions: new Map([["s1", { cwd: "/work/current" } as never]]),
+    });
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+    fireEvent.click(screen.getByRole("button", { name: /new environment/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    expect(screen.getByLabelText("Remove folder /work/current")).toBeInTheDocument();
+  });
+
+  it("assigns an unassigned profile from the edit form", async () => {
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByText(/Unassigned: applied only when picked explicitly/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Global" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Project folders" })).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Global" }));
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(mockUpdateEnv).toHaveBeenCalledWith(
+        "production",
+        expect.objectContaining({ scope: "global", folders: [] }),
+      );
+    });
+  });
+
+  // Saving an unassigned profile without choosing a scope keeps it unassigned.
+  it("does not send a scope when an unassigned profile stays unassigned", async () => {
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockUpdateEnv).toHaveBeenCalled());
+    expect(mockUpdateEnv.mock.calls[0][1]).not.toHaveProperty("scope");
+  });
+
+  it("edits the folders of a project profile", async () => {
+    mockListEnvs.mockResolvedValue([makeEnv({ scope: "project", folders: ["/work/repo"] })]);
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "Project folders" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByLabelText("Remove folder /work/repo"));
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick stub folder" }));
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(mockUpdateEnv).toHaveBeenCalledWith(
+        "production",
+        expect.objectContaining({ scope: "project", folders: ["/picked/folder"] }),
+      );
+    });
+  });
+
+  it("refuses to save a project profile with no folders left", async () => {
+    mockListEnvs.mockResolvedValue([makeEnv({ scope: "project", folders: ["/work/repo"] })]);
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByLabelText("Remove folder /work/repo"));
+    fireEvent.click(screen.getByText("Save"));
+
+    expect(await screen.findByText("Select at least one project folder")).toBeInTheDocument();
+    expect(mockUpdateEnv).not.toHaveBeenCalled();
+  });
+
+  it("pre-fills the session folder when switching an edited profile to project scope", async () => {
+    useStore.setState({
+      currentSessionId: "s1",
+      sessions: new Map(),
+      sdkSessions: [{ sessionId: "s1", cwd: "/work/sdk", state: "connected", createdAt: 1 }],
+    });
+    render(<EnvManager embedded />);
+    await screen.findByText("Production");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    expect(screen.getByLabelText("Remove folder /work/sdk")).toBeInTheDocument();
+  });
+
+  it("shows scope badges in the embedded list", async () => {
+    mockListEnvs.mockResolvedValue(scopedEnvs());
+    render(<EnvManager embedded />);
+    await screen.findByText("Jarvis");
+    expect(screen.getByText("global")).toBeInTheDocument();
+    // The folder chip (a span) carries the full path as its tooltip.
+    expect(document.querySelector('span[title="/work/repo"]')).toHaveTextContent("repo");
+    expect(screen.getByText("unassigned")).toBeInTheDocument();
+  });
+
+  it("creates a project environment from the modal with the folder picker", async () => {
+    render(<EnvManager onClose={vi.fn()} />);
+    await screen.findByText("Production");
+    fireEvent.change(screen.getByPlaceholderText("Environment name (e.g. production)"), { target: { value: "m" } });
+    fireEvent.click(screen.getByRole("button", { name: "Project folders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick stub folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => {
+      expect(mockCreateEnv).toHaveBeenCalledWith("m", {}, { scope: "project", folders: ["/picked/folder"] });
     });
   });
 });

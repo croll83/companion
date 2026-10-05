@@ -443,6 +443,14 @@ describe("Sidebar", () => {
     expect(window.location.hash).toBe("#/environments");
   });
 
+  it("navigates to the Runs page when Runs is clicked", () => {
+    // Agent runs (status, duration, outcome, session link) live on #/runs,
+    // which used to be reachable only by typing the URL.
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("Runs"));
+    expect(window.location.hash).toBe("#/runs");
+  });
+
   it("navigates to settings page when Settings is clicked", () => {
     render(<Sidebar />);
     fireEvent.click(screen.getByTitle("Settings"));
@@ -1472,58 +1480,6 @@ describe("Sidebar", () => {
 
   // ─── Cron sessions section ─────────────────────────────────────────────────
 
-  it("renders Scheduled Runs section when cron sessions exist", () => {
-    // Verifies that sessions with cronJobId are displayed in a separate
-    // "Scheduled Runs" section with the correct count.
-    const sdk1 = makeSdkSession("s1");
-    const sdk2 = makeSdkSession("s2", { cronJobId: "cron-1", cronJobName: "Daily Build" });
-    mockState = createMockState({
-      sdkSessions: [sdk1, sdk2],
-    });
-
-    render(<Sidebar />);
-    expect(screen.getByText(/Scheduled Runs \(1\)/)).toBeInTheDocument();
-  });
-
-  it("cron sessions are not shown in the active sessions list", () => {
-    // Verifies that sessions with a cronJobId are excluded from the main
-    // active sessions list and only appear under "Scheduled Runs".
-    const sdk1 = makeSdkSession("s1", { model: "regular-session" });
-    const sdk2 = makeSdkSession("s2", { model: "cron-session", cronJobId: "cron-1" });
-    mockState = createMockState({
-      sdkSessions: [sdk1, sdk2],
-    });
-
-    render(<Sidebar />);
-    // regular-session should be in the main list
-    expect(screen.getByText("regular-session")).toBeInTheDocument();
-    // cron-session should appear under Scheduled Runs, not in main list
-    expect(screen.getByText(/Scheduled Runs \(1\)/)).toBeInTheDocument();
-  });
-
-  it("toggling Scheduled Runs section hides/shows cron sessions", () => {
-    // Verifies that the Scheduled Runs section can be collapsed and expanded
-    // via its toggle button.
-    const sdk = makeSdkSession("s1", { model: "cron-model", cronJobId: "cron-1" });
-    mockState = createMockState({
-      sdkSessions: [sdk],
-    });
-
-    render(<Sidebar />);
-    // Initially expanded (showCronSessions defaults to true)
-    expect(screen.getByText("cron-model")).toBeInTheDocument();
-
-    // Click to collapse
-    fireEvent.click(screen.getByText(/Scheduled Runs \(1\)/));
-
-    // Session should be hidden
-    expect(screen.queryByText("cron-model")).not.toBeInTheDocument();
-
-    // Click again to expand
-    fireEvent.click(screen.getByText(/Scheduled Runs \(1\)/));
-    expect(screen.getByText("cron-model")).toBeInTheDocument();
-  });
-
   // ─── Agent sessions section ────────────────────────────────────────────────
 
   it("renders Agent Runs section when agent sessions exist", () => {
@@ -1536,6 +1492,16 @@ describe("Sidebar", () => {
     });
 
     render(<Sidebar />);
+    expect(screen.getByText(/Agent Runs \(1\)/)).toBeInTheDocument();
+  });
+
+  it("lists agent sessions even when there are no other sessions", () => {
+    // Regression: the empty state ignored agent runs and hid them.
+    mockState = createMockState({
+      sdkSessions: [makeSdkSession("s2", { agentId: "agent-1", agentName: "Code Reviewer" })],
+    });
+    render(<Sidebar />);
+    expect(screen.queryByText("No sessions yet.")).not.toBeInTheDocument();
     expect(screen.getByText(/Agent Runs \(1\)/)).toBeInTheDocument();
   });
 
@@ -1805,17 +1771,6 @@ describe("Sidebar", () => {
   });
 
   // ─── Session with cron badge ───────────────────────────────────────────────
-
-  it("session with cronJobId shows Scheduled badge", () => {
-    // Verifies that a session with a cron job ID displays the scheduled clock badge.
-    const sdk = makeSdkSession("s1", { cronJobId: "cron-1" });
-    mockState = createMockState({
-      sdkSessions: [sdk],
-    });
-
-    render(<Sidebar />);
-    expect(screen.getByTitle("Scheduled")).toBeInTheDocument();
-  });
 
   // ─── Delete all singular text ──────────────────────────────────────────────
 

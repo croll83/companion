@@ -93,6 +93,7 @@ const NAV_PATHS: { group: string; paths: string[] }[] = [
       "guides/environments",
       "guides/git-worktrees",
       "guides/agents",
+      "guides/companion-mcp",
       "guides/chat-webhooks",
       "guides/saved-prompts",
       "guides/linear-integration",

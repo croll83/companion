@@ -135,16 +135,14 @@ export function AgentsPage({ route }: Props) {
       permissionMode: agent.permissionMode,
       cwd: agent.cwd === "temp" ? "" : agent.cwd,
       prompt: agent.prompt,
+      contextMode: agent.contextMode === "fork" ? "fork" : "brief",
+      sourceSessionId: agent.sourceSessionId || "",
       envSlug: agent.envSlug || "",
       env: agent.env
         ? Object.entries(agent.env).map(([key, value]) => ({ key, value }))
         : [],
       codexInternetAccess: agent.codexInternetAccess ?? false,
-      branch: agent.branch || "",
-      createBranch: agent.createBranch ?? false,
-      useWorktree: agent.useWorktree ?? false,
       mcpServers: agent.mcpServers || {},
-      skills: agent.skills || [],
       allowedTools: agent.allowedTools || [],
       webhookEnabled: agent.triggers?.webhook?.enabled ?? false,
       scheduleEnabled: agent.triggers?.schedule?.enabled ?? false,
@@ -244,18 +242,19 @@ export function AgentsPage({ route }: Props) {
         icon: form.icon || undefined,
         backendType: form.backendType,
         model: form.model,
-        permissionMode: form.permissionMode,
+        // Claude agents always run with full permissions (see AgentEditor);
+        // for Codex the mode selects the sandbox.
+        permissionMode: form.backendType === "claude" ? "bypassPermissions" : form.permissionMode,
         cwd: form.cwd || "temp",
         prompt: form.prompt,
+        contextMode: form.contextMode,
+        sourceSessionId: form.contextMode === "fork" ? form.sourceSessionId || undefined : undefined,
         envSlug: form.envSlug || undefined,
         env: Object.keys(envRecord).length > 0 ? envRecord : undefined,
         codexInternetAccess: form.backendType === "codex" ? form.codexInternetAccess : undefined,
-        branch: form.branch || undefined,
-        createBranch: form.branch ? form.createBranch : undefined,
-        useWorktree: form.branch ? form.useWorktree : undefined,
         mcpServers: Object.keys(form.mcpServers).length > 0 ? form.mcpServers : undefined,
-        skills: form.skills.length > 0 ? form.skills : undefined,
-        allowedTools: form.allowedTools.length > 0 ? form.allowedTools : undefined,
+        // Claude only (--tools); Codex has no per-tool restriction.
+        allowedTools: form.backendType === "claude" && form.allowedTools.length > 0 ? form.allowedTools : undefined,
         enabled: true,
         triggers: {
           webhook: { enabled: form.webhookEnabled, secret: "" },
@@ -314,12 +313,15 @@ export function AgentsPage({ route }: Props) {
 
   async function handleRun(agent: AgentInfo, input?: string) {
     try {
+      setError("");
       await api.runAgent(agent.id, input);
       setRunInputAgent(null);
       setRunInput("");
       await loadAgents();
-    } catch {
-      // ignore
+    } catch (e: unknown) {
+      // e.g. 409: a run of this agent is still in progress
+      setRunInputAgent(null);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -506,6 +508,12 @@ export function AgentsPage({ route }: Props) {
             <p className="text-xs text-cc-muted mt-0.5">Reusable autonomous session configs. Run manually, via webhook, or on a schedule.</p>
           </div>
           <div className="flex gap-2">
+            <a
+              href="#/runs"
+              className="px-3 py-1.5 text-xs rounded-lg border border-cc-border text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+            >
+              Runs
+            </a>
             <input
               ref={fileInputRef}
               type="file"
@@ -529,7 +537,7 @@ export function AgentsPage({ route }: Props) {
         </div>
 
         {error && (
-          <div className="mb-4 px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/30 text-cc-error text-xs">
+          <div role="alert" className="mb-4 px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/30 text-cc-error text-xs">
             {error}
           </div>
         )}

@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type {
@@ -129,6 +129,60 @@ export class SessionStore {
       return JSON.parse(raw) as T;
     } catch {
       return null;
+    }
+  }
+
+  private requestEnvPath(sessionId: string): string {
+    // Session ids are server-generated UUIDs; refuse anything path-like anyway.
+    if (!/^[A-Za-z0-9-]+$/.test(sessionId)) throw new Error("Invalid session id");
+    return join(this.dir, "request-env", `${sessionId}.json`);
+  }
+
+  /**
+   * Persist the env passed with a session's create request (or agent config)
+   * so a relaunch after a server restart still applies it. Values can be
+   * secrets: the directory is 0700 and each file 0600, and they live outside
+   * launcher.json, which only keeps references (env slug, connection id).
+   * An empty env removes the file.
+   */
+  saveRequestEnv(sessionId: string, env: Record<string, string> | undefined): void {
+    try {
+      const path = this.requestEnvPath(sessionId);
+      if (!env || Object.keys(env).length === 0) {
+        this.removeRequestEnv(sessionId);
+        return;
+      }
+      const dir = join(this.dir, "request-env");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
+      writeFileSync(path, JSON.stringify(env), { encoding: "utf-8", mode: 0o600 });
+      chmodSync(path, 0o600);
+    } catch (err) {
+      console.error(`[session-store] Failed to save request env for ${sessionId}:`, err);
+    }
+  }
+
+  /** Load the env persisted by saveRequestEnv, or undefined. */
+  loadRequestEnv(sessionId: string): Record<string, string> | undefined {
+    try {
+      const parsed = JSON.parse(readFileSync(this.requestEnvPath(sessionId), "utf-8")) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string") env[k] = v;
+      }
+      return env;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Delete the env persisted by saveRequestEnv (no-op when absent). */
+  removeRequestEnv(sessionId: string): void {
+    try {
+      unlinkSync(this.requestEnvPath(sessionId));
+    } catch {
+      // File may not exist
     }
   }
 

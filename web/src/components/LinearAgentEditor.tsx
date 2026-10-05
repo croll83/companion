@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { getModelsForBackend, getDefaultModel, getAgentModesForBackend, getDefaultAgentMode } from "../utils/backends.js";
+import { getModelsForBackend, getDefaultModel, getDefaultAgentMode } from "../utils/backends.js";
+import { AgentPermissionPill } from "./AgentPermissionPill.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { LinearLogo } from "./LinearLogo.js";
 import type { AgentFormData } from "./AgentEditor.js";
@@ -31,9 +32,7 @@ export function LinearAgentEditor({
 }: LinearAgentEditorProps) {
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
-  const [showModeDropdown, setShowModeDropdown] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
-  const modeDropdownRef = useRef<HTMLDivElement>(null);
 
   function updateField<K extends keyof AgentFormData>(key: K, value: AgentFormData[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -54,9 +53,6 @@ export function LinearAgentEditor({
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
         setShowModelDropdown(false);
       }
-      if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
-        setShowModeDropdown(false);
-      }
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -64,9 +60,7 @@ export function LinearAgentEditor({
 
   // Derive labels
   const models = getModelsForBackend(form.backendType);
-  const modes = getAgentModesForBackend(form.backendType);
   const selectedModel = models.find((m) => m.value === form.model) || models[0];
-  const selectedMode = modes.find((m) => m.value === form.permissionMode) || modes[0];
   const folderLabel = form.cwd ? form.cwd.split("/").pop() || form.cwd : "temp";
 
   // Common pill classes
@@ -172,7 +166,7 @@ export function LinearAgentEditor({
             {/* Model dropdown pill */}
             <div className="relative" ref={modelDropdownRef}>
               <button
-                onClick={() => { setShowModelDropdown(!showModelDropdown); setShowModeDropdown(false); }}
+                onClick={() => { setShowModelDropdown(!showModelDropdown); }}
                 aria-expanded={showModelDropdown}
                 className={pillDefault}
               >
@@ -196,30 +190,12 @@ export function LinearAgentEditor({
               )}
             </div>
 
-            {/* Mode dropdown pill */}
-            <div className="relative" ref={modeDropdownRef}>
-              <button
-                onClick={() => { setShowModeDropdown(!showModeDropdown); setShowModelDropdown(false); }}
-                aria-expanded={showModeDropdown}
-                className={pillDefault}
-              >
-                <span>{selectedMode?.label}</span>
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 opacity-50"><path d="M4 6l4 4 4-4" /></svg>
-              </button>
-              {showModeDropdown && (
-                <div className="absolute left-0 top-full mt-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
-                  {modes.map((m) => (
-                    <button
-                      key={m.value}
-                      onClick={() => { updateField("permissionMode", m.value); setShowModeDropdown(false); }}
-                      className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${m.value === form.permissionMode ? "text-cc-primary font-medium" : "text-cc-fg"}`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Permissions: fixed for Claude, the sandbox for Codex */}
+            <AgentPermissionPill
+              backendType={form.backendType}
+              permissionMode={form.permissionMode}
+              onChange={(mode) => updateField("permissionMode", mode)}
+            />
 
             {/* Folder pill */}
             <button

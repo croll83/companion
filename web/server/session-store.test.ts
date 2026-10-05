@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionStore, type PersistedSession } from "./session-store.js";
@@ -285,5 +285,54 @@ describe("saveLauncher / loadLauncher", () => {
   it("returns null when no launcher file exists", () => {
     const loaded = store.loadLauncher();
     expect(loaded).toBeNull();
+  });
+});
+
+// ─── request env sidecar ──────────────────────────────────────────────────────
+
+describe("saveRequestEnv / loadRequestEnv / removeRequestEnv", () => {
+  // The request env survives a restart (a new store on the same dir) and,
+  // since it can hold secrets, is owner-only.
+  it("round-trips the env through an owner-only file", () => {
+    store.saveRequestEnv("s-1", { API_KEY: "secret" });
+
+    expect(new SessionStore(tempDir).loadRequestEnv("s-1")).toEqual({ API_KEY: "secret" });
+    expect(statSync(join(tempDir, "request-env")).mode & 0o777).toBe(0o700);
+    expect(statSync(join(tempDir, "request-env", "s-1.json")).mode & 0o777).toBe(0o600);
+  });
+
+  // The sidecar dir must not be mistaken for a session by loadAll.
+  it("is not listed as a session", () => {
+    store.saveRequestEnv("s-1", { A: "1" });
+    expect(store.loadAll()).toEqual([]);
+  });
+
+  it("removes the file for an empty env and on removeRequestEnv", () => {
+    store.saveRequestEnv("s-1", { A: "1" });
+    store.saveRequestEnv("s-1", {});
+    expect(store.loadRequestEnv("s-1")).toBeUndefined();
+
+    store.saveRequestEnv("s-2", { A: "1" });
+    store.removeRequestEnv("s-2");
+    expect(existsSync(join(tempDir, "request-env", "s-2.json"))).toBe(false);
+    expect(() => store.removeRequestEnv("s-2")).not.toThrow();
+  });
+
+  it("keeps only string values and rejects non-object files", () => {
+    store.saveRequestEnv("s-1", { A: "1" });
+    writeFileSync(join(tempDir, "request-env", "s-1.json"), JSON.stringify({ A: "1", B: 2 }));
+    expect(store.loadRequestEnv("s-1")).toEqual({ A: "1" });
+    writeFileSync(join(tempDir, "request-env", "s-1.json"), JSON.stringify(["x"]));
+    expect(store.loadRequestEnv("s-1")).toBeUndefined();
+  });
+
+  // Session ids end up in a file path; anything path-like is refused.
+  it("refuses path-like session ids", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    store.saveRequestEnv("../evil", { A: "1" });
+    expect(existsSync(join(tempDir, "evil.json"))).toBe(false);
+    expect(store.loadRequestEnv("../evil")).toBeUndefined();
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
   });
 });

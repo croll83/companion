@@ -1,8 +1,35 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as agentStore from "./agent-store.js";
-import type { CronJob } from "./cron-types.js";
 import { COMPANION_HOME } from "./paths.js";
+
+/**
+ * A job file of the removed legacy "Scheduled Runs" system
+ * (COMPANION_HOME/cron/<id>.json). Only the fields the migration reads; the
+ * system itself is gone, so this module is the last code that knows the shape.
+ */
+export interface LegacyCronJob {
+  id: string;
+  name: string;
+  prompt: string;
+  /** Cron expression or ISO datetime (one-shot) */
+  schedule: string;
+  recurring: boolean;
+  backendType: "claude" | "codex";
+  model: string;
+  cwd: string;
+  envSlug?: string;
+  enabled: boolean;
+  permissionMode: string;
+  codexInternetAccess?: boolean;
+  // Tracking fields present in the files but not carried over.
+  createdAt?: number;
+  updatedAt?: number;
+  lastRunAt?: number;
+  lastSessionId?: string;
+  consecutiveFailures?: number;
+  totalRuns?: number;
+}
 
 const CRON_DIR = join(COMPANION_HOME, "cron");
 const MIGRATION_FLAG = join(COMPANION_HOME, ".cron-migrated");
@@ -31,7 +58,7 @@ export function migrateCronJobsToAgents(): { migrated: number; skipped: number }
   for (const file of files) {
     try {
       const raw = readFileSync(join(CRON_DIR, file), "utf-8");
-      const job: CronJob = JSON.parse(raw);
+      const job: LegacyCronJob = JSON.parse(raw);
 
       // Check if an agent with this name already exists
       const existingAgents = agentStore.listAgents();

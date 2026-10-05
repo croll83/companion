@@ -54,6 +54,8 @@ the-companion logs
 
 All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 
+The built-in `companion` MCP server of each session uses its own token (`cmcp_…`). That token identifies the session and opens only the wake-up, agent and run routes its tools use. Companion's auth token (`COMPANION_AUTH_TOKEN`) is not passed to Claude Code or Codex. See [Companion MCP tools](#/docs/guides/companion-mcp).
+
 ### Sessions
 
 | Method | Endpoint | Description |
@@ -62,6 +64,10 @@ All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 | `POST` | `/api/sessions` | Create a new session |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Archive a session |
+| `POST` | `/api/sessions/:id/message` | Send a user message (`{"content": "..."}`). A stopped CLI is relaunched on its conversation and gets the message queued (`"delivery": "queued"`); archived sessions get `409` |
+| `GET` | `/api/sessions/:id/wakeups` | List the session's wake-ups (pending and recently skipped, missed or delivered) |
+| `POST` | `/api/sessions/:id/wakeups` | Schedule a wake-up: `{"message": "...", "at": "2026-10-06T09:00"}` or `{"message": "...", "cron": "0 9 * * 1-5"}`, optional `"createdBy": "session:<id>"` |
+| `DELETE` | `/api/sessions/:id/wakeups/:wakeupId` | Cancel (or dismiss) a wake-up |
 
 ### Prompts
 
@@ -84,8 +90,12 @@ All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 | `DELETE` | `/api/agents/:slug` | Delete an agent |
 | `GET` | `/api/agents/:slug/export` | Export agent as JSON |
 | `POST` | `/api/agents/import` | Import an agent from JSON |
-| `GET` | `/api/agents/:slug/executions` | Get execution history |
-| `POST` | `/api/agents/:slug/webhook/:secret` | Trigger agent via webhook |
+| `POST` | `/api/agents/:slug/toggle` | Enable or disable an agent |
+| `POST` | `/api/agents/:slug/run` | Run now (`{"input": "..."}` optional; `409` while a run is in progress). The response has the run's `sessionId` |
+| `GET` | `/api/agents/:slug/executions` | Recent runs of an agent (since the server started) |
+| `GET` | `/api/executions` | All runs (`?agentId=`, `?triggerType=`, `?status=running\|success\|error`, `?limit=`, `?offset=`) |
+| `GET` | `/api/executions/:sessionId/result` | A run's status and final answer (`?maxChars=`, default 4000, at most 20000) |
+| `POST` | `/api/agents/:slug/webhook/:secret` | Trigger agent via webhook. Needs no token, but only answers loopback and Tailscale addresses (see [Agents](#/docs/guides/agents)) |
 
 ### Environments
 

@@ -8,7 +8,7 @@ process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -23,9 +23,10 @@ import { TerminalManager } from "./terminal-manager.js";
 import { PRPoller } from "./pr-poller.js";
 import { RecorderManager } from "./recorder.js";
 import { initLogFile, closeLogFile } from "./logger.js";
-import { CronScheduler } from "./cron-scheduler.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
+import { WakeupScheduler } from "./wakeup-scheduler.js";
+import { deliverUserMessage, isTurnBusy } from "./session-delivery.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
@@ -34,6 +35,7 @@ import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { telegramBridgeManager } from "./telegram-bridge-manager.js";
 import { isRunningAsService } from "./service.js";
 import { getToken, verifyToken } from "./auth-manager.js";
+import { mcpTokenFor } from "./companion-mcp-auth.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
@@ -58,13 +60,24 @@ const worktreeTracker = new WorktreeTracker();
 const terminalManager = new TerminalManager();
 const prPoller = new PRPoller(wsBridge);
 const recorder = new RecorderManager();
-const cronScheduler = new CronScheduler(launcher, wsBridge);
 const agentExecutor = new AgentExecutor(launcher, wsBridge);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
+// Scheduled messages into existing sessions. Delivery relaunches a dead CLI
+// (with a fresh relaunch budget) and never interrupts a running turn.
+const wakeupScheduler = new WakeupScheduler({
+  getSession: (sessionId) => launcher.getSession(sessionId),
+  deliver: (sessionId, content) => deliverUserMessage({
+    launcher,
+    wsBridge,
+    resetRelaunchBudget: (id) => orchestrator.clearAutoRelaunchCount(id),
+  }, sessionId, content),
+  isBusy: (sessionId) => isTurnBusy({ launcher, wsBridge }, sessionId),
+});
+
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
-  prPoller, agentExecutor,
+  prPoller, agentExecutor, wakeupScheduler,
 });
 
 // ── Restore persisted sessions from disk ────────────────────────────────────
@@ -73,6 +86,13 @@ wsBridge.setRecorder(recorder);
 wsBridge.setArchivedCheck((sessionId) => launcher.getSession(sessionId)?.archived === true);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
+// Every Claude Code / Codex session gets the built-in `companion` MCP server
+// (wake-ups, agents) unless turned off in Settings. Claude's --mcp-config
+// files live next to the session data and are removed with the session.
+launcher.setCompanionMcp({
+  tokenFor: mcpTokenFor,
+  claudeConfigDir: join(sessionStore.directory, "mcp-config"),
+});
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
 
@@ -103,7 +123,7 @@ app.get("/health", (c) => {
 });
 
 app.use("/api/*", cors());
-app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
+app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, agentExecutor, linearAgentBridge, port, wakeupScheduler));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
 // on first launch. iOS gives standalone PWAs isolated storage from Safari,
@@ -348,13 +368,13 @@ if (process.env.NODE_ENV !== "production") {
   console.log("Dev mode: frontend at http://localhost:5174");
 }
 
-// ── Cron scheduler ──────────────────────────────────────────────────────────
-cronScheduler.startAll();
-
 // ── Agent system ────────────────────────────────────────────────────────────
+// Old installs' "Scheduled Runs" jobs become agents (once, flag file).
 migrateCronJobsToAgents();
 migrateLinearCredentialsToAgents();
 agentExecutor.startAll();
+// After the orchestrator is wired: a wake-up due at startup relaunches its session.
+wakeupScheduler.startAll();
 
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).

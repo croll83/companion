@@ -19,7 +19,12 @@ export function registerEnvRoutes(api: Hono): void {
   api.post("/envs", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     try {
-      const env = envManager.createEnv(body.name, body.variables || {});
+      // Without a scope the profile is "unassigned" (applied only when chosen
+      // explicitly), which keeps old API clients from creating global profiles.
+      const env = envManager.createEnv(body.name, body.variables || {}, {
+        scope: body.scope,
+        folders: body.folders,
+      });
       return c.json(env, 201);
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
@@ -33,6 +38,8 @@ export function registerEnvRoutes(api: Hono): void {
       const env = envManager.updateEnv(slug, {
         name: body.name,
         variables: body.variables,
+        scope: body.scope,
+        folders: body.folders,
       });
       if (!env) return c.json({ error: "Environment not found" }, 404);
       return c.json(env);

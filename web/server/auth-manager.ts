@@ -1,10 +1,15 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { networkInterfaces } from "node:os";
+import { COMPANION_HOME, legacyStatePath } from "./paths.js";
+import { isTailscaleIPv4 } from "./network-trust.js";
 
-const AUTH_FILE = join(homedir(), ".companion", "auth.json");
+const DEFAULT_AUTH_FILE = join(COMPANION_HOME, "auth.json");
+// Versions before COMPANION_HOME was honoured here always used ~/.companion.
+const DEFAULT_LEGACY_AUTH_FILE = legacyStatePath("auth.json");
+let authFile = DEFAULT_AUTH_FILE;
+let legacyAuthFile = DEFAULT_LEGACY_AUTH_FILE;
 const TOKEN_BYTES = 32; // 64 hex characters
 
 interface AuthData {
@@ -17,7 +22,9 @@ let cachedToken: string | null = null;
 /**
  * Get the auth token. Priority:
  * 1. COMPANION_AUTH_TOKEN env var
- * 2. Persisted token from ~/.companion/auth.json
+ * 2. Persisted token from COMPANION_HOME/auth.json (falling back to the
+ *    ~/.companion/auth.json older versions wrote, copied over so the token —
+ *    and every device logged in with it — survives the move)
  * 3. Auto-generate and persist a new token
  */
 export function getToken(): string {
@@ -31,31 +38,44 @@ export function getToken(): string {
   // Return cached token if available
   if (cachedToken) return cachedToken;
 
-  // Try reading from file
-  try {
-    if (existsSync(AUTH_FILE)) {
-      const raw = readFileSync(AUTH_FILE, "utf-8");
-      const data = JSON.parse(raw) as Partial<AuthData>;
-      if (typeof data.token === "string" && data.token.length >= 32) {
-        cachedToken = data.token;
-        return cachedToken;
-      }
-    }
-  } catch {
-    // File corrupt or unreadable — generate new
+  const persisted = readTokenFile(authFile);
+  if (persisted) {
+    cachedToken = persisted;
+    return cachedToken;
+  }
+  const legacy = legacyAuthFile ? readTokenFile(legacyAuthFile) : null;
+  if (legacy) {
+    persistToken(legacy, "migrate legacy auth token");
+    cachedToken = legacy;
+    return cachedToken;
   }
 
   // Generate new token
   const token = randomBytes(TOKEN_BYTES).toString("hex");
-  const data: AuthData = { token, createdAt: Date.now() };
-  try {
-    mkdirSync(dirname(AUTH_FILE), { recursive: true });
-    writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
-  } catch (err) {
-    console.error("[auth] Failed to persist auth token:", err);
-  }
+  persistToken(token, "persist auth token");
   cachedToken = token;
   return token;
+}
+
+function readTokenFile(path: string): string | null {
+  try {
+    if (!existsSync(path)) return null;
+    const data = JSON.parse(readFileSync(path, "utf-8")) as Partial<AuthData>;
+    return typeof data.token === "string" && data.token.length >= 32 ? data.token : null;
+  } catch {
+    // File corrupt or unreadable
+    return null;
+  }
+}
+
+function persistToken(token: string, what: string): void {
+  const data: AuthData = { token, createdAt: Date.now() };
+  try {
+    mkdirSync(dirname(authFile), { recursive: true });
+    writeFileSync(authFile, JSON.stringify(data, null, 2), { mode: 0o600 });
+  } catch (err) {
+    console.error(`[auth] Failed to ${what}:`, err);
+  }
 }
 
 /**
@@ -108,12 +128,9 @@ export function getAllAddresses(): { label: string; ip: string }[] {
       if (addr.family !== "IPv4" || addr.internal) continue;
 
       // Tailscale uses 100.64.0.0/10 (CGNAT) — detect by IP range
-      if (addr.address.startsWith("100.")) {
-        const second = parseInt(addr.address.split(".")[1], 10);
-        if (second >= 64 && second <= 127) {
-          tailscaleIp = addr.address;
-          continue;
-        }
+      if (isTailscaleIPv4(addr.address)) {
+        tailscaleIp = addr.address;
+        continue;
       }
 
       if (!lanIp) lanIp = addr.address;
@@ -133,18 +150,14 @@ export function getAllAddresses(): { label: string; ip: string }[] {
  */
 export function regenerateToken(): string {
   const token = randomBytes(TOKEN_BYTES).toString("hex");
-  const data: AuthData = { token, createdAt: Date.now() };
-  try {
-    mkdirSync(dirname(AUTH_FILE), { recursive: true });
-    writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
-  } catch (err) {
-    console.error("[auth] Failed to persist regenerated token:", err);
-  }
+  persistToken(token, "persist regenerated token");
   cachedToken = token;
   return token;
 }
 
-/** Reset cached state — for testing only */
-export function _resetForTest(): void {
+/** Reset cached state, optionally pointing at other files — for testing only */
+export function _resetForTest(paths?: { authFile: string; legacyAuthFile: string | null }): void {
   cachedToken = null;
+  authFile = paths?.authFile ?? DEFAULT_AUTH_FILE;
+  legacyAuthFile = paths ? paths.legacyAuthFile : DEFAULT_LEGACY_AUTH_FILE;
 }

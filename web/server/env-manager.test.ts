@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -261,5 +261,170 @@ describe("deleteEnv", () => {
   it("returns false when the env does not exist", () => {
     const result = envManager.deleteEnv("missing");
     expect(result).toBe(false);
+  });
+});
+
+// ===========================================================================
+// Scopes (global / project folders / unassigned)
+// ===========================================================================
+describe("scopes", () => {
+  // Without a scope a profile is "unassigned" (legacy shape), so old API
+  // clients can never create a profile that silently applies everywhere.
+  it("creates an unassigned profile when no scope is given", () => {
+    const env = envManager.createEnv("Legacy", { A: "1" });
+    expect(env.scope).toBeUndefined();
+    expect(env.folders).toBeUndefined();
+  });
+
+  it("stores normalized, deduplicated folders for project profiles", () => {
+    const env = envManager.createEnv("Proj", {}, { scope: "project", folders: ["/repo/", "/repo", " ", "/other"] });
+    expect(env.scope).toBe("project");
+    expect(env.folders).toEqual(["/repo", "/other"]);
+  });
+
+  it("drops folders from global profiles", () => {
+    const env = envManager.createEnv("Glob", {}, { scope: "global", folders: ["/repo"] });
+    expect(env.scope).toBe("global");
+    expect(env.folders).toBeUndefined();
+  });
+
+  it("rejects a project profile without folders and an unknown scope", () => {
+    expect(() => envManager.createEnv("P", {}, { scope: "project", folders: [] })).toThrow(/folder/);
+    expect(() => envManager.createEnv("X", {}, { scope: "bogus" as never })).toThrow(/scope/);
+  });
+
+  // Assigning a legacy profile is the main use of scope updates.
+  it("assigns an unassigned profile and keeps its variables", () => {
+    envManager.createEnv("Jarvis", { J: "1" });
+    const updated = envManager.updateEnv("jarvis", { scope: "project", folders: ["/home/me/jarvis"] });
+    expect(updated).toMatchObject({ scope: "project", folders: ["/home/me/jarvis"], variables: { J: "1" } });
+    expect(envManager.getEnv("jarvis")).toMatchObject({ scope: "project" });
+  });
+
+  it("keeps the stored scope when an update does not touch it", () => {
+    envManager.createEnv("Proj", {}, { scope: "project", folders: ["/repo"] });
+    const updated = envManager.updateEnv("proj", { variables: { A: "1" } });
+    expect(updated).toMatchObject({ scope: "project", folders: ["/repo"] });
+  });
+
+  it("updates folders alone on a project profile and clears them when made global", () => {
+    envManager.createEnv("Proj", {}, { scope: "project", folders: ["/repo"] });
+    expect(envManager.updateEnv("proj", { folders: ["/a", "/b"] })!.folders).toEqual(["/a", "/b"]);
+    const global = envManager.updateEnv("proj", { scope: "global" })!;
+    expect(global.scope).toBe("global");
+    expect(global.folders).toBeUndefined();
+  });
+
+  it("rejects switching to project scope without folders", () => {
+    envManager.createEnv("Glob", {}, { scope: "global" });
+    expect(() => envManager.updateEnv("glob", { scope: "project" })).toThrow(/folder/);
+  });
+});
+
+// ===========================================================================
+// File modes — profiles hold secrets
+// ===========================================================================
+describe("file modes", () => {
+  it("writes profiles 0600 inside a 0700 directory", () => {
+    envManager.createEnv("Secret", { K: "v" });
+    expect(statSync(envsDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(join(envsDir(), "secret.json")).mode & 0o777).toBe(0o600);
+  });
+
+  // Profiles written by older versions used the default umask; any write
+  // must repair them (and the directory).
+  it("fixes the modes of existing files on write", () => {
+    mkdirSync(envsDir(), { recursive: true });
+    chmodSync(envsDir(), 0o755);
+    writeFileSync(join(envsDir(), "old.json"), JSON.stringify({ name: "Old", slug: "old", variables: {}, createdAt: 1, updatedAt: 1 }));
+    chmodSync(join(envsDir(), "old.json"), 0o644);
+
+    envManager.createEnv("New One");
+
+    expect(statSync(envsDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(join(envsDir(), "old.json")).mode & 0o777).toBe(0o600);
+
+    // Updating the old profile in place keeps it 0600 too.
+    chmodSync(join(envsDir(), "old.json"), 0o644);
+    envManager.updateEnv("old", { variables: { A: "1" } });
+    expect(statSync(join(envsDir(), "old.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("reading does not create the envs directory", () => {
+    expect(envManager.listEnvs()).toEqual([]);
+    expect(envManager.getEnv("nope")).toBeNull();
+    expect(() => statSync(envsDir())).toThrow();
+  });
+});
+
+// ===========================================================================
+// resolveEnvProfiles — which profiles apply to a session, in which order
+// ===========================================================================
+describe("resolveEnvProfiles", () => {
+  function names(r: { profiles: { name: string }[] }): string[] {
+    return r.profiles.map((p) => p.name);
+  }
+
+  // Order is global, then project from least to most specific folder, then
+  // the explicit profile; later profiles override earlier ones.
+  it("orders global < project by specificity < explicit and merges accordingly", () => {
+    envManager.createEnv("Deep", { V: "deep" }, { scope: "project", folders: ["/work/repo/pkg"] });
+    envManager.createEnv("Glob", { V: "global", G: "1" }, { scope: "global" });
+    envManager.createEnv("Shallow", { V: "shallow" }, { scope: "project", folders: ["/work"] });
+    envManager.createEnv("Mid", { V: "mid" }, { scope: "project", folders: ["/work/repo"] });
+    envManager.createEnv("Pick", { P: "1" });
+
+    const r = envManager.resolveEnvProfiles({ paths: ["/work/repo/pkg/src"], explicitSlug: "pick" });
+    expect(names(r)).toEqual(["Glob", "Shallow", "Mid", "Deep", "Pick"]);
+    expect(r.variables).toEqual({ V: "deep", G: "1", P: "1" });
+    expect(r.missingExplicit).toBe(false);
+  });
+
+  it("lets the explicit profile override every automatic one", () => {
+    envManager.createEnv("Glob", { V: "global" }, { scope: "global" });
+    envManager.createEnv("Proj", { V: "project" }, { scope: "project", folders: ["/repo"] });
+    envManager.createEnv("Pick", { V: "explicit" });
+    expect(envManager.resolveEnvProfiles({ paths: ["/repo"], explicitSlug: "pick" }).variables.V).toBe("explicit");
+  });
+
+  // A profile both automatic and explicit is applied once, at the explicit
+  // (highest) position.
+  it("does not apply an explicitly chosen automatic profile twice", () => {
+    envManager.createEnv("Glob", { V: "global" }, { scope: "global" });
+    envManager.createEnv("Proj", { V: "project" }, { scope: "project", folders: ["/repo"] });
+    const r = envManager.resolveEnvProfiles({ paths: ["/repo"], explicitSlug: "glob" });
+    expect(names(r)).toEqual(["Proj", "Glob"]);
+    expect(r.variables.V).toBe("global");
+  });
+
+  it("never applies unassigned profiles automatically", () => {
+    envManager.createEnv("Legacy", { L: "1" });
+    const r = envManager.resolveEnvProfiles({ paths: ["/anywhere"] });
+    expect(r.profiles).toEqual([]);
+    expect(r.variables).toEqual({});
+  });
+
+  // Folder matching is by path segment: /repo must not match /repository.
+  it("matches only the folder itself and its subfolders", () => {
+    envManager.createEnv("Proj", { P: "1" }, { scope: "project", folders: ["/repo"] });
+    expect(names(envManager.resolveEnvProfiles({ paths: ["/repo"] }))).toEqual(["Proj"]);
+    expect(names(envManager.resolveEnvProfiles({ paths: ["/repo/a/b"] }))).toEqual(["Proj"]);
+    expect(names(envManager.resolveEnvProfiles({ paths: ["/repository"] }))).toEqual([]);
+    expect(names(envManager.resolveEnvProfiles({ paths: ["/"] }))).toEqual([]);
+  });
+
+  // A profile with several folders ranks by its deepest matching folder; any
+  // of the session paths (cwd, worktree repo root) can match.
+  it("ranks multi-folder profiles by their deepest match and accepts any session path", () => {
+    envManager.createEnv("Multi", { V: "multi" }, { scope: "project", folders: ["/a", "/work/repo/pkg"] });
+    envManager.createEnv("Mid", { V: "mid" }, { scope: "project", folders: ["/work/repo"] });
+    const r = envManager.resolveEnvProfiles({ paths: ["/wt/feat", "/work/repo/pkg"] });
+    expect(names(r)).toEqual(["Mid", "Multi"]);
+  });
+
+  it("reports a missing explicit profile", () => {
+    const r = envManager.resolveEnvProfiles({ paths: ["/x"], explicitSlug: "gone" });
+    expect(r.missingExplicit).toBe(true);
+    expect(r.profiles).toEqual([]);
   });
 });

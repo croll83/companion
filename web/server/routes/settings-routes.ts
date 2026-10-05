@@ -7,7 +7,12 @@ import { listConnections } from "../linear-connections.js";
 import { hasCodexAuth } from "../codex-auth-check.js";
 import { telegramBridgeManager } from "../telegram-bridge-manager.js";
 
-export function registerSettingsRoutes(api: Hono): void {
+export interface SettingsRouteHooks {
+  /** The global timeZone setting changed (agent schedules run in it). */
+  onTimeZoneChanged?: () => void;
+}
+
+export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}): void {
   api.get("/settings", (c) => {
     const settings = getSettings();
     const connections = listConnections();
@@ -34,6 +39,7 @@ export function registerSettingsRoutes(api: Hono): void {
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
+      companionMcpEnabled: settings.companionMcpEnabled !== false,
     });
   });
 
@@ -113,6 +119,9 @@ export function registerSettingsRoutes(api: Hono): void {
         return c.json({ error: "timeZone must be empty (automatic) or a valid IANA time zone" }, 400);
       }
     }
+    if (body.companionMcpEnabled !== undefined && typeof body.companionMcpEnabled !== "boolean") {
+      return c.json({ error: "companionMcpEnabled must be a boolean" }, 400);
+    }
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
@@ -136,7 +145,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.updateChannel !== undefined
       || body.cliBridgeMode !== undefined
       || body.telegramBotToken !== undefined
-      || body.timeZone !== undefined;
+      || body.timeZone !== undefined
+      || body.companionMcpEnabled !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -145,6 +155,7 @@ export function registerSettingsRoutes(api: Hono): void {
       linearCache.clear();
     }
 
+    const previousTimeZone = getSettings().timeZone ?? "";
     const settings = updateSettings({
       anthropicApiKey:
         typeof body.anthropicApiKey === "string"
@@ -235,10 +246,16 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.timeZone === "string"
           ? body.timeZone.trim()
           : undefined,
+      companionMcpEnabled:
+        typeof body.companionMcpEnabled === "boolean"
+          ? body.companionMcpEnabled
+          : undefined,
     });
 
     // Token added/changed/cleared → spawn or stop the bridge child accordingly.
     if (body.telegramBotToken !== undefined) telegramBridgeManager.sync();
+    // Agent schedules are armed in the configured zone: re-arm them.
+    if ((settings.timeZone ?? "") !== previousTimeZone) hooks.onTimeZoneChanged?.();
 
     const connectionsAfterUpdate = listConnections();
     return c.json({
@@ -264,6 +281,7 @@ export function registerSettingsRoutes(api: Hono): void {
       cliBridgeMode: settings.cliBridgeMode,
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
+      companionMcpEnabled: settings.companionMcpEnabled !== false,
     });
   });
 

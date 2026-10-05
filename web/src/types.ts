@@ -135,12 +135,12 @@ export interface SdkSessionInfo {
   totalLinesRemoved?: number;
   resumeSessionAt?: string;
   forkSession?: boolean;
-  /** If this session was spawned by a cron job */
-  cronJobId?: string;
-  /** Human-readable name of the cron job that spawned this session */
-  cronJobName?: string;
   /** If this session was spawned by an agent */
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
   agentName?: string;
+  /** Env profile picked explicitly at creation (slug only). */
+  envSlug?: string;
+  /** Names (never values) of the env profiles applied at the last CLI spawn. */
+  envProfiles?: string[];
 }

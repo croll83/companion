@@ -734,6 +734,44 @@ describe("CodexAdapter", () => {
     expect(allWritten).toContain("thr_123");
   });
 
+  // Review finding: turn/start's sandboxPolicy overrides the sandbox "for this
+  // turn and subsequent turns", and it was always dangerFullAccess, so a
+  // workspace-write (sandboxed) agent ran with full access from its first
+  // turn. It must carry the session's sandbox; full access stays full.
+  it.each([
+    {
+      options: { sandbox: "workspace-write" as const, networkAccess: false, cwd: "/work/repo" },
+      expected: { type: "workspaceWrite", writableRoots: ["/work/repo"], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+    },
+    {
+      options: { sandbox: "workspace-write" as const, networkAccess: true, cwd: "/work/repo" },
+      expected: { type: "workspaceWrite", writableRoots: ["/work/repo"], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+    },
+    { options: { sandbox: "workspace-write" as const }, expected: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } },
+    { options: { sandbox: "danger-full-access" as const, networkAccess: false }, expected: { type: "dangerFullAccess" } },
+    { options: {}, expected: { type: "dangerFullAccess" } },
+  ])("sends the session's sandbox as turn/start sandboxPolicy ($options.sandbox)", async ({ options, expected }) => {
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini", ...options });
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    adapter.sendBrowserMessage({ type: "user_message", content: "go" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const turnStart = stdin.chunks.join("").split("\n").filter(Boolean)
+      .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m: { method?: string } | null) => m?.method === "turn/start");
+    expect(turnStart.params.sandboxPolicy).toEqual(expected);
+    // thread/start carried the same choice as a SandboxMode string.
+    const threadStart = stdin.chunks.join("").split("\n").filter(Boolean)
+      .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((m: { method?: string } | null) => m?.method === "thread/start");
+    expect(threadStart.params.sandbox).toBe(options.sandbox ?? "danger-full-access");
+  });
+
   // ─── Mid-turn steering ────────────────────────────────────────────────────
   // Codex can fold new input INTO the turn already running (turn/steer) instead
   // of opening a second one. `expectedTurnId` is a server-side precondition, so
@@ -1490,6 +1528,75 @@ describe("CodexAdapter", () => {
     const allWritten = mock.stdin.chunks.join("");
     expect(allWritten).toContain('"method":"thread/resume"');
     expect(allWritten).toContain('"cwd":"/workspace"');
+  });
+
+  // ── Fork (agent "fork" runs) ────────────────────────────────────────────────
+
+  /** All JSON-RPC requests the adapter wrote, parsed. */
+  function writtenRequests(mock: ReturnType<typeof createMockProcess>): Array<{ id?: number; method?: string; params?: Record<string, unknown> }> {
+    return mock.stdin.chunks.join("").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  }
+
+  // A fork run starts from a COPY of the source thread: thread/fork with the
+  // ThreadForkParams fields Companion relies on, never thread/start or
+  // thread/resume of the source. The forked id becomes the session's thread.
+  it("forks the source thread with thread/fork when forkFromThreadId is set", async () => {
+    const mock = createMockProcess();
+    const metas: Array<{ cliSessionId?: string }> = [];
+    const adapter = new CodexAdapter(mock.proc as never, "test-session", {
+      model: "gpt-5.3-codex",
+      cwd: "/workspace",
+      sandbox: "workspace-write",
+      forkFromThreadId: "thr_source",
+      systemPrompt: "Linear context",
+    });
+    adapter.onSessionMeta((meta) => metas.push(meta));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+    mock.stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_fork" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const fork = writtenRequests(mock).find((m) => m.method === "thread/fork");
+    expect(fork?.params).toEqual({
+      threadId: "thr_source",
+      model: "gpt-5.3-codex",
+      cwd: "/workspace",
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      developerInstructions: "Linear context",
+      excludeTurns: true,
+    });
+    const methods = writtenRequests(mock).map((m) => m.method);
+    expect(methods).not.toContain("thread/start");
+    expect(methods).not.toContain("thread/resume");
+    expect(adapter.getThreadId()).toBe("thr_fork");
+    expect(metas[0]?.cliSessionId).toBe("thr_fork");
+  });
+
+  // A fork that Codex refuses must fail the session — falling back to a
+  // fresh thread would run the agent without the context it was built for.
+  it("fails initialization instead of starting a fresh thread when the fork is refused", async () => {
+    const mock = createMockProcess();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.proc as never, "test-session", {
+      model: "gpt-5.3-codex",
+      cwd: "/workspace",
+      forkFromThreadId: "thr_gone",
+    });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+    mock.stdout.push(JSON.stringify({ id: 2, error: { code: -32600, message: "no rollout found for thread id thr_gone" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(initErrors).toHaveLength(1);
+    expect(initErrors[0]).toContain("Could not fork the source conversation (thread thr_gone)");
+    expect(initErrors[0]).toContain("no rollout found");
+    expect(writtenRequests(mock).map((m) => m.method)).not.toContain("thread/start");
   });
 
   // ── Backfill tool_use when item/started is missing ──────────────────────────

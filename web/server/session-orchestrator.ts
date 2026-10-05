@@ -50,6 +50,8 @@ export interface SessionOrchestratorDeps {
     unwatch(sessionId: string): void;
   };
   agentExecutor: AgentExecutor;
+  /** Scheduled messages into sessions; a deleted session's wake-ups are dropped. */
+  wakeupScheduler?: { handleSessionDeleted(sessionId: string): void };
 }
 
 export interface CreateSessionRequest {
@@ -118,6 +120,7 @@ export class SessionOrchestrator {
   private worktreeTracker: WorktreeTracker;
   private prPoller: SessionOrchestratorDeps["prPoller"];
   private agentExecutor: AgentExecutor;
+  private wakeupScheduler?: SessionOrchestratorDeps["wakeupScheduler"];
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -145,6 +148,7 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    this.wakeupScheduler = deps.wakeupScheduler;
   }
 
   // ── Initialization (event wiring) ──────────────────────────────────────────
@@ -173,6 +177,14 @@ export class SessionOrchestrator {
     // separately so a throw in one doesn't skip the other (bus isolates each handler).
     companionBus.on("session:exited", ({ sessionId, exitCode }) => {
       this.agentExecutor.handleSessionExited(sessionId, exitCode);
+    });
+    // A Codex thread that could not start (e.g. a failed fork) fails its run.
+    companionBus.on("session:init-failed", ({ sessionId, error }) => {
+      this.agentExecutor.handleSessionInitFailed(sessionId, error);
+    });
+    // An agent run is complete on its session's first turn result.
+    companionBus.on("message:result", ({ sessionId, message }) => {
+      this.agentExecutor.handleSessionResult(sessionId, message);
     });
     companionBus.on("session:exited", ({ sessionId, exitCode }) => {
       for (const cb of this.exitCallbacks) {
@@ -372,33 +384,24 @@ export class SessionOrchestrator {
       // --- Step: Resolve environment ---
       if (onProgress) await onProgress("resolving_env", "Resolving environment...", "in_progress");
 
-      let envVars: Record<string, string> | undefined = body.env;
-      const companionEnv = body.envSlug ? envManager.getEnv(body.envSlug) : null;
-      if (body.envSlug && companionEnv) {
-        console.log(
-          `[orchestrator] Injecting env "${companionEnv.name}" (${Object.keys(companionEnv.variables).length} vars):`,
-          Object.keys(companionEnv.variables).join(", "),
-        );
-        envVars = { ...companionEnv.variables, ...body.env };
-      } else if (body.envSlug) {
-        console.warn(`[orchestrator] Environment "${body.envSlug}" not found, ignoring`);
+      // The env itself (folder-scoped profiles, the explicit envSlug, body.env,
+      // provider tokens from settings, LINEAR_API_KEY) is resolved by the
+      // launcher at every spawn and relaunch from the references passed below
+      // (see session-env.ts), so nothing here is lost on a server restart.
+      // An unknown slug is dropped rather than persisted, so a profile created
+      // later under that name never silently attaches to this session.
+      let envSlug: string | undefined;
+      if (body.envSlug) {
+        if (envManager.getEnv(body.envSlug)) envSlug = body.envSlug;
+        else console.warn(`[orchestrator] Environment "${body.envSlug}" not found, ignoring`);
       }
 
-      // Inject provider tokens from global settings (if not already set by env profile).
-      const globalSettings = getSettings();
-      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !("CLAUDE_CODE_OAUTH_TOKEN" in (envVars ?? {}))) {
-        envVars = { ...envVars, CLAUDE_CODE_OAUTH_TOKEN: globalSettings.claudeCodeOAuthToken };
-      }
-      if (backend === "codex" && globalSettings.openaiApiKey && !("OPENAI_API_KEY" in (envVars ?? {}))) {
-        envVars = { ...envVars, OPENAI_API_KEY: globalSettings.openaiApiKey };
-      }
-
-      // Inject LINEAR_API_KEY if a Linear connection is specified
       let linearSystemPrompt: string | undefined;
+      let linearConnectionId: string | undefined;
       if (body.linearConnectionId) {
         const conn = getConnection(body.linearConnectionId);
         if (conn?.apiKey) {
-          envVars = { ...envVars, LINEAR_API_KEY: conn.apiKey };
+          linearConnectionId = body.linearConnectionId;
           linearSystemPrompt = buildLinearSystemPrompt(conn, body.linearIssue as { identifier: string; title: string; stateName: string; teamName: string; url: string } | undefined);
         }
       }
@@ -483,7 +486,10 @@ export class SessionOrchestrator {
           codexInternetAccess: backend === "codex",
           codexSandbox: backend === "codex" ? "danger-full-access" : undefined,
           allowedTools: body.allowedTools,
-          env: envVars,
+          env: body.env,
+          envSlug,
+          linearConnectionId,
+          repoRoot: worktreeInfo?.repoRoot,
           backendType: backend,
           resumeSessionAt,
           forkSession,
@@ -610,6 +616,7 @@ export class SessionOrchestrator {
     const worktreeResult = this.cleanupWorktree(sessionId, options?.force);
     this.launcher.setArchived(sessionId, true);
     this.sessionStore.setArchived(sessionId, true);
+    this.agentExecutor.handleSessionClosed(sessionId);
 
     return { ok: true, worktree: worktreeResult, linearTransition: linearTransitionResult };
   }
@@ -626,6 +633,8 @@ export class SessionOrchestrator {
     sessionLinearIssues.removeLinearIssue(sessionId);
     this.launcher.removeSession(sessionId);
     this.wsBridge.closeSession(sessionId);
+    this.agentExecutor.handleSessionClosed(sessionId);
+    this.wakeupScheduler?.handleSessionDeleted(sessionId);
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
@@ -638,6 +647,8 @@ export class SessionOrchestrator {
   unarchiveSession(sessionId: string): { ok: boolean } {
     this.launcher.setArchived(sessionId, false);
     this.sessionStore.setArchived(sessionId, false);
+    // An agent run's temp cwd may have been removed while it was archived.
+    this.agentExecutor.handleSessionUnarchived(sessionId);
     return { ok: true };
   }
 

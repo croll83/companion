@@ -50,6 +50,7 @@ describe("Codex protocol compatibility (offline snapshot)", () => {
       "initialize",
       "thread/start",
       "thread/resume",
+      "thread/fork",
       "turn/start",
       "turn/interrupt",
       "account/rateLimits/read",
@@ -86,6 +87,30 @@ describe("Codex protocol compatibility (offline snapshot)", () => {
     for (const field of ["threadId", "turnId", "callId", "tool", "arguments"]) {
       expect(paramsType).toContain(`${field}:`);
     }
+  });
+
+  // Agent "fork" runs call thread/fork with these fields (codex-adapter
+  // forkThread) and read the new thread id from the response.
+  it("keeps ThreadForkParams shape expected by the adapter", () => {
+    const paramsType = readSnapshot("server/protocol/codex-upstream/v2/ThreadForkParams.ts.txt");
+    for (const field of ["threadId", "model?", "cwd?", "approvalPolicy?", "sandbox?", "developerInstructions?", "excludeTurns?"]) {
+      expect(paramsType).toContain(`${field}:`);
+    }
+  });
+
+  // turn/start's sandboxPolicy keeps sandboxed agents in their sandbox on
+  // every turn (codex-adapter mapSandboxPolicyObject sends these fields).
+  it("keeps the SandboxPolicy variants the adapter sends", () => {
+    const policyType = readSnapshot("server/protocol/codex-upstream/v2/SandboxPolicy.ts.txt");
+    expect(policyType).toContain('{ "type": "dangerFullAccess" }');
+    expect(policyType).toMatch(
+      /\{ "type": "workspaceWrite", writableRoots: Array<AbsolutePathBuf>, networkAccess: boolean, excludeTmpdirEnvVar: boolean, excludeSlashTmp: boolean, \}/,
+    );
+  });
+
+  it("keeps ThreadForkResponse shape expected by the adapter", () => {
+    const responseType = readSnapshot("server/protocol/codex-upstream/v2/ThreadForkResponse.ts.txt");
+    expect(responseType).toContain("thread: Thread");
   });
 
   it("keeps DynamicToolCallResponse shape expected by the adapter", () => {

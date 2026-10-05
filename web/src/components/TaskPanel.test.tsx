@@ -25,6 +25,11 @@ vi.mock("./ClaudeConfigBrowser.js", () => ({
   ClaudeConfigBrowser: () => <div data-testid="claude-config-browser">Config</div>,
 }));
 
+// SessionWakeups fetches from the API on its own; it has its own tests.
+vi.mock("./SessionWakeups.js", () => ({
+  SessionWakeups: ({ sessionId }: { sessionId: string }) => <div data-testid="session-wakeups">{sessionId}</div>,
+}));
+
 vi.mock("./LinearLogo.js", () => ({
   LinearLogo: ({ className }: { className?: string }) => (
     <span data-testid="linear-logo" className={className}>L</span>
@@ -71,7 +76,7 @@ interface MockStoreState {
     codex_rate_limits?: CodexRateLimits;
     context_used_percent?: number;
   }>;
-  sdkSessions: { sessionId: string; backendType?: string; cwd?: string; gitBranch?: string }[];
+  sdkSessions: { sessionId: string; backendType?: string; cwd?: string; gitBranch?: string; envProfiles?: string[] }[];
   taskPanelOpen: boolean;
   setTaskPanelOpen: ReturnType<typeof vi.fn>;
   taskPanelConfig: TaskPanelConfig;
@@ -1307,7 +1312,40 @@ describe("GitBranchSection — pull button behavior", () => {
   });
 });
 
+// The env profile names applied to the session (never values) are listed in
+// application order; the block is absent when no profile applies.
+describe("TaskPanel environment profiles", () => {
+  it("lists the applied env profile names in order", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1", envProfiles: ["Everywhere", "Repo"] }] });
+    render(<TaskPanel sessionId="s1" />);
+    const block = screen.getByRole("region", { name: "Environment profiles" });
+    expect(Array.from(block.querySelectorAll("li")).map((li) => li.textContent)).toEqual(["Everywhere", "Repo"]);
+  });
+
+  it("shows nothing when no profile applies", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1" }] });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.queryByRole("region", { name: "Environment profiles" })).not.toBeInTheDocument();
+  });
+});
+
+// Scheduled wake-ups of the session are shown in the Context panel.
+describe("TaskPanel wake-ups", () => {
+  it("shows the session's wake-ups block", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1" }] });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByTestId("session-wakeups")).toHaveTextContent("s1");
+  });
+});
+
 describe("TaskPanel accessibility", () => {
+  it("passes axe accessibility checks with env profiles listed", async () => {
+    const { axe } = await import("vitest-axe");
+    resetStore({ sdkSessions: [{ sessionId: "s1", envProfiles: ["Everywhere"] }] });
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("passes axe accessibility checks in normal mode", async () => {
     const { axe } = await import("vitest-axe");
     resetStore();

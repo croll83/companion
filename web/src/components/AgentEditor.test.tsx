@@ -13,6 +13,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import type { AgentFormData } from "./AgentEditor.js";
 import { EMPTY_FORM, AgentEditor } from "./AgentEditor.js";
+import { useStore } from "../store.js";
 
 // ─── Mock setup ──────────────────────────────────────────────────────────────
 
@@ -385,5 +386,152 @@ describe("AgentEditor", () => {
     // The connection picker should not appear when linearEnabled is false.
     renderEditor({ linearEnabled: false });
     expect(screen.queryByTestId("linear-connection-picker")).not.toBeInTheDocument();
+  });
+});
+
+// ─── Agents overhaul: permissions, schedules, webhook, allowed tools ─────────
+
+describe("AgentEditor — run semantics shown to the user", () => {
+  afterEach(() => {
+    useStore.getState().setTimeZone("");
+  });
+
+  it("states that Claude agents run with full permissions (no misleading picker)", () => {
+    // Claude runs are unattended, so they always use bypassPermissions.
+    renderEditor();
+    expect(screen.getByTestId("claude-full-permissions")).toHaveTextContent("Full permissions");
+    expect(screen.getByTestId("permissions-note")).toHaveTextContent(/run unattended with full permissions/);
+  });
+
+  it("explains the Codex sandbox choice instead", () => {
+    renderEditor({ backendType: "codex", permissionMode: "bypassPermissions" });
+    expect(screen.queryByTestId("claude-full-permissions")).not.toBeInTheDocument();
+    expect(screen.getByTestId("permissions-note")).toHaveTextContent(/workspace-write sandbox/);
+  });
+
+  it("shows which time zone schedules run in", () => {
+    // Schedules follow the global timeZone setting; "" means the server's zone.
+    const { unmount } = renderEditor({ scheduleEnabled: true });
+    expect(screen.getByTestId("schedule-timezone")).toHaveTextContent("server's local time zone");
+    unmount();
+
+    useStore.getState().setTimeZone("Europe/Rome");
+    renderEditor({ scheduleEnabled: true });
+    expect(screen.getByTestId("schedule-timezone")).toHaveTextContent("Times are in Europe/Rome");
+  });
+
+  it("tells the user the webhook only answers this machine and the tailnet", () => {
+    renderEditor({ webhookEnabled: true });
+    expect(screen.getByText(/Accepted only from this machine or your Tailscale network/)).toBeInTheDocument();
+  });
+
+  it("gates Allowed tools to Claude Code", () => {
+    // --tools exists only for Claude; Codex has no per-tool restriction.
+    renderEditor({ backendType: "codex", allowedTools: ["Read"] });
+    fireEvent.click(screen.getByText("Advanced"));
+    expect(screen.getByTestId("allowed-tools-codex-note")).toHaveTextContent("Requires Claude Code");
+    expect(screen.queryByPlaceholderText("Type tool name and press Enter")).not.toBeInTheDocument();
+  });
+
+  it("does not offer the removed branch and skills options", () => {
+    renderEditor({ cwd: "/repo" });
+    fireEvent.click(screen.getByText("Advanced"));
+    expect(screen.queryByText("branch")).not.toBeInTheDocument();
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
+    expect(mockApi.listSkills).not.toHaveBeenCalled();
+  });
+
+  it("removes an allowed tool via its labelled remove button", () => {
+    const { getForm } = renderEditor({ allowedTools: ["Read", "Grep"] });
+    fireEvent.click(screen.getByLabelText("Remove Read"));
+    expect(getForm().allowedTools).toEqual(["Grep"]);
+  });
+
+  it("passes axe accessibility checks with Codex, webhook and schedule shown", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = renderEditor({
+      name: "Codex Agent",
+      prompt: "Run",
+      backendType: "codex",
+      webhookEnabled: true,
+      scheduleEnabled: true,
+    });
+    const results = await axe(container, axeRules);
+    expect(results).toHaveNoViolations();
+  });
+});
+
+// Context modes: "Brief" (fresh session per run) or "Fork a session" (each
+// run copies a source session's conversation and works in its folder).
+describe("AgentEditor — context mode", () => {
+  const session = (overrides: Record<string, unknown>) => ({
+    sessionId: "aaaaaaaa-1111", state: "exited", cwd: "/work/repo", createdAt: 1,
+    backendType: "claude", cliSessionId: "cli-1", ...overrides,
+  });
+
+  beforeEach(() => {
+    useStore.setState({
+      sdkSessions: [
+        session({}),
+        session({ sessionId: "bbbbbbbb-2222", backendType: "codex", cliSessionId: "thr-1", cwd: "/work/codex" }),
+        session({ sessionId: "cccccccc-3333", cliSessionId: undefined }),
+        session({ sessionId: "dddddddd-4444", archived: true }),
+      ] as never,
+      sessionNames: new Map([["aaaaaaaa-1111", "Release prep"]]),
+    });
+  });
+
+  afterEach(() => {
+    useStore.setState({ sdkSessions: [], sessionNames: new Map() });
+  });
+
+  it("defaults to Brief and explains that the prompt must be self-contained", () => {
+    renderEditor();
+    expect(screen.getByLabelText("Brief")).toBeChecked();
+    expect(screen.getByTestId("context-note")).toHaveTextContent(/prompt must contain everything/);
+    expect(screen.queryByLabelText("Source session")).not.toBeInTheDocument();
+  });
+
+  it("switches to fork mode via the radio button", () => {
+    const { getForm } = renderEditor();
+    fireEvent.click(screen.getByLabelText("Fork a session"));
+    expect(getForm().contextMode).toBe("fork");
+  });
+
+  it("switches back to Brief", () => {
+    const { getForm } = renderEditor({ contextMode: "fork" });
+    fireEvent.click(screen.getByLabelText("Brief"));
+    expect(getForm().contextMode).toBe("brief");
+  });
+
+  // Only sessions of the agent's backend that have a conversation (and are
+  // not archived) can be forked; the folder pill is disabled because the
+  // run works in the source session's folder.
+  it("offers only forkable sessions of the same backend and picks one", () => {
+    const { getForm } = renderEditor({ contextMode: "fork" });
+    const select = screen.getByLabelText("Source session") as HTMLSelectElement;
+    const options = Array.from(select.options).map((o) => o.textContent);
+    expect(options).toEqual(["Choose a session…", "Release prep (aaaaaaaa)"]);
+    fireEvent.change(select, { target: { value: "aaaaaaaa-1111" } });
+    expect(getForm().sourceSessionId).toBe("aaaaaaaa-1111");
+    expect(screen.getByTitle("Fork runs work in the source session's folder")).toBeDisabled();
+  });
+
+  it("lists Codex sessions for a Codex agent and names a source that is gone", () => {
+    renderEditor({ backendType: "codex", contextMode: "fork", sourceSessionId: "eeeeeeee-5555" });
+    const options = Array.from((screen.getByLabelText("Source session") as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(options).toEqual(["Choose a session…", "Unavailable session (eeeeeeee)", "codex (bbbbbbbb)"]);
+  });
+
+  it("says so when no session can be forked", () => {
+    useStore.setState({ sdkSessions: [] });
+    renderEditor({ contextMode: "fork" });
+    expect(screen.getByTestId("context-note")).toHaveTextContent("No Claude Code session with a conversation is open.");
+  });
+
+  it("passes axe accessibility checks in fork mode", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = renderEditor({ name: "Forker", prompt: "Continue", contextMode: "fork", sourceSessionId: "aaaaaaaa-1111" });
+    expect(await axe(container, axeRules)).toHaveNoViolations();
   });
 });

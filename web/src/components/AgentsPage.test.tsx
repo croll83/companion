@@ -49,9 +49,11 @@ vi.mock("./FolderPicker.js", () => ({ FolderPicker: () => null }));
 // value in tests. The mock supports Zustand's selector pattern: when called
 // with a function, it invokes that function against the mock state.
 let mockPublicUrl = "";
+// sdkSessions/sessionNames feed the editor's fork-source picker.
+const mockSessionNames = new Map<string, string>();
 vi.mock("../store.js", () => ({
-  useStore: (selector: (state: { publicUrl: string }) => unknown) =>
-    selector({ publicUrl: mockPublicUrl }),
+  useStore: (selector: (state: { publicUrl: string; sdkSessions: unknown[]; sessionNames: Map<string, string> }) => unknown) =>
+    selector({ publicUrl: mockPublicUrl, sdkSessions: [], sessionNames: mockSessionNames }),
 }));
 
 import { AgentsPage } from "./AgentsPage.js";
@@ -485,59 +487,6 @@ describe("AgentsPage", () => {
     });
   });
 
-  it("branch pill appears when folder is set and shows inline input", async () => {
-    // The branch pill only appears when a working directory is set (not temp).
-    // Clicking it reveals an inline branch name input with create/worktree options.
-    const agent = makeAgent({
-      id: "a1",
-      name: "Branch Agent",
-      cwd: "/workspace",
-      branch: "",
-    });
-    mockApi.listAgents.mockResolvedValue([agent]);
-    render(<AgentsPage route={defaultRoute} />);
-
-    await screen.findByText("Branch Agent");
-    // Open overflow menu, then click Edit
-    fireEvent.click(screen.getByLabelText("More actions"));
-    fireEvent.click(screen.getByText("Edit"));
-
-    // Branch pill should be visible since cwd is set
-    expect(screen.getByText("branch")).toBeInTheDocument();
-
-    // Click branch pill to show inline input
-    fireEvent.click(screen.getByText("branch"));
-
-    // Branch input should appear
-    expect(screen.getByPlaceholderText("branch name")).toBeInTheDocument();
-  });
-
-  it("branch pill shows create and worktree checkboxes when branch is typed", async () => {
-    // After typing a branch name in the inline input, the create and worktree
-    // checkboxes should appear.
-    const agent = makeAgent({
-      id: "a1",
-      name: "Git Agent",
-      cwd: "/workspace",
-      branch: "feature/test",
-      createBranch: true,
-    });
-    mockApi.listAgents.mockResolvedValue([agent]);
-    render(<AgentsPage route={defaultRoute} />);
-
-    await screen.findByText("Git Agent");
-    // Open overflow menu, then click Edit
-    fireEvent.click(screen.getByLabelText("More actions"));
-    fireEvent.click(screen.getByText("Edit"));
-
-    // Branch input should be visible with the branch name pre-filled
-    expect(screen.getByDisplayValue("feature/test")).toBeInTheDocument();
-
-    // Create and worktree checkboxes should be visible
-    expect(screen.getByText("create")).toBeInTheDocument();
-    expect(screen.getByText("worktree")).toBeInTheDocument();
-  });
-
   // ── Codex Internet Access ────────────────────────────────────────────────
 
   it("Codex internet access pill is only visible for codex backend", async () => {
@@ -568,8 +517,9 @@ describe("AgentsPage", () => {
 
   it("Advanced section collapse/expand toggle works", async () => {
     // The Advanced section is collapsed by default for new agents.
-    // Clicking the toggle should expand and show MCP Servers, Skills,
-    // Allowed Tools, and Environment Variables sub-sections.
+    // Clicking the toggle should expand and show MCP Servers, Allowed Tools
+    // and Environment Variables sub-sections (Skills was removed: it was
+    // never applied to a run).
     render(<AgentsPage route={defaultRoute} />);
     await waitFor(() => {
       expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
@@ -587,7 +537,7 @@ describe("AgentsPage", () => {
 
     // Sub-sections should now be visible
     expect(screen.getByText("MCP Servers")).toBeInTheDocument();
-    expect(screen.getByText("Skills")).toBeInTheDocument();
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
     expect(screen.getByText("Allowed Tools")).toBeInTheDocument();
     expect(screen.getByText("Environment Variables")).toBeInTheDocument();
   });
@@ -649,41 +599,6 @@ describe("AgentsPage", () => {
   });
 
   // ── Skills ─────────────────────────────────────────────────────────────
-
-  it("Skills checkbox list renders fetched skills", async () => {
-    // When the API returns skills, they should appear as checkboxes in the
-    // Advanced > Skills sub-section.
-    mockApi.listSkills.mockResolvedValue([
-      { slug: "code-review", name: "Code Review", description: "Reviews code changes" },
-      { slug: "testing", name: "Testing", description: "Writes tests" },
-    ]);
-    render(<AgentsPage route={defaultRoute} />);
-    await waitFor(() => {
-      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByText("+ New Agent"));
-    // Expand Advanced
-    fireEvent.click(screen.getByText("Advanced"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Code Review")).toBeInTheDocument();
-      expect(screen.getByText("Reviews code changes")).toBeInTheDocument();
-      expect(screen.getByText("Testing")).toBeInTheDocument();
-    });
-  });
-
-  it("Skills shows empty state when no skills found", async () => {
-    // When the API returns no skills, a helpful message should appear.
-    mockApi.listSkills.mockResolvedValue([]);
-    render(<AgentsPage route={defaultRoute} />);
-    await waitFor(() => {
-      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByText("+ New Agent"));
-    fireEvent.click(screen.getByText("Advanced"));
-
-    expect(screen.getByText("No skills found in ~/.claude/skills/")).toBeInTheDocument();
-  });
 
   // ── MCP Servers ────────────────────────────────────────────────────────
 
@@ -800,11 +715,7 @@ describe("AgentsPage", () => {
       backendType: "codex",
       codexInternetAccess: true,
       env: { API_KEY: "secret123", DEBUG: "true" },
-      branch: "feature/test",
-      createBranch: true,
-      useWorktree: true,
       allowedTools: ["Read", "Write"],
-      skills: ["code-review"],
       mcpServers: { "my-server": { type: "sse", url: "https://example.com" } },
     });
     mockApi.listAgents.mockResolvedValue([agent]);
@@ -821,17 +732,28 @@ describe("AgentsPage", () => {
     // Codex internet pill should be active (visible in controls row)
     expect(screen.getByText("Internet")).toBeInTheDocument();
 
-    // Branch should be populated
-    expect(screen.getByDisplayValue("feature/test")).toBeInTheDocument();
-
-    // Advanced should be auto-expanded (has MCP + allowed tools + env vars)
+    // Advanced should be auto-expanded (has MCP + env vars). Allowed tools
+    // are Claude-only (--tools), so a Codex agent shows the gate note
+    // instead of tags; the Claude case is covered by the next test.
     expect(screen.getByText("my-server")).toBeInTheDocument();
-    expect(screen.getByText("Read")).toBeInTheDocument();
-    expect(screen.getByText("Write")).toBeInTheDocument();
+    expect(screen.getByTestId("allowed-tools-codex-note")).toHaveTextContent("Requires Claude Code");
 
     // Env vars should be populated in Advanced section
     expect(screen.getByDisplayValue("API_KEY")).toBeInTheDocument();
     expect(screen.getByDisplayValue("secret123")).toBeInTheDocument();
+  });
+
+  it("edit mode shows a Claude agent's allowed tools as tags", async () => {
+    const agent = makeAgent({ id: "a2", name: "Tools Agent", allowedTools: ["Read", "Write"] });
+    mockApi.listAgents.mockResolvedValue([agent]);
+    render(<AgentsPage route={defaultRoute} />);
+
+    await screen.findByText("Tools Agent");
+    fireEvent.click(screen.getByLabelText("More actions"));
+    fireEvent.click(screen.getByText("Edit"));
+
+    expect(screen.getByText("Read")).toBeInTheDocument();
+    expect(screen.getByText("Write")).toBeInTheDocument();
   });
 
   // ── No old section headers ─────────────────────────────────────────────
@@ -1615,16 +1537,19 @@ describe("AgentsPage", () => {
 
   it("mode dropdown opens and closes on click", async () => {
     // The permission mode pill opens a dropdown to select the agent's
-    // permission mode (e.g. default, plan, auto-approve).
+    // permission mode. Only Codex has one (it picks the sandbox); Claude
+    // agents always run with full permissions and show a fixed badge.
     mockApi.listAgents.mockResolvedValue([]);
     render(<AgentsPage route={defaultRoute} />);
     await waitFor(() => {
       expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
     });
     fireEvent.click(screen.getByText("+ New Agent"));
+    const controlsRow = screen.getByTestId("controls-row");
+    expect(screen.getByTestId("claude-full-permissions")).toHaveTextContent("Full permissions");
+    fireEvent.click(Array.from(controlsRow.querySelectorAll("button")).find((b) => b.textContent === "Codex")!);
 
     // Find mode dropdown - it's the second aria-expanded button in controls row
-    const controlsRow = screen.getByTestId("controls-row");
     const expandableButtons = Array.from(controlsRow.querySelectorAll("button[aria-expanded]"));
     // First is model, second is mode, third is env
     const modeButton = expandableButtons[1] as HTMLElement;
@@ -1871,42 +1796,6 @@ describe("AgentsPage", () => {
   });
 
   // ── Skill toggling ────────────────────────────────────────────────────────
-
-  it("clicking a skill checkbox toggles it on and off", async () => {
-    // Skills are rendered as checkboxes. Clicking one should toggle it
-    // into the form.skills array, clicking again should remove it.
-    mockApi.listSkills.mockResolvedValue([
-      { slug: "deploy", name: "Deploy", description: "Deploy to production" },
-    ]);
-    mockApi.listAgents.mockResolvedValue([]);
-
-    render(<AgentsPage route={defaultRoute} />);
-    await waitFor(() => {
-      expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("+ New Agent"));
-    fireEvent.click(screen.getByText("Advanced"));
-
-    // Wait for skills to load
-    await waitFor(() => {
-      expect(screen.getByText("Deploy")).toBeInTheDocument();
-    });
-
-    // The checkbox should be unchecked initially
-    const checkbox = screen.getByRole("checkbox", { name: /Deploy/ }) ||
-      screen.getByText("Deploy").closest("label")?.querySelector("input[type='checkbox']");
-    expect(checkbox).not.toBeNull();
-    expect(checkbox).not.toBeChecked();
-
-    // Toggle on
-    fireEvent.click(checkbox!);
-    expect(checkbox).toBeChecked();
-
-    // Toggle off
-    fireEvent.click(checkbox!);
-    expect(checkbox).not.toBeChecked();
-  });
 
   // ── Allowed tools removal ─────────────────────────────────────────────────
 
@@ -2444,4 +2333,171 @@ describe("AgentsPage", () => {
     });
   });
 
+  // ── Agents overhaul: run refusal, Runs link, save payload ─────────────────
+
+  it("shows the server's reason when Run is refused (e.g. a run still in progress)", async () => {
+    // Run now no longer stacks runs: the 409 message must reach the user.
+    const agent = makeAgent({ id: "a1", name: "Busy Agent", prompt: "Do the thing" });
+    mockApi.listAgents.mockResolvedValue([agent]);
+    mockApi.runAgent.mockRejectedValue(new Error('A run of agent "Busy Agent" is still in progress'));
+    render(<AgentsPage route={defaultRoute} />);
+
+    await screen.findByText("Busy Agent");
+    fireEvent.click(screen.getByText("Run"));
+
+    const message = await screen.findByText('A run of agent "Busy Agent" is still in progress');
+    expect(message).toHaveAttribute("role", "alert");
+  });
+
+  it("links to the Runs page from the Agents header", async () => {
+    mockApi.listAgents.mockResolvedValue([]);
+    render(<AgentsPage route={defaultRoute} />);
+    expect(await screen.findByRole("link", { name: "Runs" })).toHaveAttribute("href", "#/runs");
+  });
+
+  it("saves Claude agents with bypassPermissions and drops allowedTools for Codex", async () => {
+    // Claude agents always run with full permissions; allowedTools is
+    // Claude-only (--tools), so a Codex agent must not carry it.
+    const claude = makeAgent({ id: "c1", name: "Claude Agent", permissionMode: "default", allowedTools: ["Read"] });
+    const codex = makeAgent({ id: "x1", name: "Codex Agent", backendType: "codex", permissionMode: "default", allowedTools: ["Read"] });
+    mockApi.listAgents.mockResolvedValue([claude, codex]);
+    mockApi.updateAgent.mockResolvedValue(claude);
+    render(<AgentsPage route={defaultRoute} />);
+
+    await screen.findByText("Claude Agent");
+    fireEvent.click(screen.getAllByLabelText("More actions")[0]);
+    fireEvent.click(screen.getByText("Edit"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateAgent.mock.calls[0][1]).toMatchObject({ permissionMode: "bypassPermissions", allowedTools: ["Read"] });
+
+    await screen.findByText("Codex Agent");
+    fireEvent.click(screen.getAllByLabelText("More actions")[1]);
+    fireEvent.click(screen.getByText("Edit"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(2));
+    const codexPayload = mockApi.updateAgent.mock.calls[1][1];
+    expect(codexPayload.permissionMode).toBe("default");
+    expect(codexPayload.allowedTools).toBeUndefined();
+  });
+
+  // The context mode round-trips through the editor: a fork agent keeps its
+  // source session; a brief agent saves no source.
+  it("loads and saves the context mode and the fork source", async () => {
+    const forker = makeAgent({ id: "f1", name: "Fork Agent", contextMode: "fork", sourceSessionId: "src-1" });
+    const brief = makeAgent({ id: "b1", name: "Brief Agent" });
+    mockApi.listAgents.mockResolvedValue([forker, brief]);
+    mockApi.updateAgent.mockResolvedValue(forker);
+    render(<AgentsPage route={defaultRoute} />);
+
+    await screen.findByText("Fork Agent");
+    fireEvent.click(screen.getAllByLabelText("More actions")[0]);
+    fireEvent.click(screen.getByText("Edit"));
+    expect(screen.getByLabelText("Fork a session")).toBeChecked();
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateAgent.mock.calls[0][1]).toMatchObject({ contextMode: "fork", sourceSessionId: "src-1" });
+
+    await screen.findByText("Brief Agent");
+    fireEvent.click(screen.getAllByLabelText("More actions")[1]);
+    fireEvent.click(screen.getByText("Edit"));
+    expect(screen.getByLabelText("Brief")).toBeChecked();
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(2));
+    expect(mockApi.updateAgent.mock.calls[1][1]).toMatchObject({ contextMode: "brief", sourceSessionId: undefined });
+  });
+});
+
+// ─── Linear wizard and Linear editor views ───────────────────────────────────
+// The wizard steps have their own tests; here they are stubs exposing their
+// callbacks, so these tests cover only how AgentsPage moves between steps.
+
+vi.mock("./wizard/WizardStepIntro.js", () => ({
+  WizardStepIntro: ({ onNext }: { onNext: () => void }) => <button onClick={onNext}>intro-next</button>,
+}));
+vi.mock("./wizard/WizardStepSelectConnection.js", () => ({
+  WizardStepSelectConnection: ({ onNext, onBack }: { onNext: (id: string) => void; onBack: () => void }) => (
+    <div>
+      <button onClick={() => onNext("conn-1")}>pick-connection</button>
+      <button onClick={onBack}>connection-back</button>
+    </div>
+  ),
+}));
+vi.mock("./wizard/WizardStepAgent.js", () => ({
+  WizardStepAgent: ({ onNext, onBack, oauthConnectionId }: { onNext: (id: string, name: string) => void; onBack: () => void; oauthConnectionId: string | null }) => (
+    <div>
+      <span data-testid="wizard-connection">{oauthConnectionId}</span>
+      <button onClick={() => onNext("bot-1", "Linear Bot")}>create-agent</button>
+      <button onClick={onBack}>agent-back</button>
+    </div>
+  ),
+}));
+vi.mock("./wizard/WizardStepDone.js", () => ({
+  WizardStepDone: ({ agentName, onFinish, onAddAnotherSameApp, onAddAnotherNewApp }: {
+    agentName: string; onFinish: () => void; onAddAnotherSameApp: () => void; onAddAnotherNewApp: () => void;
+  }) => (
+    <div>
+      <span data-testid="wizard-done">{agentName}</span>
+      <button onClick={onFinish}>finish</button>
+      <button onClick={onAddAnotherSameApp}>same-app</button>
+      <button onClick={onAddAnotherNewApp}>new-app</button>
+    </div>
+  ),
+}));
+
+describe("AgentsPage — Linear setup wizard", () => {
+  it("opens from #/agents?setup=linear and walks every step", async () => {
+    window.location.hash = "#/agents?setup=linear";
+    render(<AgentsPage route={defaultRoute} />);
+
+    expect(await screen.findByText("Linear Agent Setup")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("intro-next"));
+    fireEvent.click(screen.getByText("connection-back"));
+    fireEvent.click(screen.getByText("intro-next"));
+    fireEvent.click(screen.getByText("pick-connection"));
+    expect(screen.getByTestId("wizard-connection")).toHaveTextContent("conn-1");
+    fireEvent.click(screen.getByText("agent-back"));
+    fireEvent.click(screen.getByText("pick-connection"));
+    fireEvent.click(screen.getByText("create-agent"));
+    expect(screen.getByTestId("wizard-done")).toHaveTextContent("Linear Bot");
+
+    // Another agent on the same OAuth app: back to the agent step, same connection
+    fireEvent.click(screen.getByText("same-app"));
+    expect(screen.getByTestId("wizard-connection")).toHaveTextContent("conn-1");
+    fireEvent.click(screen.getByText("create-agent"));
+    // Another agent on a new OAuth app: back to the connection step
+    fireEvent.click(screen.getByText("new-app"));
+    fireEvent.click(screen.getByText("pick-connection"));
+    fireEvent.click(screen.getByText("create-agent"));
+
+    const loadsBefore = mockApi.listAgents.mock.calls.length;
+    fireEvent.click(screen.getByText("finish"));
+    await waitFor(() => expect(mockApi.listAgents.mock.calls.length).toBeGreaterThan(loadsBefore));
+    expect(screen.queryByText("Linear Agent Setup")).not.toBeInTheDocument();
+  });
+
+  it("can be cancelled", async () => {
+    window.location.hash = "#/agents?setup=linear";
+    render(<AgentsPage route={defaultRoute} />);
+    await screen.findByText("Linear Agent Setup");
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(screen.queryByText("Linear Agent Setup")).not.toBeInTheDocument();
+  });
+
+  it("opens Linear agents in the Linear editor, with a way to the full editor", async () => {
+    const agent = makeAgent({
+      id: "lin-1",
+      name: "Linear Bot",
+      triggers: { linear: { enabled: true, oauthConnectionId: "conn-1" } },
+    });
+    mockApi.listAgents.mockResolvedValue([agent]);
+    render(<AgentsPage route={defaultRoute} />);
+
+    await screen.findByText("Linear Bot");
+    fireEvent.click(screen.getByLabelText("More actions"));
+    fireEvent.click(screen.getByText("Edit"));
+    fireEvent.click(await screen.findByText("Open in full editor →"));
+
+    expect(screen.getByTestId("controls-row")).toBeInTheDocument();
+  });
 });

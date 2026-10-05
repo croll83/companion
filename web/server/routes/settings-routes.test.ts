@@ -100,3 +100,45 @@ describe("PUT /settings cliBridgeMode round-trip", () => {
     expect((await get.json()).cliBridgeMode).toBe("tlsLoopback");
   });
 });
+
+describe("PUT /settings timeZone → agent schedules", () => {
+  // Agent schedules are armed in the global timeZone setting, so a change
+  // must re-arm them; anything else must not.
+  it("calls onTimeZoneChanged only when the zone actually changes", async () => {
+    const onTimeZoneChanged = vi.fn();
+    const hooked = new Hono();
+    registerSettingsRoutes(hooked, { onTimeZoneChanged });
+    const put = (body: unknown) => hooked.request("/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    expect((await put({ timeZone: "Europe/Rome" })).status).toBe(200);
+    expect(onTimeZoneChanged).toHaveBeenCalledTimes(1);
+    await put({ timeZone: "Europe/Rome" });
+    await put({ cliBridgeMode: "stdio" });
+    expect(onTimeZoneChanged).toHaveBeenCalledTimes(1);
+    await put({ timeZone: "" });
+    expect(onTimeZoneChanged).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("PUT /settings companionMcpEnabled", () => {
+  // "Companion MCP tools for sessions": on by default, can be switched off
+  // (persisted, echoed, read back) and only accepts a boolean.
+  it("round-trips the switch and validates it", async () => {
+    expect((await (await app.request("/settings")).json()).companionMcpEnabled).toBe(true);
+
+    const off = await putSettings({ companionMcpEnabled: false });
+    expect(off.status).toBe(200);
+    expect((await off.json()).companionMcpEnabled).toBe(false);
+    expect(JSON.parse(readFileSync(settingsPath, "utf-8")).companionMcpEnabled).toBe(false);
+    expect((await (await app.request("/settings")).json()).companionMcpEnabled).toBe(false);
+
+    const bad = await putSettings({ companionMcpEnabled: "yes" });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toBe("companionMcpEnabled must be a boolean");
+    expect(getSettings().companionMcpEnabled).toBe(false);
+  });
+});

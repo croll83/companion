@@ -253,17 +253,10 @@ export function SessionItem({
           </div>
         )}
 
-        {/* Badges: backend type + Cron */}
+        {/* Badges: backend type */}
         {!isEditing && (
           <span className="flex items-center gap-1 shrink-0">
             <BackendBadge type={s.backendType} />
-            {s.cronJobId && (
-              <span className="flex items-center px-1 py-0.5 rounded bg-cc-primary/10" title="Scheduled">
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 text-cc-primary">
-                  <path d="M8 2a6 6 0 100 12A6 6 0 008 2zM0 8a8 8 0 1116 0A8 8 0 010 8zm9-3a1 1 0 10-2 0v3a1 1 0 00.293.707l2 2a1 1 0 001.414-1.414L9 7.586V5z" />
-                </svg>
-              </span>
-            )}
           </span>
         )}
       </button>

@@ -288,10 +288,16 @@ export interface WorktreeCreateResult {
   isNew: boolean;
 }
 
+/** Where an env profile applies automatically. Absent = unassigned (explicit pick only). */
+export type EnvScope = "global" | "project";
+
 export interface CompanionEnv {
   name: string;
   slug: string;
   variables: Record<string, string>;
+  scope?: EnvScope;
+  /** Project folders, when scope === "project". */
+  folders?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -368,6 +374,8 @@ export interface AppSettings {
   telegramBotTokenConfigured: boolean;
   /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
   timeZone: string;
+  /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
+  companionMcpEnabled?: boolean;
 }
 
 export interface HostsCheckResult {
@@ -552,38 +560,6 @@ export interface PRStatusResponse {
   pr: GitHubPRInfo | null;
 }
 
-export interface CronJobInfo {
-  id: string;
-  name: string;
-  prompt: string;
-  schedule: string;
-  recurring: boolean;
-  backendType: "claude" | "codex";
-  model: string;
-  cwd: string;
-  envSlug?: string;
-  enabled: boolean;
-  permissionMode: string;
-  codexInternetAccess?: boolean;
-  createdAt: number;
-  updatedAt: number;
-  lastRunAt?: number;
-  lastSessionId?: string;
-  consecutiveFailures: number;
-  totalRuns: number;
-  nextRunAt?: number | null;
-}
-
-export interface CronJobExecution {
-  sessionId: string;
-  jobId: string;
-  startedAt: number;
-  completedAt?: number;
-  success?: boolean;
-  error?: string;
-  costUsd?: number;
-}
-
 export interface McpServerConfigAgent {
   type: "stdio" | "sse" | "http";
   command?: string;
@@ -604,14 +580,14 @@ export interface AgentInfo {
   cwd: string;
   envSlug?: string;
   env?: Record<string, string>;
+  /** Claude only: built-in tools the agent is limited to (empty = all). */
   allowedTools?: string[];
   codexInternetAccess?: boolean;
   prompt: string;
+  /** "brief" (default): fresh session. "fork": each run copies sourceSessionId's conversation. */
+  contextMode?: "brief" | "fork";
+  sourceSessionId?: string;
   mcpServers?: Record<string, McpServerConfigAgent>;
-  skills?: string[];
-  branch?: string;
-  createBranch?: boolean;
-  useWorktree?: boolean;
   triggers?: {
     webhook?: {
       enabled: boolean;
@@ -641,6 +617,8 @@ export interface AgentInfo {
       hasWebhookSecret?: boolean;
     };
   };
+  /** Absent/"user", or "session:<id>" when a session created it via the companion MCP tools. */
+  createdBy?: string;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -649,6 +627,26 @@ export interface AgentInfo {
   totalRuns: number;
   consecutiveFailures: number;
   nextRunAt?: number | null;
+  /** A run of this agent is launching or waiting for its result. */
+  running?: boolean;
+  /** Why the schedule is not running as configured (past date, invalid, skipped run). */
+  scheduleError?: string | null;
+}
+
+/** A message scheduled into a session (server/wakeup-store.ts). */
+export interface SessionWakeup {
+  id: string;
+  sessionId: string;
+  message: string;
+  schedule: { at: string } | { cron: string };
+  createdAt: number;
+  /** "user" or "session:<id>" */
+  createdBy: string;
+  lastFiredAt?: number;
+  nextRunAt?: number;
+  enabled: boolean;
+  status: "pending" | "delivered" | "skipped" | "missed";
+  lastResult?: string;
 }
 
 export interface AgentExecution {
@@ -659,6 +657,8 @@ export interface AgentExecution {
   completedAt?: number;
   success?: boolean;
   error?: string;
+  /** Result subtype reported by the CLI (e.g. "success", "error_max_turns"). */
+  subtype?: string;
 }
 
 export interface ExecutionListResult {
@@ -669,7 +669,7 @@ export interface ExecutionListResult {
 /** Portable export format (no internal tracking fields) */
 export type AgentExport = Omit<
   AgentInfo,
-  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "nextRunAt"
+  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "nextRunAt" | "running" | "scheduleError"
 >;
 
 export interface SavedPrompt {
@@ -946,13 +946,18 @@ export const api = {
   listEnvs: () => get<CompanionEnv[]>("/envs"),
   getEnv: (slug: string) =>
     get<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`),
-  createEnv: (name: string, variables: Record<string, string>) =>
-    post<CompanionEnv>("/envs", { name, variables }),
+  createEnv: (
+    name: string,
+    variables: Record<string, string>,
+    placement?: { scope: EnvScope; folders?: string[] },
+  ) => post<CompanionEnv>("/envs", { name, variables, ...placement }),
   updateEnv: (
     slug: string,
     data: {
       name?: string;
       variables?: Record<string, string>;
+      scope?: EnvScope;
+      folders?: string[];
     },
   ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),
@@ -980,6 +985,7 @@ export const api = {
     cliBridgeMode?: CliBridgeMode;
     telegramBotToken?: string;
     timeZone?: string;
+    companionMcpEnabled?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
@@ -1193,18 +1199,6 @@ export const api = {
   triggerUpdate: () =>
     post<{ ok: boolean; message: string }>("/update"),
 
-  // Cron jobs
-  listCronJobs: () => get<CronJobInfo[]>("/cron/jobs"),
-  getCronJob: (id: string) => get<CronJobInfo>(`/cron/jobs/${encodeURIComponent(id)}`),
-  createCronJob: (data: Partial<CronJobInfo>) => post<CronJobInfo>("/cron/jobs", data),
-  updateCronJob: (id: string, data: Partial<CronJobInfo>) =>
-    put<CronJobInfo>(`/cron/jobs/${encodeURIComponent(id)}`, data),
-  deleteCronJob: (id: string) => del(`/cron/jobs/${encodeURIComponent(id)}`),
-  toggleCronJob: (id: string) => post<CronJobInfo>(`/cron/jobs/${encodeURIComponent(id)}/toggle`),
-  runCronJob: (id: string) => post(`/cron/jobs/${encodeURIComponent(id)}/run`),
-  getCronJobExecutions: (id: string) =>
-    get<CronJobExecution[]>(`/cron/jobs/${encodeURIComponent(id)}/executions`),
-
   // Background process management
   killProcess: (sessionId: string, taskId: string) =>
     post<{ ok: boolean; taskId: string }>(
@@ -1299,9 +1293,17 @@ export const api = {
   listSkills: () =>
     get<{ slug: string; name: string; description: string; path: string }[]>("/skills"),
 
-  // Cross-session messaging
+  // Cross-session messaging (a dead session is relaunched and gets it queued)
   sendSessionMessage: (sessionId: string, content: string) =>
-    post<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/message`, { content }),
+    post<{ ok: boolean; delivery?: "sent" | "queued" }>(`/sessions/${encodeURIComponent(sessionId)}/message`, { content }),
+
+  // Scheduled messages into a session ("wake-ups")
+  listSessionWakeups: (sessionId: string) =>
+    get<{ wakeups: SessionWakeup[] }>(`/sessions/${encodeURIComponent(sessionId)}/wakeups`),
+  createSessionWakeup: (sessionId: string, data: { message: string; at?: string; cron?: string }) =>
+    post<{ wakeup: SessionWakeup }>(`/sessions/${encodeURIComponent(sessionId)}/wakeups`, data),
+  cancelSessionWakeup: (sessionId: string, wakeupId: string) =>
+    del<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/wakeups/${encodeURIComponent(wakeupId)}`),
 
   // Saved prompts
   listPrompts: (cwd?: string, scope?: "global" | "project" | "all") => {

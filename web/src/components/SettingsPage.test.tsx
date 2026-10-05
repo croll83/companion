@@ -1240,6 +1240,18 @@ describe("SettingsPage – extended behaviour", () => {
     expect(window.location.hash).toBe("#/session/sess-42");
   });
 
+  // "Companion MCP tools for sessions" reflects the saved setting (on when
+  // the server does not report it, as older servers do not).
+  it("shows the Companion MCP tools switch with the saved value", async () => {
+    await renderLoaded({ companionMcpEnabled: false });
+    expect(screen.getByRole("switch", { name: /Companion MCP tools for sessions/ })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("shows the Companion MCP tools switch on by default", async () => {
+    await renderLoaded();
+    expect(screen.getByRole("switch", { name: /Companion MCP tools for sessions/ })).toHaveAttribute("aria-checked", "true");
+  });
+
   // Clicking a category scrolls its section into view and highlights the nav item.
   it("scrolls to a section and marks it active when a nav item is clicked", async () => {
     const scrollIntoView = vi.fn();

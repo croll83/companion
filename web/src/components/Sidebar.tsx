@@ -97,7 +97,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const NAV_SECTIONS = [
   { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"] },
-  { id: "workspace", label: "Workspace", itemIds: ["environments", "agents", "settings"] },
+  { id: "workspace", label: "Workspace", itemIds: ["environments", "agents", "runs", "settings"] },
 ] as const;
 
 const NAV_ITEMS_BY_ID = new Map(NAV_ITEMS.map((item) => [item.id, item]));
@@ -420,20 +420,16 @@ export function Sidebar() {
       backendType: bridgeState?.backend_type || sdkInfo?.backendType || "claude",
       repoRoot: bridgeState?.repo_root || "",
       permCount: pendingPermissions.get(id)?.size ?? 0,
-      cronJobId: bridgeState?.cronJobId || sdkInfo?.cronJobId,
-      cronJobName: bridgeState?.cronJobName || sdkInfo?.cronJobName,
       agentId: bridgeState?.agentId || sdkInfo?.agentId,
       agentName: bridgeState?.agentName || sdkInfo?.agentName,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 
-  const activeSessions = allSessionList.filter((s) => !s.archived && !s.cronJobId && !s.agentId);
-  const cronSessions = allSessionList.filter((s) => !s.archived && !!s.cronJobId);
+  const activeSessions = allSessionList.filter((s) => !s.archived && !s.agentId);
   const agentSessions = allSessionList.filter((s) => !s.archived && !!s.agentId);
   const archivedSessions = allSessionList.filter((s) => s.archived);
   const currentSession = currentSessionId ? allSessionList.find((s) => s.id === currentSessionId) : null;
   const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
-  const [showCronSessions, setShowCronSessions] = useState(true);
   const [showAgentSessions, setShowAgentSessions] = useState(true);
 
   // Group active sessions by project
@@ -519,7 +515,7 @@ export function Sidebar() {
 
       {/* Session list */}
       <div className="flex-1 overflow-y-auto px-2.5 pb-2">
-        {activeSessions.length === 0 && cronSessions.length === 0 && archivedSessions.length === 0 ? (
+        {activeSessions.length === 0 && agentSessions.length === 0 && archivedSessions.length === 0 ? (
           <p className="px-3 py-8 text-xs text-cc-muted text-center leading-relaxed">
             No sessions yet.
           </p>
@@ -539,36 +535,6 @@ export function Sidebar() {
                 {...sessionItemProps}
               />
             ))}
-
-            {cronSessions.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-cc-separator">
-                <button
-                  onClick={() => setShowCronSessions(!showCronSessions)}
-                  aria-expanded={showCronSessions}
-                  className="w-full px-2 py-1 text-[11px] font-semibold text-cc-fg/60 uppercase tracking-wide flex items-center gap-1.5 hover:bg-cc-hover rounded-md transition-colors cursor-pointer"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className={`w-2 h-2 text-cc-muted/50 transition-transform duration-150 ${showCronSessions ? "rotate-90" : ""}`}>
-                    <path d="M6 4l4 4-4 4" />
-                  </svg>
-                  Scheduled Runs ({cronSessions.length})
-                </button>
-                {showCronSessions && (
-                  <div className="mt-0.5">
-                    {cronSessions.map((s) => (
-                      <SessionItem
-                        key={s.id}
-                        session={s}
-                        isActive={currentSessionId === s.id}
-                        sessionName={sessionNames.get(s.id)}
-                        permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                        isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                        {...sessionItemProps}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
 
             {agentSessions.length > 0 && (
               <div className="mt-3 pt-3 border-t border-cc-separator">

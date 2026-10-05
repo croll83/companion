@@ -2,12 +2,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
   unlinkSync,
   existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { ensurePrivateDir, PRIVATE_DIR_MODE, writePrivateFile } from "./private-file.js";
 import { randomBytes } from "node:crypto";
 import type { AgentConfig, AgentConfigCreateInput } from "./agent-types.js";
 
@@ -16,7 +16,15 @@ import type { AgentConfig, AgentConfigCreateInput } from "./agent-types.js";
 const AGENTS_DIR = join(COMPANION_HOME, "agents");
 
 function ensureDir(): void {
-  mkdirSync(AGENTS_DIR, { recursive: true });
+  mkdirSync(AGENTS_DIR, { recursive: true, mode: PRIVATE_DIR_MODE });
+}
+
+/**
+ * Agents hold env values and webhook secrets: owner-only directory and
+ * files. Each write also repairs the modes of files older versions wrote.
+ */
+function ensureDirForWrite(): void {
+  ensurePrivateDir(AGENTS_DIR, { fileSuffix: ".json" });
 }
 
 function filePath(id: string): string {
@@ -45,13 +53,17 @@ function generateWebhookSecret(): string {
  *   load prevents leaking those secrets via the API.
  * - `container`: Docker container sessions were removed; the old per-agent
  *   container config is ignored so it is not shown, exported or re-saved.
+ * - `skills`, `branch`, `createBranch`, `useWorktree`: stored by older editors
+ *   but never applied to a run; dropped so they are not shown or exported.
  */
+const REMOVED_AGENT_FIELDS = ["container", "skills", "branch", "createBranch", "useWorktree"] as const;
+
 function stripLegacyFields(agent: AgentConfig): AgentConfig {
   let result = agent;
-  if ("container" in result) {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { container: _container, ...rest } = result as AgentConfig & { container?: unknown };
-    result = rest;
+  if (REMOVED_AGENT_FIELDS.some((field) => field in result)) {
+    const rest: Record<string, unknown> = { ...result };
+    for (const field of REMOVED_AGENT_FIELDS) delete rest[field];
+    result = rest as unknown as AgentConfig;
   }
   if (!result.triggers || !("chat" in result.triggers)) return result;
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -98,7 +110,7 @@ export function createAgent(data: AgentConfigCreateInput): AgentConfig {
   const id = slugify(data.name.trim());
   if (!id) throw new Error("Agent name must contain alphanumeric characters");
 
-  ensureDir();
+  ensureDirForWrite();
   if (existsSync(filePath(id))) {
     throw new Error(`An agent with a similar name already exists ("${id}")`);
   }
@@ -123,7 +135,7 @@ export function createAgent(data: AgentConfigCreateInput): AgentConfig {
     totalRuns: 0,
     consecutiveFailures: 0,
   };
-  writeFileSync(filePath(id), JSON.stringify(agent, null, 2), "utf-8");
+  writePrivateFile(filePath(id), JSON.stringify(agent, null, 2));
   return agent;
 }
 
@@ -131,7 +143,7 @@ export function updateAgent(
   id: string,
   updates: Partial<AgentConfig>,
 ): AgentConfig | null {
-  ensureDir();
+  ensureDirForWrite();
   const existing = getAgent(id);
   if (!existing) return null;
 
@@ -142,6 +154,17 @@ export function updateAgent(
   // If name changed, check for slug collision with a different agent
   if (newId !== id && existsSync(filePath(newId))) {
     throw new Error(`An agent with a similar name already exists ("${newId}")`);
+  }
+
+  // Turning the webhook on without a secret (e.g. from the MCP tools) gets one.
+  if (updates.triggers?.webhook?.enabled && !updates.triggers.webhook.secret) {
+    updates = {
+      ...updates,
+      triggers: {
+        ...updates.triggers,
+        webhook: { ...updates.triggers.webhook, secret: existing.triggers?.webhook?.secret || generateWebhookSecret() },
+      },
+    };
   }
 
   const agent: AgentConfig = {
@@ -163,7 +186,7 @@ export function updateAgent(
     }
   }
 
-  writeFileSync(filePath(newId), JSON.stringify(agent, null, 2), "utf-8");
+  writePrivateFile(filePath(newId), JSON.stringify(agent, null, 2));
   return agent;
 }
 

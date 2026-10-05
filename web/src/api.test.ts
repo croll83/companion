@@ -259,6 +259,16 @@ describe("createEnv", () => {
     expect(JSON.parse(opts.body)).toEqual({ name: "Prod", variables: { KEY: "val" } });
     expect(result).toEqual(envData);
   });
+
+  // The scope editor sends the placement (scope + folders) with the profile.
+  it("sends scope and folders when a placement is given", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({}));
+
+    await api.createEnv("Prod", {}, { scope: "project", folders: ["/repo"] });
+
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(JSON.parse(opts.body)).toEqual({ name: "Prod", variables: {}, scope: "project", folders: ["/repo"] });
+  });
 });
 
 // ===========================================================================
@@ -1246,113 +1256,6 @@ describe("update API", () => {
 });
 
 // ===========================================================================
-// Cron jobs API
-// ===========================================================================
-describe("cron jobs API", () => {
-  const mockJob = {
-    id: "cron-1",
-    name: "Daily backup",
-    prompt: "Run backup",
-    schedule: "0 0 * * *",
-    recurring: true,
-    backendType: "claude" as const,
-    model: "opus",
-    cwd: "/repo",
-    enabled: true,
-    permissionMode: "auto",
-    createdAt: 1,
-    updatedAt: 1,
-    consecutiveFailures: 0,
-    totalRuns: 5,
-  };
-
-  it("listCronJobs sends GET to /api/cron/jobs", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse([mockJob]));
-
-    const result = await api.listCronJobs();
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs");
-    expect(result).toEqual([mockJob]);
-  });
-
-  it("getCronJob sends GET to /api/cron/jobs/:id", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse(mockJob));
-
-    const result = await api.getCronJob("cron-1");
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs/cron-1");
-    expect(result).toEqual(mockJob);
-  });
-
-  it("createCronJob sends POST to /api/cron/jobs", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse(mockJob));
-
-    const result = await api.createCronJob({ name: "Daily backup", prompt: "Run backup", schedule: "0 0 * * *" });
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs");
-    expect(opts.method).toBe("POST");
-    expect(result).toEqual(mockJob);
-  });
-
-  it("updateCronJob sends PUT to /api/cron/jobs/:id", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ ...mockJob, name: "Updated" }));
-
-    const result = await api.updateCronJob("cron-1", { name: "Updated" });
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs/cron-1");
-    expect(opts.method).toBe("PUT");
-    expect(JSON.parse(opts.body)).toEqual({ name: "Updated" });
-    expect(result.name).toBe("Updated");
-  });
-
-  it("deleteCronJob sends DELETE to /api/cron/jobs/:id", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
-
-    await api.deleteCronJob("cron-1");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs/cron-1");
-    expect(opts.method).toBe("DELETE");
-  });
-
-  it("toggleCronJob sends POST to /api/cron/jobs/:id/toggle", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ ...mockJob, enabled: false }));
-
-    const result = await api.toggleCronJob("cron-1");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs/cron-1/toggle");
-    expect(opts.method).toBe("POST");
-    expect(result.enabled).toBe(false);
-  });
-
-  it("runCronJob sends POST to /api/cron/jobs/:id/run", async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
-
-    await api.runCronJob("cron-1");
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs/cron-1/run");
-    expect(opts.method).toBe("POST");
-  });
-
-  it("getCronJobExecutions sends GET to /api/cron/jobs/:id/executions", async () => {
-    const executions = [{ sessionId: "s1", jobId: "cron-1", startedAt: 1000, completedAt: 2000, success: true }];
-    mockFetch.mockResolvedValueOnce(mockResponse(executions));
-
-    const result = await api.getCronJobExecutions("cron-1");
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/cron/jobs/cron-1/executions");
-    expect(result).toEqual(executions);
-  });
-});
-
-// ===========================================================================
 // Background process management
 // ===========================================================================
 describe("process management API", () => {
@@ -1577,6 +1480,33 @@ describe("sendSessionMessage", () => {
     expect(opts.method).toBe("POST");
     expect(JSON.parse(opts.body)).toEqual({ content: "Hello from another session" });
     expect(result).toEqual({ ok: true });
+  });
+});
+
+// Session wake-ups: list, create and cancel hit the per-session endpoints
+// with ids URL-encoded.
+describe("session wake-ups", () => {
+  it("lists a session's wake-ups", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ wakeups: [] }));
+    expect(await api.listSessionWakeups("s 1")).toEqual({ wakeups: [] });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/sessions/s%201/wakeups");
+  });
+
+  it("creates a wake-up with POST", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ wakeup: { id: "wk-1" } }));
+    await api.createSessionWakeup("s1", { message: "go", at: "2026-10-05T12:00" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/wakeups");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ message: "go", at: "2026-10-05T12:00" });
+  });
+
+  it("cancels a wake-up with DELETE", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.cancelSessionWakeup("s1", "wk-1");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/wakeups/wk-1");
+    expect(opts.method).toBe("DELETE");
   });
 });
 

@@ -50,6 +50,13 @@ const isMockedPath = vi.hoisted(() => (path: string): boolean => {
   return path.includes(".claude") || path.startsWith("/tmp/worktrees/") || path.startsWith("/tmp/main-repo");
 });
 
+// Env profiles are resolved at every spawn. Keep the real ~/.companion/envs
+// out of these tests: profile resolution has its own tests
+// (env-manager.test.ts, session-env.test.ts, cli-launcher-env.test.ts).
+vi.mock("./env-manager.js", () => ({
+  resolveEnvProfiles: vi.fn(() => ({ profiles: [], variables: {}, missingExplicit: false })),
+}));
+
 const mockTranscriptExists = vi.hoisted(() => vi.fn(() => true));
 vi.mock("./claude-session-history.js", () => ({ claudeTranscriptExists: mockTranscriptExists }));
 
@@ -345,6 +352,38 @@ describe("launch", () => {
       [],
     );
     expect(toolFlags).toEqual(["Read", "Write", "Bash"]);
+  });
+
+  it("passes --tools (the restricting flag) for Claude and keeps it on relaunch", async () => {
+    // Agents' allowedTools must really limit the tool set: `--allowedTools`
+    // only pre-approves (a no-op under bypassPermissions), `--tools` removes
+    // the rest. It is stored on the session so a relaunch keeps it.
+    let resolveFirst: (code: number) => void;
+    mockSpawn.mockReturnValueOnce({
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    });
+    const info = launcher.launch({ cwd: "/tmp", tools: ["Read", "Grep"] });
+    expect(info.tools).toEqual(["Read", "Grep"]);
+    const [firstArgs] = mockSpawn.mock.calls[0];
+    expect(firstArgs[firstArgs.indexOf("--tools") + 1]).toBe("Read,Grep");
+
+    launcher.setCLISessionId(info.sessionId, "cli-resume-id");
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+    await launcher.relaunch(info.sessionId);
+    const [relaunchArgs] = mockSpawn.mock.calls[1];
+    expect(relaunchArgs[relaunchArgs.indexOf("--tools") + 1]).toBe("Read,Grep");
+  });
+
+  it("does not pass --tools when the list is empty or for Codex", () => {
+    launcher.launch({ cwd: "/tmp", tools: [] });
+    expect(mockSpawn.mock.calls[0][0]).not.toContain("--tools");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const codex = launcher.launch({ cwd: "/tmp", backendType: "codex", tools: ["Read"] });
+    expect(codex.tools).toBeUndefined();
   });
 
   it("passes branching flags when resumeSessionAt/forkSession are provided", () => {
@@ -892,6 +931,12 @@ describe("codex websocket launcher", () => {
 
     expect(onAdapter).toHaveBeenCalledTimes(1);
     expect(onAdapter.mock.calls[0][0]).toBe("test-session-id");
+    // The adapter gets the sandbox and its network access, so every turn
+    // keeps the session in its sandbox (turn/start sandboxPolicy).
+    expect((onAdapter.mock.calls[0][1] as { options: unknown }).options).toMatchObject({
+      sandbox: "workspace-write",
+      networkAccess: true,
+    });
   });
 
   it("skips already-claimed ws ports when selecting Codex host listen port", async () => {
@@ -1075,6 +1120,26 @@ describe("codex websocket launcher", () => {
 
 describe("persistence", () => {
   describe("restoreFromDisk", () => {
+    it("loads sessions saved with the removed cronJobId/cronJobName fields", () => {
+      // The legacy "Scheduled Runs" system tagged its sessions with these
+      // fields; launcher.json files from older servers still carry them.
+      store.saveLauncher([
+        {
+          sessionId: "cron-era",
+          state: "exited",
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+          cronJobId: "nightly",
+          cronJobName: "Nightly",
+        } as never,
+      ]);
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+
+      expect(() => newLauncher.restoreFromDisk()).not.toThrow();
+      expect(newLauncher.getSession("cron-era")?.cwd).toBe("/tmp/project");
+    });
+
     it("recovers sessions from the store", () => {
       // Manually write launcher data to disk to simulate a previous run
       const savedSessions = [

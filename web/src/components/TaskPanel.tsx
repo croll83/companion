@@ -5,6 +5,8 @@ import type { TaskItem, SdkSessionInfo } from "../types.js";
 import { McpSection } from "./McpPanel.js";
 import { LinearLogo } from "./LinearLogo.js";
 import { ClaudeConfigBrowser } from "./ClaudeConfigBrowser.js";
+import { SessionEnvProfiles } from "./SessionEnvProfiles.js";
+import { SessionWakeups } from "./SessionWakeups.js";
 import { SECTION_DEFINITIONS } from "./task-panel-sections.js";
 import { formatResetTime, formatCodexResetTime, formatWindowDuration, formatTokenCount } from "../utils/format.js";
 import { timeAgo } from "../utils/time-ago.js";
@@ -1142,6 +1144,8 @@ export function TaskPanel({ sessionId }: { sessionId: string }) {
         <>
           <div data-testid="task-panel-content" className="min-h-0 flex-1 overflow-y-auto">
             <ClaudeConfigBrowser sessionId={sessionId} />
+            <SessionEnvProfiles sessionId={sessionId} />
+            <SessionWakeups sessionId={sessionId} />
             {applicableSections
               .filter((id) => config.enabled[id] !== false)
               .map((sectionId) => {

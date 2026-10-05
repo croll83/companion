@@ -16,3 +16,10 @@ Refresh these files with:
 ```bash
 ./scripts/sync-codex-protocol.sh
 ```
+
+`v2/ThreadForkParams.ts.txt` and `v2/ThreadForkResponse.ts.txt` (agent "fork"
+runs, see `forkThread` in `server/codex-adapter.ts`) and `v2/SandboxPolicy.ts.txt`
+(turn/start `sandboxPolicy`, see `mapSandboxPolicyObject`) are not copied by that
+script. They were generated from codex-cli 0.160.0 with
+`codex app-server generate-ts --out <dir>` (stable API, no `--experimental`).
+Regenerate them the same way when refreshing the snapshot.

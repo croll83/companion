@@ -304,4 +304,100 @@ describe("ExecutionStore", () => {
     const store = new ExecutionStore(testDir);
     expect(store.directory).toBe(testDir);
   });
+
+  describe("legacy location (pre-COMPANION_HOME ~/.companion/executions)", () => {
+    it("merges the legacy directory's history, newer lines in the current dir winning", () => {
+      // Older versions always wrote to ~/.companion/executions even with a
+      // custom COMPANION_HOME: their runs must still show in the Runs page.
+      const legacyDir = `${testDir}-legacy`;
+      mkdirSync(legacyDir, { recursive: true });
+      mkdirSync(testDir, { recursive: true });
+      const old = makeExecution({ sessionId: "old", startedAt: 1000 });
+      const shared = makeExecution({ sessionId: "shared", startedAt: 2000 });
+      writeFileSync(join(legacyDir, "executions-2026-01-01.jsonl"), `${JSON.stringify(old)}\n${JSON.stringify(shared)}\n`);
+      writeFileSync(join(testDir, "executions-2026-01-01.jsonl"), `${JSON.stringify({ ...shared, completedAt: 3000, success: true })}\n`);
+
+      try {
+        const store = new ExecutionStore(testDir, legacyDir);
+        const ids = store.list().executions.map((e) => e.sessionId).sort();
+        expect(ids).toEqual(["old", "shared"]);
+        expect(store.list().executions.find((e) => e.sessionId === "shared")?.success).toBe(true);
+      } finally {
+        rmSync(legacyDir, { recursive: true, force: true });
+      }
+    });
+
+    // Review finding: an isolated instance (own COMPANION_HOME) read the live
+    // service's ~/.companion/executions as "legacy", closed its open runs as
+    // interrupted and (via own()-less cleanup) removed their temp folders.
+    // Runs known only from the legacy dir are display-only: never finalized,
+    // never updated, not in own(). A run this store also wrote is its own.
+    it("never acts on runs known only from the legacy directory", () => {
+      const legacyDir = `${testDir}-legacy`;
+      mkdirSync(legacyDir, { recursive: true });
+      mkdirSync(testDir, { recursive: true });
+      const foreignRun = makeExecution({ sessionId: "live-sess-1", startedAt: 1000, tempCwd: "/tmp/companion-agent-victim" });
+      const migrated = makeExecution({ sessionId: "migrated", startedAt: 1000 });
+      const legacyContent = `${JSON.stringify(foreignRun)}\n${JSON.stringify(migrated)}\n`;
+      writeFileSync(join(legacyDir, "executions-2026-01-01.jsonl"), legacyContent);
+      writeFileSync(join(testDir, "executions-2026-01-01.jsonl"), `${JSON.stringify(migrated)}\n`);
+
+      try {
+        const store = new ExecutionStore(testDir, legacyDir);
+        // Shown in the history...
+        expect(store.list().executions.map((e) => e.sessionId).sort()).toEqual(["live-sess-1", "migrated"]);
+        // ...but only the store's own open run is closed.
+        expect(store.finalizeInterrupted("Interrupted")).toBe(1);
+        expect(store.own().map((e) => e.sessionId)).toEqual(["migrated"]);
+        store.update("live-sess-1", { completedAt: 5, success: false });
+        expect(store.list().executions.find((e) => e.sessionId === "live-sess-1")?.completedAt).toBeUndefined();
+        // Nothing about the foreign run is written anywhere.
+        expect(readFileSync(join(legacyDir, "executions-2026-01-01.jsonl"), "utf-8")).toBe(legacyContent);
+        expect(readFileSync(join(testDir, "executions-2026-01-01.jsonl"), "utf-8")).not.toContain("live-sess-1");
+        // A fresh load agrees.
+        expect(new ExecutionStore(testDir, legacyDir).own().map((e) => e.sessionId)).toEqual(["migrated"]);
+      } finally {
+        rmSync(legacyDir, { recursive: true, force: true });
+      }
+    });
+
+    it("tolerates a missing legacy directory and never writes to it", () => {
+      const legacyDir = `${testDir}-absent`;
+      const store = new ExecutionStore(testDir, legacyDir);
+      store.append(makeExecution({ startedAt: 1000 }));
+      expect(existsSync(legacyDir)).toBe(false);
+      expect(readdirSync(testDir)).toHaveLength(1);
+    });
+  });
+
+  describe("finalizeInterrupted()", () => {
+    it("closes runs still marked running as failed, and persists that", () => {
+      // After a restart no open run can ever report a result.
+      const store = new ExecutionStore(testDir);
+      store.append(makeExecution({ sessionId: "open", startedAt: 1000 }));
+      store.append(makeExecution({ sessionId: "done", startedAt: 1000, completedAt: 2000, success: true }));
+
+      expect(store.finalizeInterrupted("Interrupted")).toBe(1);
+
+      const reloaded = new ExecutionStore(testDir).list().executions;
+      const open = reloaded.find((e) => e.sessionId === "open")!;
+      expect(open.completedAt).toBeGreaterThan(0);
+      expect(open.success).toBe(false);
+      expect(open.error).toBe("Interrupted");
+      expect(reloaded.find((e) => e.sessionId === "done")!.success).toBe(true);
+    });
+  });
+
+  it("all() returns every cached execution without pagination", () => {
+    const store = new ExecutionStore(testDir);
+    for (let i = 0; i < 60; i++) store.append(makeExecution({ startedAt: i }));
+    expect(store.all()).toHaveLength(60);
+  });
+
+  it("status=error also matches failed runs without an error message", () => {
+    const store = new ExecutionStore(testDir);
+    store.append(makeExecution({ sessionId: "f", startedAt: 1, completedAt: 2, success: false }));
+    store.append(makeExecution({ sessionId: "r", startedAt: 1 }));
+    expect(store.list({ status: "error" }).executions.map((e) => e.sessionId)).toEqual(["f"]);
+  });
 });

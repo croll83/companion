@@ -11,7 +11,7 @@ import {
   readlinkSync,
   symlinkSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
@@ -27,6 +27,14 @@ import { companionBus } from "./event-bus.js";
 import { markClaudeCliRuntimeIncompatible, parseClaudeVersion } from "./claude-cli-check.js";
 import { getSettings } from "./settings-manager.js";
 import { DEFAULT_CLI_BRIDGE_MODE } from "./cli-bridge-mode.js";
+import { resolveSessionEnv } from "./session-env.js";
+import {
+  buildCompanionMcpEntry,
+  removeClaudeMcpConfig,
+  upsertCodexMcpServer,
+  writeClaudeMcpConfig,
+  type CompanionMcpEntry,
+} from "./companion-mcp-config.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -100,6 +108,30 @@ function sanitizeSpawnArgsForLog(args: string[]): string {
   return out.join(" ");
 }
 
+/**
+ * Variables of Companion's OWN environment that must never reach a CLI (and
+ * so the model's shell): its auth token, and the per-session MCP variables a
+ * Companion started from inside a session would otherwise pass down. The
+ * `companion` MCP server receives its own values explicitly. An env profile
+ * or request env can still set them on purpose (applied after this).
+ */
+const COMPANION_PRIVATE_ENV: Record<string, undefined> = {
+  COMPANION_AUTH_TOKEN: undefined,
+  COMPANION_MCP_TOKEN: undefined,
+  COMPANION_SESSION_ID: undefined,
+  COMPANION_API_URL: undefined,
+};
+
+/**
+ * Claude Code's built-in scheduling tools. Their wake-ups and cron jobs live
+ * only inside the running CLI process: an idle-kill, relaunch or server
+ * restart silently drops them, and Companion never shows them. Sessions that
+ * get the companion MCP server (whose schedule_wakeup is persisted, shown on
+ * the session and survives restarts) do not get these, so the model cannot
+ * pick the fragile one.
+ */
+const CLAUDE_BUILTIN_SCHEDULING_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList"];
+
 const CODEX_WS_PROXY_PATH = fileURLToPath(new URL("./codex-ws-proxy.cjs", import.meta.url));
 
 /**
@@ -138,12 +170,32 @@ function buildCodexSpawn(
     spawnCmd,
     spawnEnv: {
       ...process.env,
+      ...COMPANION_PRIVATE_ENV,
       CLAUDECODE: undefined,
       ...env,
       CODEX_HOME: codexHome,
       PATH: spawnPath,
     },
   };
+}
+
+/**
+ * Another session's conversation a new session starts from as a COPY
+ * (agent "fork" runs). Used only until the new session has its own
+ * cliSessionId: from then on relaunches resume the fork, never the source.
+ */
+export interface ForkSource {
+  /** Companion session id of the source (for logs and the UI). */
+  sessionId: string;
+  /** Claude transcript id / Codex thread id to copy. */
+  cliSessionId: string;
+  /**
+   * Codex only: the source thread's rollout file. Every Companion session
+   * has its own CODEX_HOME, where the source thread is unknown, so the file
+   * is copied into the new session's home before `thread/fork` (forking by
+   * `path` does not work: Codex still looks the thread up by id).
+   */
+  rolloutPath?: string;
 }
 
 export interface SdkSessionInfo {
@@ -186,18 +238,32 @@ export interface SdkSessionInfo {
   codexInternetAccess?: boolean;
   /** Sandbox mode selected for Codex sessions */
   codexSandbox?: "workspace-write" | "danger-full-access";
-  /** If this session was spawned by a cron job */
-  cronJobId?: string;
-  /** Human-readable name of the cron job that spawned this session */
-  cronJobName?: string;
   /** If session was created from an existing Claude thread/session. */
   resumeSessionAt?: string;
   /** Whether the resumed session used --fork-session. */
   forkSession?: boolean;
+  /** Start from a copy of another session's conversation (see ForkSource). */
+  forkSource?: ForkSource;
   /** If this session was spawned by an agent */
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
   agentName?: string;
+  /**
+   * Claude only: built-in tools the session is limited to (`--tools`).
+   * Persisted so every relaunch keeps the restriction.
+   */
+  tools?: string[];
+  /**
+   * Explicitly chosen env profile. Only the slug is persisted: the variables
+   * are re-read from the profile at every spawn and relaunch.
+   */
+  envSlug?: string;
+  /** Linear connection whose API key is injected as LINEAR_API_KEY at every spawn. */
+  linearConnectionId?: string;
+  /** Main repo root of a worktree session, used to match project env profiles. */
+  repoRoot?: string;
+  /** Names (never values) of the env profiles applied at the last spawn. */
+  envProfiles?: string[];
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport. */
@@ -211,6 +277,17 @@ export interface SdkSessionInfo {
   bridgeConfigPath?: string;
 }
 
+/** Wiring of the built-in `companion` MCP server (see companion-mcp-config.ts). */
+export interface CompanionMcpOptions {
+  /** The MCP token of a session (companion-mcp-auth.ts). */
+  tokenFor(sessionId: string): string;
+  /** Directory of the Claude sessions' `--mcp-config` files. */
+  claudeConfigDir: string;
+  /** Overrides (tests): the command and script that run the MCP server. */
+  command?: string;
+  script?: string;
+}
+
 export interface LaunchOptions {
   model?: string;
   /** Reasoning-effort level (Claude only); passed as `--effort` when the model supports it. */
@@ -222,7 +299,22 @@ export interface LaunchOptions {
   claudeBinary?: string;
   codexBinary?: string;
   allowedTools?: string[];
+  /**
+   * Claude only: restrict the built-in tool set (`--tools a,b,c`). Unlike
+   * allowedTools (pre-approval only) this really removes the other tools.
+   */
+  tools?: string[];
+  /**
+   * Request/agent env, applied on top of the resolved env profiles. Persisted
+   * (0600, outside launcher.json) so relaunches after a restart keep it.
+   */
   env?: Record<string, string>;
+  /** Explicitly chosen env profile slug (see SdkSessionInfo.envSlug). */
+  envSlug?: string;
+  /** Linear connection id for LINEAR_API_KEY injection. */
+  linearConnectionId?: string;
+  /** Main repo root for worktree sessions (project env profile matching). */
+  repoRoot?: string;
   backendType?: BackendType;
   /** Codex sandbox mode. */
   codexSandbox?: "workspace-write" | "danger-full-access";
@@ -234,6 +326,8 @@ export interface LaunchOptions {
   resumeSessionAt?: string;
   /** Fork a new Claude session when resuming from prior context. */
   forkSession?: boolean;
+  /** Start from a copy of another session's conversation (Claude and Codex). */
+  forkSource?: ForkSource;
   /** Optional system prompt to inject into Codex sessions (e.g. Linear context). */
   systemPrompt?: string;
 }
@@ -264,13 +358,18 @@ export class CliLauncher {
   private codexWsProxies = new Map<string, Subprocess>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
   private claimedCodexWsPorts = new Set<number>();
-  /** Runtime-only env vars per session (kept out of persisted launcher state). */
-  private sessionEnvs = new Map<string, Record<string, string>>();
+  /**
+   * Request/agent env per session. Mirrors what the store persists (0600
+   * sidecar) so tests without a store and the hot path avoid a disk read.
+   */
+  private requestEnvs = new Map<string, Record<string, string>>();
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
   /** Path to the self-signed CA cert (NODE_EXTRA_CA_CERTS) when tlsLoopback is in use. */
   private tlsCaPath: string | null = null;
+  /** Built-in MCP server wiring; null = never injected (tests, embedders). */
+  private companionMcp: CompanionMcpOptions | null = null;
   constructor(port: number) {
     this.port = port;
   }
@@ -292,6 +391,69 @@ export class CliLauncher {
    */
   setTlsCaPath(caPath: string | null): void {
     this.tlsCaPath = caPath;
+  }
+
+  /**
+   * Give every session spawned from now on the built-in `companion` MCP
+   * server (unless the "Companion MCP tools for sessions" setting is off).
+   */
+  setCompanionMcp(options: CompanionMcpOptions | null): void {
+    this.companionMcp = options;
+  }
+
+  /**
+   * The `companion` MCP server entry for a spawn, or null when it is not
+   * wired or turned off in Settings. Read at every spawn and relaunch, so
+   * the setting applies to the next (re)launch of each session.
+   */
+  private companionMcpEntry(sessionId: string): CompanionMcpEntry | null {
+    if (!this.companionMcp || getSettings().companionMcpEnabled === false) return null;
+    return buildCompanionMcpEntry({
+      sessionId,
+      apiUrl: `http://127.0.0.1:${this.port}/api`,
+      token: this.companionMcp.tokenFor(sessionId),
+      command: this.companionMcp.command,
+      script: this.companionMcp.script,
+    });
+  }
+
+  /**
+   * `--mcp-config <file>` for a Claude spawn, plus `--disallowedTools` for
+   * Claude Code's own scheduling tools, which the companion tools replace
+   * (empty when not injected). Never injected into a session restricted to
+   * some built-in tools (`--tools`): that flag does not limit MCP tools, and
+   * with them such a session could create and run an unrestricted agent.
+   */
+  private claudeMcpArgs(sessionId: string, info: Pick<SdkSessionInfo, "tools">): string[] {
+    if (!this.companionMcp) return [];
+    const entry = info.tools && info.tools.length > 0 ? null : this.companionMcpEntry(sessionId);
+    if (!entry) {
+      removeClaudeMcpConfig(this.companionMcp.claudeConfigDir, sessionId);
+      return [];
+    }
+    try {
+      return [
+        "--mcp-config", writeClaudeMcpConfig(this.companionMcp.claudeConfigDir, sessionId, entry),
+        "--disallowedTools", CLAUDE_BUILTIN_SCHEDULING_TOOLS.join(","),
+      ];
+    } catch (err) {
+      console.warn(`[cli-launcher] Could not write the companion MCP config for ${sessionId}; starting without it:`, err);
+      return [];
+    }
+  }
+
+  /** Upsert (or, when turned off, remove) `mcp_servers.companion` in a Codex session's config.toml. */
+  private syncCodexMcp(sessionId: string, codexHome: string): void {
+    if (!this.companionMcp) return;
+    try {
+      upsertCodexMcpServer(join(codexHome, "config.toml"), this.companionMcpEntry(sessionId));
+    } catch (err) {
+      console.warn(`[cli-launcher] Could not update the companion MCP server in ${codexHome}/config.toml:`, err);
+    }
+  }
+
+  private forgetMcpConfig(sessionId: string): void {
+    if (this.companionMcp) removeClaudeMcpConfig(this.companionMcp.claudeConfigDir, sessionId);
   }
 
   /** Persist launcher state to disk. */
@@ -393,17 +555,56 @@ export class CliLauncher {
       info.codexSandbox = options.codexSandbox;
     }
 
+    if (backendType === "claude" && options.tools && options.tools.length > 0) {
+      info.tools = [...options.tools];
+    }
+    if (options.forkSource) info.forkSource = { ...options.forkSource };
+    if (options.envSlug) info.envSlug = options.envSlug;
+    if (options.linearConnectionId) info.linearConnectionId = options.linearConnectionId;
+    if (options.repoRoot) info.repoRoot = options.repoRoot;
+
     this.sessions.set(sessionId, info);
-    if (options.env) {
-      this.sessionEnvs.set(sessionId, { ...options.env });
+    if (options.env && Object.keys(options.env).length > 0) {
+      this.requestEnvs.set(sessionId, { ...options.env });
+      this.store?.saveRequestEnv(sessionId, options.env);
     }
 
+    const spawnOptions = { ...options, env: this.resolveSpawnEnv(sessionId, info) };
     if (backendType === "codex") {
-      this.spawnCodex(sessionId, info, options);
+      this.spawnCodex(sessionId, info, spawnOptions);
     } else {
-      this.spawnCLI(sessionId, info, options);
+      this.spawnCLI(sessionId, info, spawnOptions);
     }
     return info;
+  }
+
+  /**
+   * Build the env overlay for a spawn from persisted references only (env
+   * slug, cwd/repo root, Linear connection, the request-env sidecar) so the
+   * first launch and every relaunch — including after a server restart —
+   * resolve exactly the same way. Records the applied profile names.
+   */
+  private resolveSpawnEnv(sessionId: string, info: SdkSessionInfo): Record<string, string> {
+    let requestEnv = this.requestEnvs.get(sessionId);
+    if (!requestEnv && this.store) {
+      requestEnv = this.store.loadRequestEnv(sessionId);
+      if (requestEnv) this.requestEnvs.set(sessionId, requestEnv);
+    }
+    const { env, profileNames } = resolveSessionEnv({
+      cwd: info.cwd,
+      repoRoot: info.repoRoot,
+      backendType: info.backendType,
+      envSlug: info.envSlug,
+      linearConnectionId: info.linearConnectionId,
+      requestEnv,
+    });
+    info.envProfiles = profileNames.length > 0 ? profileNames : undefined;
+    return env;
+  }
+
+  private forgetRequestEnv(sessionId: string): void {
+    this.requestEnvs.delete(sessionId);
+    this.store?.removeRequestEnv(sessionId);
   }
 
   /**
@@ -466,7 +667,7 @@ export class CliLauncher {
 
     info.state = "starting";
 
-    const runtimeEnv = this.sessionEnvs.get(sessionId);
+    const runtimeEnv = this.resolveSpawnEnv(sessionId, info);
 
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, {
@@ -619,11 +820,24 @@ export class CliLauncher {
         args.push("--allowedTools", tool);
       }
     }
+    // Read from the session record so relaunches keep the restriction.
+    if (info.tools && info.tools.length > 0) {
+      args.push("--tools", info.tools.join(","));
+    }
+    // The built-in `companion` MCP server, added to (never replacing) the
+    // user's own MCP servers: no --strict-mcp-config.
+    args.push(...this.claudeMcpArgs(sessionId, info));
+    // Fork: start from a COPY of another session's transcript, until this
+    // session has a transcript of its own (then --resume below takes over).
+    const forkFrom = !options.resumeSessionId && !info.cliSessionId ? info.forkSource?.cliSessionId : undefined;
     if (options.resumeSessionAt) {
       args.push("--resume-session-at", options.resumeSessionAt);
     }
-    if (options.forkSession) {
+    if (options.forkSession || forkFrom) {
       args.push("--fork-session");
+    }
+    if (forkFrom) {
+      args.push("--resume", forkFrom);
     }
 
     // When relaunching, pass --resume to restore the CLI's conversation context.
@@ -644,6 +858,7 @@ export class CliLauncher {
     const spawnCmd = isCmdScript ? ["cmd.exe", "/c", binary, ...args] : [binary, ...args];
     const spawnEnv: Record<string, string | undefined> = {
       ...process.env,
+      ...COMPANION_PRIVATE_ENV,
       CLAUDECODE: undefined,
       // Have the CLI report its own turn state (session_state_changed:
       // idle | running | requires_action) instead of Companion inferring it.
@@ -764,12 +979,17 @@ export class CliLauncher {
   }
 
   /**
-   * Spawn a Codex app-server subprocess for a session.
-   * Transport (stdio vs WebSocket) is selected by `COMPANION_CODEX_TRANSPORT`.
+   * Make a session's own CODEX_HOME ready before every Codex spawn: seed it
+   * from ~/.codex, then (re)write the `companion` MCP server entry.
    */
-  private prepareCodexHome(codexHome: string): void {
+  private prepareCodexHome(codexHome: string, sessionId: string): void {
     mkdirSync(codexHome, { recursive: true });
+    this.seedCodexHome(codexHome);
+    // After seeding: config.toml may just have been copied from ~/.codex.
+    this.syncCodexMcp(sessionId, codexHome);
+  }
 
+  private seedCodexHome(codexHome: string): void {
     const legacyHome = getLegacyCodexHome();
     if (resolve(legacyHome) === resolve(codexHome) || !existsSync(legacyHome)) {
       return;
@@ -879,6 +1099,38 @@ export class CliLauncher {
     }
   }
 
+  /**
+   * Codex fork (see ForkSource): while the session has no thread of its own,
+   * copy the source rollout into this session's CODEX_HOME at the same
+   * sessions/YYYY/MM/DD path, so `thread/fork` finds it by id. The source
+   * file is only read. Returns the thread id to fork, or undefined.
+   */
+  private prepareCodexFork(codexHome: string, info: SdkSessionInfo): string | undefined {
+    const fork = info.forkSource;
+    if (info.cliSessionId || !fork) return undefined;
+    if (fork.rolloutPath) {
+      const marker = `${sep}sessions${sep}`;
+      const at = fork.rolloutPath.lastIndexOf(marker);
+      const rel = at >= 0 ? fork.rolloutPath.slice(at + marker.length) : basename(fork.rolloutPath);
+      const dest = join(codexHome, "sessions", rel);
+      try {
+        if (!existsSync(dest)) {
+          mkdirSync(dirname(dest), { recursive: true });
+          copyFileSync(fork.rolloutPath, dest);
+        }
+      } catch (err) {
+        // thread/fork then fails with Codex's own "no rollout found" error,
+        // which fails the run with a clear message.
+        console.warn(`[cli-launcher] Could not copy the fork source rollout ${fork.rolloutPath}:`, err);
+      }
+    }
+    return fork.cliSessionId;
+  }
+
+  /**
+   * Spawn a Codex app-server subprocess for a session.
+   * Transport (stdio vs WebSocket) is selected by `COMPANION_CODEX_TRANSPORT`.
+   */
   private spawnCodex(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
     const useWs = isCodexWsTransportEnabled();
     if (useWs) {
@@ -943,7 +1195,7 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    this.prepareCodexHome(codexHome);
+    this.prepareCodexHome(codexHome, sessionId);
 
     const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
 
@@ -980,6 +1232,7 @@ export class CliLauncher {
       cwd: info.cwd,
       env: {
         ...process.env,
+        ...COMPANION_PRIVATE_ENV,
         PATH: getEnrichedPath(),
       },
       stdin: "pipe",
@@ -1000,7 +1253,9 @@ export class CliLauncher {
       cwd: info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
+      forkFromThreadId: this.prepareCodexFork(codexHome, info),
       sandbox: options.codexSandbox,
+      networkAccess: options.codexInternetAccess !== false,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
       killProcess: async () => {
@@ -1020,6 +1275,7 @@ export class CliLauncher {
     // Handle init errors
     adapter.onInitError((error) => {
       console.error(`[cli-launcher] Codex WS session ${sessionId} init failed: ${error}`);
+      companionBus.emit("session:init-failed", { sessionId, error });
       try { proxyProc.kill("SIGTERM"); } catch {}
       this.codexWsProxies.delete(sessionId);
       const session = this.sessions.get(sessionId);
@@ -1115,7 +1371,7 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    this.prepareCodexHome(codexHome);
+    this.prepareCodexHome(codexHome, sessionId);
 
     const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
 
@@ -1148,7 +1404,9 @@ export class CliLauncher {
       cwd: info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
+      forkFromThreadId: this.prepareCodexFork(codexHome, info),
       sandbox: options.codexSandbox,
+      networkAccess: options.codexInternetAccess !== false,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
     });
@@ -1158,6 +1416,7 @@ export class CliLauncher {
     // instead of trying to resume one whose rollout may be missing.
     adapter.onInitError((error) => {
       console.error(`[cli-launcher] Codex session ${sessionId} init failed: ${error}`);
+      companionBus.emit("session:init-failed", { sessionId, error });
       const session = this.sessions.get(sessionId);
       if (session) {
         session.state = "exited";
@@ -1329,7 +1588,8 @@ export class CliLauncher {
     this.sessions.delete(sessionId);
     this.processes.delete(sessionId);
     this.codexWsProxies.delete(sessionId);
-    this.sessionEnvs.delete(sessionId);
+    this.forgetRequestEnv(sessionId);
+    this.forgetMcpConfig(sessionId);
     this.persistState();
   }
 
@@ -1342,7 +1602,8 @@ export class CliLauncher {
       if (session.state === "exited") {
         this.releaseCodexWsPort(session);
         this.sessions.delete(id);
-        this.sessionEnvs.delete(id);
+        this.forgetRequestEnv(id);
+        this.forgetMcpConfig(id);
         this.codexWsProxies.delete(id);
         pruned++;
       }

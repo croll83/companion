@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -23,6 +23,17 @@ afterEach(() => {
 });
 
 describe("settings-manager", () => {
+  // Review finding: settings.json holds claudeCodeOAuthToken/openaiApiKey but
+  // was written with the default umask. It is 0600 now, also when an older
+  // version had left it readable.
+  it("writes the settings file owner-only", () => {
+    writeFileSync(settingsPath, "{}");
+    chmodSync(settingsPath, 0o644);
+    _resetForTest(settingsPath);
+    updateSettings({ openaiApiKey: "sk-secret" });
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+  });
+
   it("returns defaults when file is missing", () => {
     expect(getSettings()).toEqual({
       anthropicApiKey: "",
@@ -50,6 +61,7 @@ describe("settings-manager", () => {
       telegramBotToken: "",
       cliBridgeMode: "loopback",
       timeZone: "",
+      companionMcpEnabled: true,
       updatedAt: 0,
     });
   });
@@ -107,6 +119,7 @@ describe("settings-manager", () => {
       telegramBotToken: "",
       cliBridgeMode: "loopback",
       timeZone: "",
+      companionMcpEnabled: true,
       updatedAt: 123,
     });
   });
@@ -188,6 +201,7 @@ describe("settings-manager", () => {
       telegramBotToken: "",
       cliBridgeMode: "loopback",
       timeZone: "",
+      companionMcpEnabled: true,
       updatedAt: 0,
     });
   });
@@ -364,5 +378,21 @@ describe("settings-manager", () => {
     writeFileSync(settingsPath, JSON.stringify({ timeZone: 42 }), "utf-8");
     _resetForTest(settingsPath);
     expect(getSettings().timeZone).toBe("");
+  });
+
+  // ── companionMcpEnabled ("Companion MCP tools for sessions") ─────────────
+
+  // On by default — also for settings files written before the option
+  // existed — and only a real boolean on disk can turn it off.
+  it("defaults the Companion MCP tools to on and persists turning them off", () => {
+    expect(getSettings().companionMcpEnabled).toBe(true);
+    expect(updateSettings({ companionMcpEnabled: false }).companionMcpEnabled).toBe(false);
+    expect(updateSettings({ publicUrl: "https://x.example" }).companionMcpEnabled).toBe(false);
+    _resetForTest(settingsPath);
+    expect(getSettings().companionMcpEnabled).toBe(false);
+
+    writeFileSync(settingsPath, JSON.stringify({ companionMcpEnabled: "no" }), "utf-8");
+    _resetForTest(settingsPath);
+    expect(getSettings().companionMcpEnabled).toBe(true);
   });
 });
