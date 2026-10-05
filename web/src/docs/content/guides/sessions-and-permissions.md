@@ -117,7 +117,7 @@ When a wake-up fires, its message is sent as a user message that starts with `[s
 
 Wake-ups survive restarts (they are stored in `~/.companion/wakeups/`, readable only by you). A one-time wake-up whose time passed while the server was down still fires at startup if it is less than 24 hours late. Otherwise it is shown as **missed**.
 
-Wake-ups work the same for Claude Code and Codex sessions. To create one from a script or from a session, use the REST API:
+Wake-ups work the same for Claude Code and Codex sessions. A session can schedule its own wake-ups with the built-in `schedule_wakeup` tool (see [Companion MCP tools](#/docs/guides/companion-mcp)). From a script, use the REST API:
 
 ```bash
 curl -X POST http://localhost:3456/api/sessions/SESSION_ID/wakeups \
@@ -125,7 +125,7 @@ curl -X POST http://localhost:3456/api/sessions/SESSION_ID/wakeups \
   -d '{"message": "Check whether CI passed and fix it if not", "at": "2026-10-06T09:00"}'
 ```
 
-Send `"cron": "0 9 * * 1-5"` instead of `at` for a repeating wake-up. A session scheduling itself can say so with `"createdBy": "session:<its session id>"`.
+Send `"cron": "0 9 * * 1-5"` instead of `at` for a repeating wake-up. A wake-up scheduled through the Companion MCP tools is recorded as created by that session (`"createdBy": "session:<id>"`), whatever the request body says.
 
 ### Sending a message to a session from outside
 

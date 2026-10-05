@@ -9,6 +9,8 @@ Agents are reusable configurations that start sessions with specific settings, a
 
 Agents work with Claude Code and Codex. The few options that only one backend supports are marked below.
 
+Sessions can also create and manage agents themselves with the built-in `create_agent`, `run_agent` and related tools. See [Companion MCP tools](#/docs/guides/companion-mcp).
+
 ## Create an agent
 
 1. Click **+ New Agent**
@@ -83,6 +85,7 @@ Each agent card shows:
 - Trigger badges (Manual, Webhook, Schedule, Linear Agent)
 - **Running** while a run is in progress (links to the Runs page)
 - A schedule problem, if any (a past one-time date, a skipped scheduled run)
+- **Created by session …** for agents a session created through the Companion MCP tools, with a link to that session
 - Stats: total runs, last run time, next scheduled run
 
 ## Triggers

@@ -54,6 +54,8 @@ the-companion logs
 
 All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 
+The built-in `companion` MCP server of each session uses its own token (`cmcp_…`). That token identifies the session and opens only the wake-up, agent and run routes its tools use. Companion's auth token (`COMPANION_AUTH_TOKEN`) is not passed to Claude Code or Codex. See [Companion MCP tools](#/docs/guides/companion-mcp).
+
 ### Sessions
 
 | Method | Endpoint | Description |
@@ -89,9 +91,10 @@ All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 | `GET` | `/api/agents/:slug/export` | Export agent as JSON |
 | `POST` | `/api/agents/import` | Import an agent from JSON |
 | `POST` | `/api/agents/:slug/toggle` | Enable or disable an agent |
-| `POST` | `/api/agents/:slug/run` | Run now (`{"input": "..."}` optional; `409` while a run is in progress) |
+| `POST` | `/api/agents/:slug/run` | Run now (`{"input": "..."}` optional; `409` while a run is in progress). The response has the run's `sessionId` |
 | `GET` | `/api/agents/:slug/executions` | Recent runs of an agent (since the server started) |
 | `GET` | `/api/executions` | All runs (`?agentId=`, `?triggerType=`, `?status=running\|success\|error`, `?limit=`, `?offset=`) |
+| `GET` | `/api/executions/:sessionId/result` | A run's status and final answer (`?maxChars=`, default 4000, at most 20000) |
 | `POST` | `/api/agents/:slug/webhook/:secret` | Trigger agent via webhook. Needs no token, but only answers loopback and Tailscale addresses (see [Agents](#/docs/guides/agents)) |
 
 ### Environments

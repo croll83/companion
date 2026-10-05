@@ -3,6 +3,8 @@ import { AgentCardMenu } from "./AgentCardMenu.js";
 import { LinearLogo } from "./LinearLogo.js";
 import type { AgentInfo } from "../api.js";
 import { timeAgo } from "../utils/time-ago.js";
+import { sessionHash } from "../utils/routing.js";
+import { useStore } from "../store.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -39,6 +41,25 @@ export function humanizeSchedule(expression: string, recurring: boolean): string
 export function getWebhookUrl(agent: AgentInfo, publicUrl: string): string {
   const base = publicUrl || window.location.origin;
   return `${base}/api/agents/${encodeURIComponent(agent.id)}/webhook/${agent.triggers?.webhook?.secret || ""}`;
+}
+
+/**
+ * "Created by session <name>" for agents a session created through the
+ * companion MCP tools (createdBy "session:<id>"), linking to that session.
+ * Nothing for agents the user created.
+ */
+function CreatedBySession({ createdBy }: { createdBy?: string }) {
+  const sessionId = createdBy?.startsWith("session:") ? createdBy.slice("session:".length) : null;
+  const name = useStore((s) => (sessionId ? s.sessionNames.get(sessionId) : undefined));
+  if (!sessionId) return null;
+  return (
+    <p className="text-[11px] text-cc-muted mt-1" data-testid="created-by-session">
+      Created by session{" "}
+      <a href={sessionHash(sessionId)} className="text-cc-primary hover:underline" title={sessionId}>
+        {name || sessionId.slice(0, 8)}
+      </a>
+    </p>
+  );
 }
 
 // ─── Agent Card ─────────────────────────────────────────────────────────────
@@ -122,6 +143,7 @@ export function AgentCard({
             {agent.description && (
               <p className="text-xs text-cc-muted mt-0.5 truncate max-w-md">{agent.description}</p>
             )}
+            <CreatedBySession createdBy={agent.createdBy} />
             {agent.scheduleError && (
               <p className="text-[11px] text-cc-warning mt-1 max-w-md" data-testid="schedule-error">
                 Schedule: {agent.scheduleError}

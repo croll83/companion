@@ -374,6 +374,8 @@ export interface AppSettings {
   telegramBotTokenConfigured: boolean;
   /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
   timeZone: string;
+  /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
+  companionMcpEnabled?: boolean;
 }
 
 export interface HostsCheckResult {
@@ -615,6 +617,8 @@ export interface AgentInfo {
       hasWebhookSecret?: boolean;
     };
   };
+  /** Absent/"user", or "session:<id>" when a session created it via the companion MCP tools. */
+  createdBy?: string;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -981,6 +985,7 @@ export const api = {
     cliBridgeMode?: CliBridgeMode;
     telegramBotToken?: string;
     timeZone?: string;
+    companionMcpEnabled?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

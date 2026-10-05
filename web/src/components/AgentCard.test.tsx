@@ -12,6 +12,7 @@ vi.mock("./LinearLogo.js", () => ({
 }));
 
 import { AgentCard, humanizeSchedule, getWebhookUrl } from "./AgentCard.js";
+import { useStore } from "../store.js";
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -283,6 +284,34 @@ describe("AgentCard", () => {
         "heading-order": { enabled: false },
       },
     });
+    expect(results).toHaveNoViolations();
+  });
+
+  // ── Created by a session (companion MCP tools) ───────────────────────────
+
+  // Agents a session created say so and link to that session, by name when
+  // the session has one; user-created agents show nothing.
+  it("shows which session created the agent, linking to it", () => {
+    useStore.setState({ sessionNames: new Map([["sess-abcdef123", "Deploy watcher"]]) });
+    render(<AgentCard {...makeProps({ agent: makeAgent({ createdBy: "session:sess-abcdef123" }) })} />);
+    const link = screen.getByRole("link", { name: "Deploy watcher" });
+    expect(link).toHaveAttribute("href", "#/session/sess-abcdef123");
+    expect(screen.getByTestId("created-by-session")).toHaveTextContent("Created by session Deploy watcher");
+  });
+
+  it("falls back to a short session id and hides the line for user agents", () => {
+    useStore.setState({ sessionNames: new Map() });
+    const { rerender } = render(<AgentCard {...makeProps({ agent: makeAgent({ createdBy: "session:0123456789abcdef" }) })} />);
+    expect(screen.getByRole("link", { name: "01234567" })).toHaveAttribute("href", "#/session/0123456789abcdef");
+    rerender(<AgentCard {...makeProps({ agent: makeAgent({ createdBy: "user" }) })} />);
+    expect(screen.queryByTestId("created-by-session")).toBeNull();
+  });
+
+  it("passes axe accessibility checks for an agent created by a session", async () => {
+    const { axe } = await import("vitest-axe");
+    useStore.setState({ sessionNames: new Map([["s1", "Planner"]]) });
+    const { container } = render(<AgentCard {...makeProps({ agent: makeAgent({ createdBy: "session:s1" }) })} />);
+    const results = await axe(container, { rules: { "heading-order": { enabled: false } } });
     expect(results).toHaveNoViolations();
   });
 });
