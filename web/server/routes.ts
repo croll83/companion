@@ -1214,7 +1214,7 @@ export function createRoutes(
     return c.json(images);
   });
 
-  registerFsRoutes(api);
+  registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
   registerEnvRoutes(api, { webDir: WEB_DIR });
   registerSandboxRoutes(api);
 

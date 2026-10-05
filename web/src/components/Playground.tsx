@@ -17,7 +17,8 @@ import { HostsBridgeAlert } from "./HostsBridgeAlert.js";
 import { BunRuntimeAlert } from "./BunRuntimeAlert.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
-import { api } from "../api.js";
+import { MentionMenu } from "./MentionMenu.js";
+import { api, type SavedPrompt } from "../api.js";
 import type {
   PermissionRequest,
   ChatMessage,
@@ -57,6 +58,18 @@ const MOCK_SESSION_ID = "playground-session";
 // on the same origin as the app, so sharing the real key would let a click on a
 // sample's X permanently hide the real banner for that (outdated) Bun version.
 const PLAYGROUND_BUN_DISMISS_KEY = "companion_playground_bun_runtime_dismissed_version";
+
+/** Suggestions the "@ prompt insertion" Composer sample shows for "@rev". */
+const PLAYGROUND_MENTION_PROMPTS: SavedPrompt[] = [
+  {
+    id: "pg-review-pr",
+    name: "review-pr",
+    content: "Review this PR and list risks, regressions, and missing tests.",
+    scope: "project",
+    createdAt: 0,
+    updatedAt: 0,
+  },
+];
 
 function mockPermission(
   overrides: Partial<PermissionRequest> & {
@@ -2195,25 +2208,20 @@ export function Playground() {
             <Card label="@ prompt insertion">
               <div className="border-t border-cc-border bg-cc-card px-4 py-3">
                 <div className="relative bg-cc-input-bg/95 border border-cc-border rounded-[14px] shadow-[0_10px_30px_rgba(0,0,0,0.10)] overflow-visible">
-                  <div className="absolute left-2 right-2 bottom-full mb-1 max-h-[180px] overflow-y-auto bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-20 py-1">
-                    <div className="px-3 py-2 flex items-center gap-2.5 bg-cc-hover">
-                      <span className="flex items-center justify-center w-6 h-6 rounded-md bg-cc-hover text-cc-muted shrink-0">
-                        @
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[13px] font-medium text-cc-fg truncate">
-                          @review-pr
-                        </div>
-                        <div className="text-[11px] text-cc-muted truncate">
-                          Review this PR and list risks, regressions, and
-                          missing tests.
-                        </div>
-                      </div>
-                      <span className="text-[10px] text-cc-muted shrink-0">
-                        project
-                      </span>
-                    </div>
-                  </div>
+                  {/* Real MentionMenu: "@rev" suggests review-pr. Tab, a click,
+                      or arrows/hover + Enter insert it; Enter alone sends.
+                      No enterPrompt here, so the hint reads "Enter alone
+                      sends as typed" (an exact "@review-pr" would read
+                      "Enter inserts @review-pr"). */}
+                  <MentionMenu
+                    open
+                    loading={false}
+                    prompts={PLAYGROUND_MENTION_PROMPTS}
+                    selectedIndex={0}
+                    onSelect={() => {}}
+                    menuRef={{ current: null }}
+                    className="absolute left-2 right-2 bottom-full mb-1"
+                  />
                   <div className="flex items-end gap-2 px-2.5 py-2">
                     <textarea
                       readOnly

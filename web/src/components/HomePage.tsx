@@ -517,39 +517,8 @@ export function HomePage() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    // @ mention menu navigation
-    if (mention.mentionMenuOpen) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        mention.setMentionMenuOpen(false);
-        return;
-      }
-    }
-    if (mention.mentionMenuOpen && mention.filteredPrompts.length > 0) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        mention.setMentionMenuIndex((i) => (i + 1) % mention.filteredPrompts.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        mention.setMentionMenuIndex((i) => (i - 1 + mention.filteredPrompts.length) % mention.filteredPrompts.length);
-        return;
-      }
-      if ((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && !e.shiftKey)) {
-        e.preventDefault();
-        handleSelectPrompt(mention.filteredPrompts[mention.mentionMenuIndex]);
-        return;
-      }
-    }
-    if (
-      mention.mentionMenuOpen
-      && mention.filteredPrompts.length === 0
-      && ((e.key === "Enter" && !e.shiftKey) || (e.key === "Tab" && !e.shiftKey))
-    ) {
-      e.preventDefault();
-      return;
-    }
+    // @ prompt menu: same rules as the session Composer (see useMentionMenu).
+    if (mention.handleMentionKeyDown(e, handleSelectPrompt)) return;
 
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
@@ -872,6 +841,8 @@ export function HomePage() {
             prompts={mention.filteredPrompts}
             selectedIndex={mention.mentionMenuIndex}
             onSelect={handleSelectPrompt}
+            onHover={mention.hoverPrompt}
+            enterPrompt={mention.enterPrompt}
             menuRef={mention.mentionMenuRef}
             className="absolute left-2 right-2 bottom-full mb-1"
           />

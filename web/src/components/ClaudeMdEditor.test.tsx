@@ -596,4 +596,20 @@ describe("ClaudeMdEditor", () => {
     );
     expect(pathBarSpan).toBeTruthy();
   });
+
+  // ─── initialPath: the config panel opens the file the user clicked ─────────
+
+  it("selects the file matching initialPath instead of the first one", async () => {
+    render(<ClaudeMdEditor {...defaultProps} initialPath={`${CWD}/.claude/CLAUDE.md`} />);
+    await waitFor(() => {
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("# Inner file\nWorld");
+    });
+  });
+
+  it("falls back to the first file when initialPath is not among the files", async () => {
+    render(<ClaudeMdEditor {...defaultProps} initialPath="/elsewhere/CLAUDE.md" />);
+    await waitFor(() => {
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("# Root file\nHello");
+    });
+  });
 });

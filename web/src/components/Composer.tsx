@@ -201,40 +201,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
       }
     }
 
-    if (mention.mentionMenuOpen) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        mention.setMentionMenuOpen(false);
-        return;
-      }
-    }
-
-    if (mention.mentionMenuOpen && mention.filteredPrompts.length > 0) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        mention.setMentionMenuIndex((i) => (i + 1) % mention.filteredPrompts.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        mention.setMentionMenuIndex((i) => (i - 1 + mention.filteredPrompts.length) % mention.filteredPrompts.length);
-        return;
-      }
-      if ((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && !e.shiftKey)) {
-        e.preventDefault();
-        selectPrompt(mention.filteredPrompts[mention.mentionMenuIndex]);
-        return;
-      }
-    }
-
-    if (
-      mention.mentionMenuOpen
-      && mention.filteredPrompts.length === 0
-      && ((e.key === "Enter" && !e.shiftKey) || (e.key === "Tab" && !e.shiftKey))
-    ) {
-      e.preventDefault();
-      return;
-    }
+    // @ prompt menu: Escape/arrows/Tab, and Enter only for an explicit pick
+    // (navigated or exact name). Anything else falls through, so a message
+    // ending in "@something" still sends.
+    if (mention.handleMentionKeyDown(e, selectPrompt)) return;
 
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
@@ -501,6 +471,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
             prompts={mention.filteredPrompts}
             selectedIndex={mention.mentionMenuIndex}
             onSelect={selectPrompt}
+            onHover={mention.hoverPrompt}
+            enterPrompt={mention.enterPrompt}
             menuRef={mention.mentionMenuRef}
             className="absolute left-2 right-2 bottom-full mb-1"
           />
@@ -619,9 +591,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
                 setSavePromptError(null);
                 setSavePromptOpen((v) => !v);
               }}
-              disabled={!isConnected || !text.trim()}
+              // Saving a prompt only needs text; it works with the CLI disconnected.
+              disabled={!text.trim()}
               className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
-                isConnected && text.trim()
+                text.trim()
                   ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
                   : "text-cc-muted opacity-30 cursor-not-allowed"
               }`}
@@ -661,14 +634,16 @@ export function Composer({ sessionId }: { sessionId: string }) {
               onKeyUp={syncCaret}
               onPaste={handlePaste}
               aria-label="Message input"
+              // Stays editable while the CLI is disconnected: drafting and
+              // "Save as prompt" need only text. Sending is still blocked
+              // (canSend / handleSend check isConnected).
               placeholder={!isConnected
-                ? "Waiting for CLI connection..."
+                ? "Waiting for CLI connection... (you can type, sending waits)"
                 : willSteer
                   ? "Add to what it's doing now... (/ + @)"
                   : "Type a message... (/ + @)"}
-              disabled={!isConnected}
               rows={1}
-              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
+              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted overflow-y-auto"
               style={{ minHeight: "36px", maxHeight: "200px" }}
             />
           </div>
@@ -731,9 +706,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
                 setSavePromptError(null);
                 setSavePromptOpen((v) => !v);
               }}
-              disabled={!isConnected || !text.trim()}
+              // Saving a prompt only needs text; it works with the CLI disconnected.
+              disabled={!text.trim()}
               className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
-                isConnected && text.trim()
+                text.trim()
                   ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
                   : "text-cc-muted opacity-30 cursor-not-allowed"
               }`}
