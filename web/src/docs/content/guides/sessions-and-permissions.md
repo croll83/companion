@@ -18,7 +18,7 @@ Click **New Session** on the home page. Configure:
 | **Model** (Claude Code) | Which Claude model to use |
 | **Branch** (optional) | Git branch to check out or create |
 | **Use worktree** (optional) | Create an isolated [git worktree](#/docs/guides/git-worktrees) |
-| **Environment** (optional) | Apply an [environment profile](#/docs/guides/docker-and-environments) |
+| **Environment** (optional) | Apply an [environment profile](#/docs/guides/environments) |
 | **Linear issue** (optional) | Link a [Linear issue](#/docs/guides/linear-integration) for context |
 
 Click **Start** to launch the session.
@@ -29,7 +29,6 @@ Click **Start** to launch the session.
 2. The CLI connects to the server over WebSocket
 3. The server bridges messages between the CLI and your browser
 4. If a branch is selected, the server checks it out (or creates a worktree)
-5. If a Docker environment is configured, the session runs inside a container
 
 ### Backend differences
 
@@ -93,10 +92,7 @@ Remove sessions from the sidebar by archiving them. This:
 
 - Stops the CLI subprocess
 - Removes the session file from disk
-- If a Docker container is running, removes the container and its volume
 - If a [Linear issue](#/docs/guides/linear-integration) is linked, prompts you to choose what happens to the issue status
-
-> **Warning:** Archiving a Docker session removes the container and all uncommitted changes inside it. Make sure you've committed or pushed any work before archiving.
 
 ## Permissions
 
@@ -165,4 +161,3 @@ This means you can restart The Companion without losing your work. The agent pic
 
 - If both the server and CLI crash simultaneously, the last few messages may not be persisted (due to write debouncing)
 - Runtime state in the CLI process is lost on restart, though conversation history is preserved
-- Docker sessions: the container persists across server restarts, but the CLI inside it is relaunched

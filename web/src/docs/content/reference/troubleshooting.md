@@ -59,25 +59,6 @@ COMPANION_AUTH_TOKEN="my-token" the-companion
 
 Check server logs: `the-companion logs`
 
-## Docker not detected
-
-**Symptom**: Environments page shows amber "No Docker" badge. Docker sessions fail to create.
-
-**Fix**:
-- Ensure Docker is installed and the daemon is running: `docker ps`
-- On Linux, make sure your user is in the `docker` group: `sudo usermod -aG docker $USER`
-- On macOS, ensure Docker Desktop is running
-
-## Docker image pull fails
-
-**Symptom**: Image pull shows error state in the Environments Docker tab.
-
-**Fix**:
-- Check your internet connection
-- Verify the image name is correct
-- Try pulling manually: `docker pull the-companion:latest`
-- Check Docker Hub rate limits if pulling many images
-
 ## Worktree conflicts
 
 **Symptom**: Error creating a worktree for a branch.

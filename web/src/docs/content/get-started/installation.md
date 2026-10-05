@@ -81,8 +81,6 @@ Every push to `main` publishes preview artifacts:
 
 | Artifact | Tag | Example |
 |---|---|---|
-| Docker image (moving) | `preview-main` | `docker.io/croll83/the-companion:preview-main` |
-| Docker image (immutable) | `preview-<sha>` | `docker.io/croll83/the-companion:preview-abc1234` |
 | npm package | `next` | `bunx the-companion@next` |
 
 In **Settings > Updates**, switch to **Prerelease** channel to receive preview builds.
@@ -105,7 +103,7 @@ Click **New Session** on the home page. Choose:
 - **Working directory**: The project folder the agent will operate in
 - **Model** (Claude Code): Which Claude model to use
 - **Branch** (optional): Select or create a git branch
-- **Environment** (optional): Apply an [environment profile](#/docs/guides/docker-and-environments)
+- **Environment** (optional): Apply an [environment profile](#/docs/guides/environments)
 
 Click **Start** to launch the session.
 
@@ -131,5 +129,5 @@ See [Permissions](#/docs/guides/sessions-and-permissions) for more control optio
 
 - [Create saved prompts](#/docs/guides/saved-prompts) for reusable instructions
 - [Build agents](#/docs/guides/agents) for automated workflows
-- [Set up Docker environments](#/docs/guides/docker-and-environments) for isolated sessions
+- [Set up environment profiles](#/docs/guides/environments) to inject variables into sessions
 - [Connect Linear](#/docs/guides/linear-integration) for issue-driven development

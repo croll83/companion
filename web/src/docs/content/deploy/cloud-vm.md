@@ -13,10 +13,7 @@ The Companion runs locally by default, but you can deploy it on a remote server 
 |---|---|
 | Solo developer, single machine | [Local install](#/docs/get-started/installation) with `bunx the-companion` |
 | Always-on server in the cloud | Cloud VM with Tailscale (this guide) |
-| Isolated per-project environments | [Docker sessions](#/docs/guides/docker-and-environments) on any host |
 | Team sharing a single instance | Remote deploy with Tailscale ACLs for access control |
-
-> **Tip:** You can combine approaches — for example, deploy on a GCP VM and use Docker sessions within it for per-project isolation.
 
 ## Architecture
 
