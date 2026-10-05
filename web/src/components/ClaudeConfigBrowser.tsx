@@ -1,91 +1,245 @@
 import { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useStore } from "../store.js";
-import { api, type ClaudeConfigResponse } from "../api.js";
+import { api, type ClaudeConfigResponse, type NewConfigFileType } from "../api.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
+import { ConfigFileEditor } from "./ConfigFileEditor.js";
+
+/**
+ * Project / User config panel at the top of the session TaskPanel.
+ *
+ * Claude Code sessions list CLAUDE.md / CLAUDE.local.md (from the session cwd
+ * up to the repo root), settings*.json, .mcp.json, commands, agents and skills.
+ * Codex sessions list only what Codex reads: AGENTS.md (walk-up), ~/.codex/
+ * AGENTS.md and ~/.codex/config.toml; the Claude-only entries are hidden.
+ *
+ * Project CLAUDE.md files open the multi-file ClaudeMdEditor; everything else
+ * opens ConfigFileEditor, which goes through the session-scoped config routes.
+ */
+
+type Scope = "project" | "user";
 
 interface ConfigItem {
+  key: string;
   label: string;
   path: string;
-  kind: "claude-md" | "md" | "json";
-  /** Override cwd for ClaudeMdEditor (e.g. ~/.claude for user-level CLAUDE.md) */
-  editorCwd?: string;
+  sublabel?: string;
+  title?: string;
+  /** "claude-md" = project CLAUDE.md, opened in the multi-file ClaudeMdEditor */
+  editor: "claude-md" | "file";
+  description?: string;
+}
+
+interface ConfigGroup {
+  title?: string;
+  items: ConfigItem[];
+}
+
+interface NewOption {
+  type: NewConfigFileType;
+  label: string;
+  /** Asks for a name (commands, agents, skills) */
+  named?: boolean;
+}
+
+const basename = (p: string) => p.split("/").pop() || p;
+
+function relTo(root: string, p: string): string {
+  return p.startsWith(root + "/") ? p.slice(root.length + 1) : p;
+}
+
+const fileItem = (label: string, path: string, extra: Partial<ConfigItem> = {}): ConfigItem => ({
+  key: path,
+  label,
+  path,
+  editor: "file",
+  ...extra,
+});
+
+const namedGroup = (
+  title: string,
+  entries: { name: string; path: string }[],
+  prefix = "",
+): ConfigGroup => ({
+  title,
+  items: entries.map((e) => fileItem(`${prefix}${e.name}`, e.path)),
+});
+
+function skillGroup(skills: ClaudeConfigResponse["user"]["skills"]): ConfigGroup {
+  return {
+    title: "Skills",
+    items: skills.map((s) => fileItem(s.name, s.path, {
+      sublabel: s.source === "synced" ? "synced" : s.description ? s.description.slice(0, 40) : undefined,
+      title: s.source === "synced"
+        ? "Synced from claude.ai (read-only)"
+        : s.source === "link" ? `Symlinked skill: ${s.description}` : s.description || undefined,
+    })),
+  };
+}
+
+function buildGroups(config: ClaudeConfigResponse, isCodex: boolean): Record<Scope, ConfigGroup[]> {
+  const { project, user } = config;
+  const root = project.root;
+  if (isCodex) {
+    return {
+      project: [{ items: project.agentsMd.map((f) => fileItem(relTo(root, f.path), f.path, { description: "Project instructions for Codex" })) }],
+      user: [{
+        items: [
+          ...(user.codex.agentsMd ? [fileItem("AGENTS.md", user.codex.agentsMd.path, {
+            sublabel: "all sessions",
+            title: "Companion links ~/.codex/AGENTS.md into every Codex session's CODEX_HOME",
+            description: "User instructions for Codex (linked into every session)",
+          })] : []),
+          ...(user.codex.config ? [fileItem("config.toml", user.codex.config.path, {
+            sublabel: user.codex.config.editable ? undefined : "read-only",
+          })] : []),
+        ],
+      }],
+    };
+  }
+  const single = (label: string, f: { path: string } | null) => (f ? [fileItem(label, f.path)] : []);
+  return {
+    project: [
+      {
+        items: [
+          ...project.claudeMd.map((f) => ({
+            ...fileItem(relTo(root, f.path), f.path),
+            editor: "claude-md" as const,
+          })),
+          ...project.claudeLocalMd.map((f) => fileItem(relTo(root, f.path), f.path, {
+            description: "Personal project instructions (not committed)",
+          })),
+          ...single("settings.json", project.settings),
+          ...single("settings.local.json", project.settingsLocal),
+          ...single(".mcp.json", project.mcpJson),
+        ],
+      },
+      namedGroup("Commands", project.commands, "/"),
+      namedGroup("Agents", project.agents),
+      skillGroup(project.skills),
+    ],
+    user: [
+      {
+        items: [
+          ...(user.claudeMd ? [fileItem("CLAUDE.md", user.claudeMd.path, {
+            description: "User instructions for Claude Code (all projects)",
+          })] : []),
+          ...single("settings.json", user.settings),
+          ...single("settings.local.json", user.settingsLocal),
+        ],
+      },
+      skillGroup(user.skills),
+      namedGroup("Agents", user.agents),
+      namedGroup("Commands", user.commands, "/"),
+    ],
+  };
+}
+
+function newOptions(config: ClaudeConfigResponse, scope: Scope, isCodex: boolean): NewOption[] {
+  const { project, user } = config;
+  const opts: NewOption[] = [];
+  const add = (cond: boolean, type: NewConfigFileType, label: string) => {
+    if (cond) opts.push({ type, label });
+  };
+  if (isCodex) {
+    if (scope === "project") add(!project.agentsMd.some((f) => f.path === `${project.root}/AGENTS.md`), "agents-md", "AGENTS.md");
+    else add(!user.codex.agentsMd, "agents-md", "AGENTS.md");
+    return opts;
+  }
+  if (scope === "project") {
+    add(!project.claudeMd.some((f) => f.path === `${project.root}/CLAUDE.md`), "claude-md", "CLAUDE.md");
+    add(!project.claudeLocalMd.some((f) => f.path === `${project.root}/CLAUDE.local.md`), "claude-local-md", "CLAUDE.local.md");
+    add(!project.settings, "settings", "settings.json");
+    add(!project.settingsLocal, "settings-local", "settings.local.json");
+    add(!project.mcpJson, "mcp-json", ".mcp.json");
+  } else {
+    add(!user.claudeMd, "claude-md", "CLAUDE.md");
+    add(!user.settings, "settings", "settings.json");
+    add(!user.settingsLocal, "settings-local", "settings.local.json");
+  }
+  opts.push(
+    { type: "command", label: "Command…", named: true },
+    { type: "agent", label: "Agent…", named: true },
+    { type: "skill", label: "Skill…", named: true },
+  );
+  return opts;
 }
 
 // ─── Collapsible section header ──────────────────────────────────────────────
+
+const ICON_PATHS: Record<Scope, string> = {
+  project: "M1.5 2A1.5 1.5 0 000 3.5v2A1.5 1.5 0 001.5 7h1v5.5A1.5 1.5 0 004 14h8a1.5 1.5 0 001.5-1.5V7h1A1.5 1.5 0 0016 5.5v-2A1.5 1.5 0 0014.5 2h-13zM4 7h8v5.5a.5.5 0 01-.5.5h-7a.5.5 0 01-.5-.5V7zm10-1H2V3.5a.5.5 0 01.5-.5h11a.5.5 0 01.5.5V6z",
+  user: "M8.354 1.146a.5.5 0 00-.708 0l-6 6A.5.5 0 002 7.5V14a1 1 0 001 1h3.5a.5.5 0 00.5-.5V11a.5.5 0 01.5-.5h1a.5.5 0 01.5.5v3.5a.5.5 0 00.5.5H13a1 1 0 001-1V7.5a.5.5 0 00-.146-.354l-6-6z",
+};
 
 function SectionHeader({
   icon,
   title,
   expanded,
   onToggle,
+  onNew,
+  newOpen,
 }: {
-  icon: "project" | "user";
+  icon: Scope;
   title: string;
   expanded: boolean;
   onToggle: () => void;
+  onNew: () => void;
+  newOpen: boolean;
 }) {
   return (
-    <button
-      onClick={onToggle}
-      className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-cc-hover/50 transition-colors cursor-pointer"
-      aria-expanded={expanded}
-    >
-      {/* Chevron */}
-      <svg
-        viewBox="0 0 16 16"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        className={`w-3 h-3 text-cc-muted shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+    <div className="flex items-center hover:bg-cc-hover/50 transition-colors">
+      <button
+        onClick={onToggle}
+        className="flex-1 min-w-0 flex items-center gap-2 pl-4 pr-1 py-2 text-left cursor-pointer"
+        aria-expanded={expanded}
       >
-        <path d="M6 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      {/* Icon */}
-      <div className="w-4 h-4 flex items-center justify-center shrink-0">
-        {icon === "project" ? (
-          <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary">
-            <path d="M1.5 2A1.5 1.5 0 000 3.5v2A1.5 1.5 0 001.5 7h1v5.5A1.5 1.5 0 004 14h8a1.5 1.5 0 001.5-1.5V7h1A1.5 1.5 0 0016 5.5v-2A1.5 1.5 0 0014.5 2h-13zM4 7h8v5.5a.5.5 0 01-.5.5h-7a.5.5 0 01-.5-.5V7zm10-1H2V3.5a.5.5 0 01.5-.5h11a.5.5 0 01.5.5V6z" />
+        <svg
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          aria-hidden="true"
+          className={`w-3 h-3 text-cc-muted shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+        >
+          <path d="M6 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <div className="w-4 h-4 flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary" aria-hidden="true">
+            <path d={ICON_PATHS[icon]} />
           </svg>
-        ) : (
-          <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary">
-            <path d="M8.354 1.146a.5.5 0 00-.708 0l-6 6A.5.5 0 002 7.5V14a1 1 0 001 1h3.5a.5.5 0 00.5-.5V11a.5.5 0 01.5-.5h1a.5.5 0 01.5.5v3.5a.5.5 0 00.5.5H13a1 1 0 001-1V7.5a.5.5 0 00-.146-.354l-6-6z" />
-          </svg>
-        )}
-      </div>
-      <span className="text-[11px] font-semibold text-cc-muted uppercase tracking-wider flex-1">
-        {title}
-      </span>
-    </button>
+        </div>
+        <span className="text-[11px] font-semibold text-cc-muted uppercase tracking-wider flex-1">
+          {title}
+        </span>
+      </button>
+      <button
+        onClick={onNew}
+        aria-label={`New ${icon} config file`}
+        aria-expanded={newOpen}
+        title="New…"
+        className="mr-3 w-5 h-5 flex items-center justify-center rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+      >
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3" aria-hidden="true">
+          <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+        </svg>
+      </button>
+    </div>
   );
 }
 
 // ─── Individual config item row ──────────────────────────────────────────────
 
-function ConfigItemRow({
-  label,
-  sublabel,
-  count,
-  onClick,
-}: {
-  label: string;
-  sublabel?: string;
-  count?: number;
-  onClick: () => void;
-}) {
+function ConfigItemRow({ item, onClick }: { item: ConfigItem; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
+      title={item.title}
       className="w-full flex items-center gap-2 px-4 pl-10 py-1.5 text-left hover:bg-cc-hover/50 transition-colors cursor-pointer"
     >
-      <span className="text-[12px] text-cc-fg truncate flex-1">
-        {label}
-        {count !== undefined && count > 0 && (
-          <span className="ml-1 text-[10px] text-cc-muted">({count})</span>
-        )}
-      </span>
-      {sublabel && (
-        <span className="text-[10px] text-cc-muted shrink-0">{sublabel}</span>
+      <span className="text-[12px] text-cc-fg truncate flex-1">{item.label}</span>
+      {item.sublabel && (
+        <span className="text-[10px] text-cc-muted shrink-0 max-w-[45%] truncate">{item.sublabel}</span>
       )}
       <svg
         viewBox="0 0 16 16"
@@ -93,6 +247,7 @@ function ConfigItemRow({
         stroke="currentColor"
         strokeWidth="1.5"
         className="w-3 h-3 text-cc-muted shrink-0"
+        aria-hidden="true"
       >
         <path d="M6 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
@@ -100,220 +255,91 @@ function ConfigItemRow({
   );
 }
 
-// ─── JSON Viewer Modal ───────────────────────────────────────────────────────
+// ─── "New…" menu ─────────────────────────────────────────────────────────────
 
-function JsonViewer({
-  path,
-  content,
-  onClose,
+function NewFileMenu({
+  scope,
+  options,
+  onCreate,
+  onCancel,
 }: {
-  path: string;
-  content: string;
-  onClose: () => void;
+  scope: Scope;
+  options: NewOption[];
+  onCreate: (type: NewConfigFileType, name?: string) => Promise<void>;
+  onCancel: () => void;
 }) {
-  let formatted: string;
-  try {
-    formatted = JSON.stringify(JSON.parse(content), null, 2);
-  } catch {
-    formatted = content;
-  }
-
-  return (
-    <>
-      <div className="fixed inset-0 bg-black/40 z-50" onClick={onClose} />
-      <div className="fixed inset-4 sm:inset-8 md:inset-x-[10%] md:inset-y-[5%] z-50 flex flex-col bg-cc-bg border border-cc-border rounded-2xl shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="shrink-0 flex items-center justify-between px-4 sm:px-5 py-3 bg-cc-card border-b border-cc-border">
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-cc-primary/10 flex items-center justify-center">
-              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary">
-                <path d="M2 4a2 2 0 012-2h3.17a2 2 0 011.415.586l.828.828A2 2 0 0010.83 4H12a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V4z" />
-              </svg>
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-cc-fg truncate">{path.split("/").pop()}</h2>
-              <p className="text-[11px] text-cc-muted truncate">{path}</p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-            aria-label="Close"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
-              <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-            </svg>
-          </button>
-        </div>
-        {/* Content */}
-        <div className="flex-1 overflow-auto p-4">
-          <pre className="text-[13px] font-mono-code text-cc-fg leading-relaxed whitespace-pre-wrap break-words">
-            {formatted}
-          </pre>
-        </div>
-        <div className="shrink-0 px-4 py-2 bg-cc-card border-t border-cc-border">
-          <span className="text-[10px] text-cc-muted">Read-only</span>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ─── Generic Markdown File Editor ────────────────────────────────────────────
-
-function MarkdownFileEditor({
-  path,
-  label,
-  onClose,
-}: {
-  path: string;
-  label: string;
-  onClose: () => void;
-}) {
-  const [content, setContent] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [named, setNamed] = useState<NewOption | null>(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    api.readFile(path).then((res) => {
-      setContent(res.content);
-      setLoading(false);
-    }).catch((e) => {
-      setError(e instanceof Error ? e.message : "Failed to read file");
-      setLoading(false);
-    });
-  }, [path]);
-
-  const handleSave = async () => {
-    setSaving(true);
+  const run = async (type: NewConfigFileType, n?: string) => {
+    setBusy(true);
     setError(null);
     try {
-      await api.writeFile(path, content);
-      setDirty(false);
+      await onCreate(type, n);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to save");
+      setError(e instanceof Error ? e.message : "Failed to create file");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
 
-  const handleClose = () => {
-    if (dirty && !confirm("Discard unsaved changes?")) return;
-    onClose();
-  };
+  const kind = named?.label.replace("…", "").toLowerCase();
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/40 z-50" onClick={handleClose} />
-      <div className="fixed inset-4 sm:inset-8 md:inset-x-[10%] md:inset-y-[5%] z-50 flex flex-col bg-cc-bg border border-cc-border rounded-2xl shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="shrink-0 flex items-center justify-between px-4 sm:px-5 py-3 bg-cc-card border-b border-cc-border">
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-cc-primary/10 flex items-center justify-center">
-              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary">
-                <path d="M4 1.5a.5.5 0 01.5-.5h7a.5.5 0 01.354.146l2 2A.5.5 0 0114 3.5v11a.5.5 0 01-.5.5h-11a.5.5 0 01-.5-.5v-13zm1 .5v12h8V4h-1.5a.5.5 0 01-.5-.5V2H5zm6 0v1h1l-1-1z" />
-              </svg>
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-cc-fg truncate">{label}</h2>
-              <p className="text-[11px] text-cc-muted truncate">{path}</p>
-            </div>
-          </div>
+    <div className="px-4 pl-10 py-1.5 space-y-1.5" data-testid={`new-${scope}-menu`}>
+      {named ? (
+        <form
+          className="flex items-center gap-1.5"
+          onSubmit={(e) => { e.preventDefault(); if (name.trim()) void run(named.type, name.trim()); }}
+        >
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            aria-label={`New ${scope} ${kind} name`}
+            placeholder={`${kind} name`}
+            className="flex-1 min-w-0 px-2 py-1 text-[11px] bg-cc-bg border border-cc-border rounded text-cc-fg focus:outline-none focus:border-cc-primary"
+          />
           <button
-            onClick={handleClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-            aria-label="Close"
+            type="submit"
+            disabled={busy || !name.trim()}
+            className="px-2 py-1 text-[11px] rounded bg-cc-primary text-white disabled:opacity-50 cursor-pointer"
           >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
-              <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-            </svg>
+            Create
+          </button>
+          <button
+            type="button"
+            onClick={() => { setNamed(null); setName(""); setError(null); }}
+            className="px-2 py-1 text-[11px] rounded text-cc-muted hover:bg-cc-hover cursor-pointer"
+          >
+            Back
+          </button>
+        </form>
+      ) : (
+        <div className="flex flex-wrap gap-1">
+          {options.map((o) => (
+            <button
+              key={o.type}
+              disabled={busy}
+              onClick={() => (o.named ? setNamed(o) : void run(o.type))}
+              className="px-2 py-0.5 text-[11px] font-mono-code rounded border border-cc-border text-cc-fg/80 hover:bg-cc-hover cursor-pointer disabled:opacity-50"
+            >
+              {o.label}
+            </button>
+          ))}
+          <button
+            onClick={onCancel}
+            className="px-2 py-0.5 text-[11px] rounded text-cc-muted hover:bg-cc-hover cursor-pointer"
+          >
+            Cancel
           </button>
         </div>
-
-        {loading ? (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="w-5 h-5 border-2 border-cc-primary border-t-transparent rounded-full animate-spin" />
-          </div>
-        ) : (
-          <>
-            {/* Save bar */}
-            <div className="shrink-0 flex items-center justify-between px-4 py-2 bg-cc-card border-b border-cc-border">
-              <span className="text-[12px] text-cc-muted font-mono-code truncate">{path.split("/").pop()}</span>
-              <div className="flex items-center gap-2">
-                {dirty && <span className="text-[10px] text-cc-warning font-medium">Unsaved</span>}
-                <button
-                  onClick={handleSave}
-                  disabled={!dirty || saving}
-                  className={`px-3 py-1 text-[11px] font-medium rounded-md transition-colors cursor-pointer ${
-                    dirty && !saving
-                      ? "bg-cc-primary text-white hover:bg-cc-primary/90"
-                      : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                  }`}
-                >
-                  {saving ? "Saving..." : "Save"}
-                </button>
-              </div>
-            </div>
-
-            {/* Textarea */}
-            <textarea
-              value={content}
-              onChange={(e) => { setContent(e.target.value); setDirty(true); }}
-              spellCheck={false}
-              className="flex-1 w-full p-4 bg-cc-bg text-cc-fg text-[13px] font-mono-code leading-relaxed resize-none focus:outline-none"
-              placeholder="File contents..."
-            />
-          </>
-        )}
-
-        {error && (
-          <div className="shrink-0 px-4 py-2 bg-cc-error/10 border-t border-cc-error/20 text-xs text-cc-error">
-            {error}
-          </div>
-        )}
-      </div>
-    </>
+      )}
+      {error && <p role="alert" className="text-[11px] text-cc-error">{error}</p>}
+    </div>
   );
-}
-
-// ─── File Editor Portal ─────────────────────────────────────────────────────
-
-function FileEditorPortal({
-  item,
-  cwd,
-  onClose,
-}: {
-  item: ConfigItem;
-  cwd: string;
-  onClose: () => void;
-}) {
-  if (item.kind === "json") {
-    const [content, setContent] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-      api.readFile(item.path).then((res) => {
-        setContent(res.content);
-        setLoading(false);
-      }).catch(() => {
-        setContent("Failed to read file");
-        setLoading(false);
-      });
-    }, [item.path]);
-
-    if (loading) return null;
-    return <JsonViewer path={item.path} content={content || ""} onClose={onClose} />;
-  }
-
-  // CLAUDE.md files use the specialized ClaudeMdEditor (multi-file, walk-up)
-  if (item.kind === "claude-md") {
-    return <ClaudeMdEditor cwd={item.editorCwd || cwd} open onClose={onClose} />;
-  }
-
-  // All other .md files (skills, agents, commands) use the generic editor
-  return <MarkdownFileEditor path={item.path} label={item.label} onClose={onClose} />;
 }
 
 // ─── Main component ──────────────────────────────────────────────────────────
@@ -321,25 +347,27 @@ function FileEditorPortal({
 export function ClaudeConfigBrowser({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions.get(sessionId));
   const sdk = useStore((s) => s.sdkSessions.find((x) => x.sessionId === sessionId));
-  const cwd = session?.repo_root || session?.cwd || sdk?.cwd;
+  // The session cwd, not repo_root: the server walks from here up to the repo
+  // root, so CLAUDE.md files in sub-directories are listed too.
+  const cwd = session?.cwd || sdk?.cwd || session?.repo_root;
+  const isCodex = (session?.backend_type || sdk?.backendType) === "codex";
 
   const [config, setConfig] = useState<ClaudeConfigResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [projectExpanded, setProjectExpanded] = useState(false);
-  const [userExpanded, setUserExpanded] = useState(false);
+  const [expanded, setExpanded] = useState<Record<Scope, boolean>>({ project: false, user: false });
+  const [newMenu, setNewMenu] = useState<Scope | null>(null);
   const [activeItem, setActiveItem] = useState<ConfigItem | null>(null);
 
   const fetchConfig = useCallback(async () => {
     if (!cwd) return;
     try {
-      const data = await api.getClaudeConfig(cwd);
-      setConfig(data);
+      setConfig(await api.getClaudeConfig(cwd, sessionId));
     } catch {
       // silent
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, sessionId]);
 
   useEffect(() => {
     fetchConfig();
@@ -357,146 +385,84 @@ export function ClaudeConfigBrowser({ sessionId }: { sessionId: string }) {
 
   if (!config) return null;
 
-  const projectItemCount =
-    config.project.claudeMd.length +
-    (config.project.settings ? 1 : 0) +
-    (config.project.settingsLocal ? 1 : 0) +
-    config.project.commands.length;
+  const groups = buildGroups(config, isCodex);
+  const count = (scope: Scope) => groups[scope].reduce((n, g) => n + g.items.length, 0);
 
-  const userItemCount =
-    (config.user.claudeMd ? 1 : 0) +
-    config.user.skills.length +
-    config.user.agents.length +
-    (config.user.settings ? 1 : 0) +
-    config.user.commands.length;
+  const create = async (scope: Scope, type: NewConfigFileType, name?: string) => {
+    const res = await api.createConfigFile(sessionId, scope, type, name);
+    setNewMenu(null);
+    await fetchConfig();
+    const isProjectClaudeMd = scope === "project" && type === "claude-md";
+    setActiveItem(fileItem(name || basename(res.path), res.path, isProjectClaudeMd ? { editor: "claude-md" } : {}));
+  };
+
+  const renderSection = (scope: Scope, title: string, emptyText: string) => {
+    const n = count(scope);
+    const open = expanded[scope] || newMenu === scope;
+    return (
+      <>
+        <SectionHeader
+          icon={scope}
+          title={`${title} (${n})`}
+          expanded={open}
+          onToggle={() => {
+            setExpanded((e) => ({ ...e, [scope]: !open }));
+            if (open) setNewMenu(null);
+          }}
+          onNew={() => setNewMenu((m) => (m === scope ? null : scope))}
+          newOpen={newMenu === scope}
+        />
+        {open && (
+          <div className="pb-1">
+            {newMenu === scope && (
+              <NewFileMenu
+                scope={scope}
+                options={newOptions(config, scope, isCodex)}
+                onCreate={(type, name) => create(scope, type, name)}
+                onCancel={() => setNewMenu(null)}
+              />
+            )}
+            {groups[scope].map((g, gi) => g.items.length > 0 && (
+              <div key={g.title ?? gi}>
+                {g.title && (
+                  <div className="px-4 pl-10 py-1 text-[10px] text-cc-muted uppercase tracking-wider">
+                    {g.title} ({g.items.length})
+                  </div>
+                )}
+                {g.items.map((item) => (
+                  <ConfigItemRow key={item.key} item={item} onClick={() => setActiveItem(item)} />
+                ))}
+              </div>
+            ))}
+            {n === 0 && <p className="px-4 pl-10 py-1.5 text-[11px] text-cc-muted">{emptyText}</p>}
+          </div>
+        )}
+      </>
+    );
+  };
+
+  const closeEditor = () => {
+    setActiveItem(null);
+    void fetchConfig();
+  };
 
   return (
     <div className="shrink-0" data-testid="claude-config-browser">
-      {/* ── Project section ──────────────────────────────────────────── */}
-      <SectionHeader
-        icon="project"
-        title={`Project (${projectItemCount})`}
-        expanded={projectExpanded}
-        onToggle={() => setProjectExpanded((p) => !p)}
-      />
-      {projectExpanded && (
-        <div className="pb-1">
-          {config.project.claudeMd.map((f) => (
-            <ConfigItemRow
-              key={f.path}
-              label={f.path.includes(".claude/") ? ".claude/CLAUDE.md" : "CLAUDE.md"}
-              onClick={() => setActiveItem({ label: "CLAUDE.md", path: f.path, kind: "claude-md" })}
-            />
-          ))}
-          {config.project.settings && (
-            <ConfigItemRow
-              label="settings.json"
-              onClick={() => setActiveItem({ label: "settings.json", path: config.project.settings!.path, kind: "json" })}
-            />
-          )}
-          {config.project.settingsLocal && (
-            <ConfigItemRow
-              label="settings.local.json"
-              onClick={() => setActiveItem({ label: "settings.local.json", path: config.project.settingsLocal!.path, kind: "json" })}
-            />
-          )}
-          {config.project.commands.length > 0 && (
-            <>
-              <div className="px-4 pl-10 py-1 text-[10px] text-cc-muted uppercase tracking-wider">
-                Commands ({config.project.commands.length})
-              </div>
-              {config.project.commands.map((cmd) => (
-                <ConfigItemRow
-                  key={cmd.path}
-                  label={`/${cmd.name}`}
-                  onClick={() => setActiveItem({ label: cmd.name, path: cmd.path, kind: "md" })}
-                />
-              ))}
-            </>
-          )}
-          {projectItemCount === 0 && (
-            <p className="px-4 pl-10 py-1.5 text-[11px] text-cc-muted">No .claude config found</p>
-          )}
-        </div>
-      )}
+      {renderSection("project", "Project", isCodex ? "No AGENTS.md found" : "No .claude config found")}
+      {renderSection("user", "User", isCodex ? "No ~/.codex config found" : "No user config found")}
 
-      {/* ── User section ─────────────────────────────────────────────── */}
-      <SectionHeader
-        icon="user"
-        title={`User (${userItemCount})`}
-        expanded={userExpanded}
-        onToggle={() => setUserExpanded((p) => !p)}
-      />
-      {userExpanded && (
-        <div className="pb-1">
-          {config.user.claudeMd && (
-            <ConfigItemRow
-              label="CLAUDE.md"
-              onClick={() => setActiveItem({ label: "CLAUDE.md", path: config.user.claudeMd!.path, kind: "claude-md", editorCwd: config.user.root })}
-            />
-          )}
-          {config.user.skills.length > 0 && (
-            <>
-              <div className="px-4 pl-10 py-1 text-[10px] text-cc-muted uppercase tracking-wider">
-                Skills ({config.user.skills.length})
-              </div>
-              {config.user.skills.map((skill) => (
-                <ConfigItemRow
-                  key={skill.path}
-                  label={skill.name}
-                  sublabel={skill.description ? skill.description.slice(0, 40) : undefined}
-                  onClick={() => setActiveItem({ label: skill.name, path: skill.path, kind: "md" })}
-                />
-              ))}
-            </>
-          )}
-          {config.user.agents.length > 0 && (
-            <>
-              <div className="px-4 pl-10 py-1 text-[10px] text-cc-muted uppercase tracking-wider">
-                Agents ({config.user.agents.length})
-              </div>
-              {config.user.agents.map((agent) => (
-                <ConfigItemRow
-                  key={agent.path}
-                  label={agent.name}
-                  onClick={() => setActiveItem({ label: agent.name, path: agent.path, kind: "md" })}
-                />
-              ))}
-            </>
-          )}
-          {config.user.settings && (
-            <ConfigItemRow
-              label="settings.json"
-              onClick={() => setActiveItem({ label: "settings.json", path: config.user.settings!.path, kind: "json" })}
-            />
-          )}
-          {config.user.commands.length > 0 && (
-            <>
-              <div className="px-4 pl-10 py-1 text-[10px] text-cc-muted uppercase tracking-wider">
-                Commands ({config.user.commands.length})
-              </div>
-              {config.user.commands.map((cmd) => (
-                <ConfigItemRow
-                  key={cmd.path}
-                  label={`/${cmd.name}`}
-                  onClick={() => setActiveItem({ label: cmd.name, path: cmd.path, kind: "md" })}
-                />
-              ))}
-            </>
-          )}
-          {userItemCount === 0 && (
-            <p className="px-4 pl-10 py-1.5 text-[11px] text-cc-muted">No user config found</p>
-          )}
-        </div>
-      )}
-
-      {/* ── File viewer portal ───────────────────────────────────────── */}
       {activeItem && createPortal(
-        <FileEditorPortal
-          item={activeItem}
-          cwd={cwd}
-          onClose={() => setActiveItem(null)}
-        />,
+        activeItem.editor === "claude-md" ? (
+          <ClaudeMdEditor cwd={config.project.cwd || cwd} initialPath={activeItem.path} open onClose={closeEditor} />
+        ) : (
+          <ConfigFileEditor
+            sessionId={sessionId}
+            path={activeItem.path}
+            label={activeItem.label}
+            description={activeItem.description}
+            onClose={closeEditor}
+          />
+        ),
         document.body,
       )}
     </div>

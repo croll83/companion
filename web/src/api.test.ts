@@ -1294,6 +1294,43 @@ describe("editor filesystem API", () => {
     expect(result).toEqual(data);
   });
 
+  // The session id lets the server anchor the listing on the launcher's cwd.
+  it("getClaudeConfig appends the session id when given", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({}));
+    await api.getClaudeConfig("/repo", "s 1");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toBe(`/api/fs/claude-config?cwd=${encodeURIComponent("/repo")}&sessionId=${encodeURIComponent("s 1")}`);
+  });
+
+  // Session-scoped config file routes used by ConfigFileEditor / the New menu.
+  it("readConfigFile sends GET with session id and path", async () => {
+    const data = { path: "/repo/.mcp.json", content: "{}", format: "json", readOnly: false };
+    mockFetch.mockResolvedValueOnce(mockResponse(data));
+    const result = await api.readConfigFile("s1", "/repo/.mcp.json");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toBe(`/api/fs/config-file?sessionId=s1&path=${encodeURIComponent("/repo/.mcp.json")}`);
+    expect(result).toEqual(data);
+  });
+
+  it("writeConfigFile sends PUT with session id, path and content", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, path: "/repo/.mcp.json" }));
+    await api.writeConfigFile("s1", "/repo/.mcp.json", "{}");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/fs/config-file");
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body)).toEqual({ sessionId: "s1", path: "/repo/.mcp.json", content: "{}" });
+  });
+
+  it("createConfigFile sends POST with scope, type and name", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, path: "/h/.claude/skills/x/SKILL.md" }));
+    const result = await api.createConfigFile("s1", "user", "skill", "x");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/fs/config-file");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ sessionId: "s1", scope: "user", type: "skill", name: "x" });
+    expect(result.path).toBe("/h/.claude/skills/x/SKILL.md");
+  });
+
   it("getFileBlob fetches raw file and creates object URL", async () => {
     const mockBlob = new Blob(["file content"], { type: "text/plain" });
     const mockObjectUrl = "blob:http://localhost/abc123";
