@@ -84,8 +84,11 @@ All endpoints require `Authorization: Bearer YOUR_TOKEN` header.
 | `DELETE` | `/api/agents/:slug` | Delete an agent |
 | `GET` | `/api/agents/:slug/export` | Export agent as JSON |
 | `POST` | `/api/agents/import` | Import an agent from JSON |
-| `GET` | `/api/agents/:slug/executions` | Get execution history |
-| `POST` | `/api/agents/:slug/webhook/:secret` | Trigger agent via webhook |
+| `POST` | `/api/agents/:slug/toggle` | Enable or disable an agent |
+| `POST` | `/api/agents/:slug/run` | Run now (`{"input": "..."}` optional; `409` while a run is in progress) |
+| `GET` | `/api/agents/:slug/executions` | Recent runs of an agent (since the server started) |
+| `GET` | `/api/executions` | All runs (`?agentId=`, `?triggerType=`, `?status=running\|success\|error`, `?limit=`, `?offset=`) |
+| `POST` | `/api/agents/:slug/webhook/:secret` | Trigger agent via webhook. Needs no token, but only answers loopback and Tailscale addresses (see [Agents](#/docs/guides/agents)) |
 
 ### Environments
 

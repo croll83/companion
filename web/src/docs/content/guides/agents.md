@@ -5,7 +5,9 @@ description: Build reusable agent configurations with custom prompts, triggers, 
 
 # Agents
 
-Agents are reusable configurations that spawn sessions with specific settings, prompts, and triggers. Navigate to **Agents** in the sidebar (or go to `#/agents`).
+Agents are reusable configurations that start sessions with specific settings, a prompt, and triggers. Navigate to **Agents** in the sidebar (or go to `#/agents`). Every run is listed on the **Runs** page (`#/runs`, also in the sidebar).
+
+Agents work with Claude Code and Codex. The few options that only one backend supports are marked below.
 
 ## Create an agent
 
@@ -15,113 +17,151 @@ Agents are reusable configurations that spawn sessions with specific settings, p
    - **Description**: What this agent does
    - **Icon**: Choose from 18 icons (bot, terminal, pencil, search, shield, rocket, wrench, etc.)
 
-3. Write the **system prompt**:
-   - This is the instruction the agent receives when it starts
-   - Use `{{input}}` as a placeholder for dynamic input provided at run time
+3. Write the **prompt**:
+   - This is the instruction the agent receives when a run starts
+   - Use `{{input}}` as a placeholder for input provided by the trigger
    - Example: `Review the following pull request and provide feedback: {{input}}`
+   - If the prompt has no `{{input}}` and a trigger provides input, the input is appended after the prompt in a delimited `<trigger_input>` block, so it is never dropped
 
 4. Configure the **controls row**:
    - **Backend**: Claude Code or Codex
-   - **Model**: Which model to use (e.g., Claude Sonnet 4, Claude Opus)
-   - **Permission mode**: Default, Accept Edits, or Bypass
-   - **Working directory**: The folder the agent operates in (or "temp" for auto-created)
-   - **Branch** (optional): Git branch to check out
-   - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/environments)
+   - **Model**: Which model to use
+   - **Permissions**: see **Permissions** below
+   - **Working directory**: The folder the agent works in. Without one, each run gets a fresh temporary directory
+   - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/environments) explicitly. Global and folder-matched profiles apply anyway
    - **Internet access** (Codex only): Toggle network access
 
-5. Click **Save**
+5. Click **Create**
+
+## Permissions
+
+Agent runs are unattended: nobody is there to answer an approval prompt.
+
+- **Claude Code** agents always run with full permissions (`bypassPermissions`). The editor shows this as a fixed **Full permissions** badge. To limit what an agent can do, use **Allowed tools** (see Advanced configuration).
+- **Codex** never asks for approvals in agent runs. The mode you pick selects the sandbox: **Full Auto** runs without a sandbox (`danger-full-access`), **Supervised** runs in the `workspace-write` sandbox.
+
+## Runs
+
+A **run** starts when a trigger fires. It is **complete when its session reports the first turn result**. The run then records:
+
+- when it finished, and so its duration
+- **success** or **error**: a run fails when that result is an error (for example `error_max_turns`), or when the CLI exits before producing one
+- the error message and the result subtype
+
+The session itself is kept after the run: open it from the Runs page to read the outcome or to continue the conversation.
+
+If the server restarts while a run is in progress, the run is closed as interrupted (a restart ends every CLI).
+
+**One run at a time.** While a run of an agent is in progress, new schedule, webhook, and **Run** triggers for that agent are refused. A webhook call gets `409`, a refused scheduled run is reported on the agent card, and **Run** shows the reason. To get unstuck from a run that never finishes, archive its session.
+
+**Failures.** After 5 failed runs in a row the agent is disabled. A successful run resets the count.
+
+**Temporary directories.** An agent without a working directory gets a new temporary directory per run. It is deleted once the run is complete and its session is archived or deleted. It is never deleted while a session still uses it. If you unarchive such a session, an empty directory is recreated so the session can start.
 
 ## Run an agent manually
 
-Click the **Run** button on an agent card. If the agent's prompt contains `{{input}}`, a modal appears asking for the input value. The agent creates a new session and starts executing.
+Click **Run** on an agent card. If the prompt contains `{{input}}`, a dialog asks for the input. Manual runs work even when the agent is disabled, but not while another run of it is in progress.
 
 ## Enable and disable
 
-Toggle agents on/off with the **switch** on each agent card. Disabled agents won't execute scheduled or webhook triggers, but can still be run manually.
+Toggle agents on/off from the agent card menu. Disabled agents don't run on schedule or webhook triggers, but can still be run manually.
 
 ## Agent cards
 
 Each agent card shows:
 - Name, description, and icon
-- Backend type and model
-- Trigger badges (Manual, Webhook, Schedule)
+- Backend type
+- Trigger badges (Manual, Webhook, Schedule, Linear Agent)
+- **Running** while a run is in progress (links to the Runs page)
+- A schedule problem, if any (a past one-time date, a skipped scheduled run)
 - Stats: total runs, last run time, next scheduled run
-- Action buttons: Run, Edit, Export, Toggle, Delete
 
 ## Triggers
 
-Agents can be triggered in three ways: manually, via webhook, or on a schedule.
-
 ### Manual trigger
 
-Always available. Click the **Run** button on the agent card. If the prompt uses `{{input}}`, a modal asks for the input value.
+Always available. Click **Run** on the agent card.
 
 ### Webhook trigger
 
-Expose your agent as an HTTP endpoint that external services can call.
+Lets a script or service on this machine or on your Tailscale network start the agent.
 
 **Setup:**
 1. Open the agent editor
 2. In the **Triggers** section, toggle **Webhook** on
-3. A unique URL and secret are generated automatically
-4. Copy the webhook URL
+3. A secret URL is generated when you save
+4. Copy the webhook URL from the agent card menu
 
 **Calling the webhook:**
 
 ```bash
-curl -X POST https://your-companion:3456/api/agents/pr-reviewer/webhook/YOUR_SECRET \
+curl -X POST http://your-companion:3456/api/agents/pr-reviewer/webhook/YOUR_SECRET \
   -H "Content-Type: application/json" \
   -d '{"input": "Review PR #42 on the main branch"}'
 ```
 
-The `input` field is optional. If provided, it replaces `{{input}}` in the agent's prompt.
+The body is either JSON with an optional `input` field or plain text (used as the input). The input is limited to 256 KB.
 
-Click **Regenerate Secret** in the agent editor to invalidate the old URL and generate a new one.
+**Security model:**
+- The secret in the URL is the only credential: no Companion token is needed.
+- Calls are accepted **only from this machine (loopback) or your Tailscale network** (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). Anything else gets `403`, even with the right secret. If a local proxy or tunnel forwards the request, the forwarded client address must also be in those ranges.
+- Each agent accepts at most 10 webhook calls per minute (`429` with `Retry-After` beyond that).
+- The call honours the agent's **enabled** switch and the one-run-at-a-time rule (`409` with the reason).
+- Regenerate the secret from the agent card menu to invalidate the old URL.
 
-**Use cases:**
-- Trigger a code review agent from a GitHub webhook on PR creation
-- Run a deployment agent from your CI/CD pipeline
-- Start a test runner from a Slack bot
+**Responses:** `200` run started, `401` wrong secret, `403` webhook disabled or caller not on loopback/tailnet, `404` unknown agent, `409` agent disabled or a run in progress, `413` body too large, `429` rate limited.
+
+Webhook runs appear on the Runs page with the trigger **Webhook**.
 
 ### Schedule trigger
 
-Run agents automatically on a recurring schedule or at a specific time.
+Run agents automatically on a recurring schedule or once at a specific time.
+
+Schedules run in the **time zone set in Settings**. If no time zone is set, they run in the server's local time zone. Changing the setting re-arms every schedule.
 
 **Recurring (cron):**
 
 1. In the agent editor, toggle **Schedule** on
-2. Choose a **preset** or enter a custom cron expression:
+2. Choose a **preset** or enter a cron expression with **5 fields**: minute, hour, day of month, month, day of week. Nicknames such as `@daily` and `@hourly` work too. A seconds field (6 or 7 fields) is rejected.
 
 | Preset | Cron expression |
 |---|---|
 | Every hour | `0 * * * *` |
 | Daily at 8am | `0 8 * * *` |
 | Weekdays at 9am | `0 9 * * 1-5` |
-| Weekly on Monday | `0 9 * * 1` |
+| Weekly on Monday | `0 8 * * 1` |
 
 3. The agent card shows the next scheduled run time
+
+An invalid expression is refused when you save, with the reason.
 
 **One-time (datetime):**
 
 1. Toggle **Schedule** on
 2. Switch to **One-time** mode
-3. Pick a date and time using the datetime picker
-4. The agent runs once at the specified time
+3. Pick a date and time
+4. The agent runs once at that time, then the schedule turns itself off
 
-### Execution history
+A date in the past is refused when you save. If the server was down when a one-time run was due, the run does not happen late: the agent card reports that it was missed.
 
-Each agent tracks:
-- **Total runs**: Number of times the agent has executed
-- **Last run**: Timestamp of the most recent execution
-- **Last session**: Link to the session created by the last run
-- **Consecutive failures**: Count resets on success
+A scheduled run that is refused (the agent has a run in progress) is reported on the agent card too.
 
-View execution history via the API:
+### Linear Agent trigger
+
+See [Linear integration](#/docs/guides/linear-integration).
+
+## Run history
+
+The **Runs** page lists every run with its agent, trigger, status (running, success, error), start time, duration and a link to the session. Filter by agent, trigger or status. Click a run for its details, including the error and the result subtype.
+
+The same data is available through the API:
 
 ```bash
-curl http://localhost:3456/api/agents/pr-reviewer/executions \
+curl "http://localhost:3456/api/executions?agentId=pr-reviewer&status=error" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
+
+Run records are stored as daily JSONL files in `~/.companion/executions/` (under `COMPANION_HOME` if set).
 
 ## Advanced configuration
 
@@ -138,61 +178,43 @@ Add [Model Context Protocol](https://modelcontextprotocol.io/) servers to give t
    - **Type**: `stdio` (command-line process), `sse` (server-sent events), or `http`
    - **Command + Args** (stdio): The command to run (e.g., `npx -y @modelcontextprotocol/server-github`)
    - **URL** (sse/http): The server URL
-   - **Environment variables** (optional): JSON key-value pairs passed to the server process
 
-**Example: GitHub MCP server**
+### Allowed tools (Claude Code only)
 
-```
-Name: github
-Type: stdio
-Command: npx
-Args: -y @modelcontextprotocol/server-github
-Env: {"GITHUB_TOKEN": "ghp_..."}
-```
+Limit the agent to a set of Claude Code's built-in tools. Type a tool name (for example `Read`, `Grep`, `Glob`, `Bash`, `Edit`, `Write`, `WebFetch`) and press Enter. The agent then has **only** those built-in tools: The Companion starts Claude Code with `--tools`. Leave the list empty to allow all tools.
 
-### Skills
-
-Toggle available skills from `~/.claude/skills/`. Skills are discovered at runtime and provide additional capabilities to the agent. Check the skills you want to enable for this agent.
-
-### Allowed tools
-
-Restrict which tools the agent can use by adding tool names to the allowlist. Type a tool name and press Enter. Leave empty to allow all tools.
-
-Common tool names: `Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `WebFetch`, `WebSearch`.
+- Only plain tool names are accepted. Permission patterns such as `Bash(git *)` are not supported.
+- MCP server tools are not affected by this list.
+- Codex has no per-tool restriction, so the option is hidden for Codex agents. Use the Codex sandbox mode instead.
 
 ### Per-agent environment variables
 
-Add key-value environment variables specific to this agent. These are merged with (and override) variables from the selected environment profile.
-
-### Git configuration
-
-| Option | Description |
-|---|---|
-| **Branch** | Git branch to check out when the session starts |
-| **Create branch** | If checked, creates the branch if it doesn't exist |
-| **Use worktree** | Creates an isolated [git worktree](#/docs/guides/git-worktrees) for the session |
+Add key-value environment variables specific to this agent. They override variables from environment profiles.
 
 ### Codex-specific
 
 | Option | Description |
 |---|---|
-| **Internet access** | Toggle network access for Codex sessions (off by default) |
+| **Internet access** | Toggle network access for Codex sessions |
+| **Permissions** | The sandbox mode (see **Permissions** above) |
 
 ## Import and export
 
 ### Export an agent
 
-1. On the **Agents** page, find the agent you want to export
-2. Click the **download icon** on the agent card
-3. A `.agent.json` file is downloaded to your machine
+1. On the **Agents** page, open the agent card menu
+2. Click **Export**
+3. A `.agent.json` file is downloaded
 
-The exported file contains the agent's full configuration. Tracking fields (ID, creation date, run count) are excluded so the agent starts fresh when imported.
+The exported file contains the agent's configuration. Tracking fields (ID, creation date, run count) and Linear credentials are excluded.
 
 ### Import an agent
 
 1. On the **Agents** page, click **Import**
 2. Select a `.agent.json` file
-3. The agent is created in a **disabled** state for safety — review its configuration before enabling it
+3. The agent is created **disabled** — review its configuration before enabling it
+
+Files exported by older versions may contain `skills`, `branch`, `createBranch` or `useWorktree`. These options were never applied to runs and have been removed; they are ignored on import.
 
 > **Warning:** Imported agents start disabled. Review the agent's prompt, environment variables, and permissions before enabling it, especially if the file came from an external source.
 
@@ -211,6 +233,10 @@ curl -X POST http://localhost:3456/api/agents/import \
   -d @pr-reviewer.agent.json
 ```
 
+## Scheduled Runs (removed)
+
+Older versions had a separate **Scheduled Runs** feature. It has been removed. On first start, existing scheduled jobs are converted once into agents with a schedule trigger.
+
 ## Storage
 
-Agents are stored as individual JSON files in `~/.companion/agents/`. The agent ID is a slug derived from the name (e.g., "PR Reviewer" becomes `pr-reviewer`).
+Agents are stored as individual JSON files in `~/.companion/agents/` (under `COMPANION_HOME` if set). The agent ID is a slug derived from the name (e.g., "PR Reviewer" becomes `pr-reviewer`).
