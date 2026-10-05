@@ -920,6 +920,36 @@ export class CliLauncher {
     }
 
     this.linkAuthJson(codexHome, legacyHome);
+    this.linkGlobalAgentsMd(codexHome, legacyHome);
+  }
+
+  /**
+   * Expose the user's global Codex instructions (~/.codex/AGENTS.md) to the
+   * session. Codex reads global instructions from $CODEX_HOME/AGENTS.md, and
+   * every Companion session gets its own CODEX_HOME, so without this link the
+   * global file never reaches Companion-hosted Codex sessions.
+   *
+   * A link (not a copy) keeps sessions in step with later edits. A real file
+   * already in the session home is the user's per-session override and is left
+   * alone; a link whose global source is gone is removed.
+   */
+  private linkGlobalAgentsMd(codexHome: string, legacyHome: string): void {
+    const src = join(legacyHome, "AGENTS.md");
+    const dest = join(codexHome, "AGENTS.md");
+    try {
+      let destStat: ReturnType<typeof lstatSync> | null = null;
+      try { destStat = lstatSync(dest); } catch { /* absent */ }
+      if (destStat && !destStat.isSymbolicLink()) return; // per-session override
+
+      const srcExists = existsSync(src);
+      if (destStat) {
+        if (srcExists && resolve(readlinkSync(dest)) === resolve(src)) return; // already correct
+        unlinkSync(dest);
+      }
+      if (srcExists) symlinkSync(src, dest);
+    } catch (e) {
+      console.warn(`[cli-launcher] Failed to link AGENTS.md to the global Codex home:`, e);
+    }
   }
 
   /**
