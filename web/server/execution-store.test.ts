@@ -327,6 +327,40 @@ describe("ExecutionStore", () => {
       }
     });
 
+    // Review finding: an isolated instance (own COMPANION_HOME) read the live
+    // service's ~/.companion/executions as "legacy", closed its open runs as
+    // interrupted and (via own()-less cleanup) removed their temp folders.
+    // Runs known only from the legacy dir are display-only: never finalized,
+    // never updated, not in own(). A run this store also wrote is its own.
+    it("never acts on runs known only from the legacy directory", () => {
+      const legacyDir = `${testDir}-legacy`;
+      mkdirSync(legacyDir, { recursive: true });
+      mkdirSync(testDir, { recursive: true });
+      const foreignRun = makeExecution({ sessionId: "live-sess-1", startedAt: 1000, tempCwd: "/tmp/companion-agent-victim" });
+      const migrated = makeExecution({ sessionId: "migrated", startedAt: 1000 });
+      const legacyContent = `${JSON.stringify(foreignRun)}\n${JSON.stringify(migrated)}\n`;
+      writeFileSync(join(legacyDir, "executions-2026-01-01.jsonl"), legacyContent);
+      writeFileSync(join(testDir, "executions-2026-01-01.jsonl"), `${JSON.stringify(migrated)}\n`);
+
+      try {
+        const store = new ExecutionStore(testDir, legacyDir);
+        // Shown in the history...
+        expect(store.list().executions.map((e) => e.sessionId).sort()).toEqual(["live-sess-1", "migrated"]);
+        // ...but only the store's own open run is closed.
+        expect(store.finalizeInterrupted("Interrupted")).toBe(1);
+        expect(store.own().map((e) => e.sessionId)).toEqual(["migrated"]);
+        store.update("live-sess-1", { completedAt: 5, success: false });
+        expect(store.list().executions.find((e) => e.sessionId === "live-sess-1")?.completedAt).toBeUndefined();
+        // Nothing about the foreign run is written anywhere.
+        expect(readFileSync(join(legacyDir, "executions-2026-01-01.jsonl"), "utf-8")).toBe(legacyContent);
+        expect(readFileSync(join(testDir, "executions-2026-01-01.jsonl"), "utf-8")).not.toContain("live-sess-1");
+        // A fresh load agrees.
+        expect(new ExecutionStore(testDir, legacyDir).own().map((e) => e.sessionId)).toEqual(["migrated"]);
+      } finally {
+        rmSync(legacyDir, { recursive: true, force: true });
+      }
+    });
+
     it("tolerates a missing legacy directory and never writes to it", () => {
       const legacyDir = `${testDir}-absent`;
       const store = new ExecutionStore(testDir, legacyDir);

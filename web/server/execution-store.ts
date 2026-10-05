@@ -31,6 +31,13 @@ export class ExecutionStore {
   private legacyDir: string | null;
   /** In-memory cache of recent executions for fast access */
   private recentCache: AgentExecution[] = [];
+  /**
+   * Runs known only from `legacyDir`. They may belong to ANOTHER instance
+   * still writing there (e.g. the live service, seen from a test instance
+   * with its own COMPANION_HOME): shown in the history, never acted on —
+   * not closed as interrupted, not updated, their temp folders not removed.
+   */
+  private foreign = new Set<string>();
   private static readonly MAX_CACHE_SIZE = 200;
 
   /**
@@ -53,7 +60,7 @@ export class ExecutionStore {
   finalizeInterrupted(reason: string): number {
     let closed = 0;
     for (const exec of this.recentCache) {
-      if (exec.completedAt) continue;
+      if (exec.completedAt || this.foreign.has(exec.sessionId)) continue;
       this.update(exec.sessionId, { completedAt: Date.now(), success: false, error: reason });
       closed++;
     }
@@ -63,6 +70,11 @@ export class ExecutionStore {
   /** Every cached execution (most recent first), without pagination. */
   all(): AgentExecution[] {
     return [...this.recentCache];
+  }
+
+  /** The cached executions this store owns (written to its own dir), most recent first. */
+  own(): AgentExecution[] {
+    return this.recentCache.filter((e) => !this.foreign.has(e.sessionId));
   }
 
   /** Append an execution record to the daily JSONL file and in-memory cache. */
@@ -90,6 +102,7 @@ export class ExecutionStore {
       console.warn(`[execution-store] update() called for unknown sessionId: ${sessionId} (not in cache)`);
       return;
     }
+    if (this.foreign.has(sessionId)) return; // read-only history of another location
     Object.assign(this.recentCache[idx], updates);
     // Re-append the updated record to disk for durability.
     // On next load, dedup by sessionId keeps the latest entry.
@@ -151,9 +164,10 @@ export class ExecutionStore {
         ...(this.legacyDir ? this.listDailyFiles(this.legacyDir) : []),
       ].sort((a, b) => b.name.localeCompare(a.name) || a.rank - b.rank); // Most recent day first
 
-      const allLoaded: AgentExecution[] = [];
+      const allLoaded: Array<{ exec: AgentExecution; legacy: boolean }> = [];
+      const ownIds = new Set<string>();
 
-      for (const { path: filepath } of files) {
+      for (const { path: filepath, rank } of files) {
         if (allLoaded.length >= ExecutionStore.MAX_CACHE_SIZE * 2) break;
 
         const content = readFileSync(filepath, "utf-8");
@@ -163,7 +177,8 @@ export class ExecutionStore {
         for (let i = lines.length - 1; i >= 0; i--) {
           try {
             const execution = JSON.parse(lines[i]) as AgentExecution;
-            allLoaded.push(execution);
+            allLoaded.push({ exec: execution, legacy: rank !== 0 });
+            if (rank === 0) ownIds.add(execution.sessionId);
           } catch {
             // Skip malformed lines
           }
@@ -173,9 +188,11 @@ export class ExecutionStore {
       // Dedup by sessionId: since we read most-recent-last first, the first
       // occurrence of a sessionId is the most up-to-date version.
       const seen = new Set<string>();
-      for (const exec of allLoaded) {
+      for (const { exec, legacy } of allLoaded) {
         if (seen.has(exec.sessionId)) continue;
         seen.add(exec.sessionId);
+        // Foreign only if this store never wrote a line for the run.
+        if (legacy && !ownIds.has(exec.sessionId)) this.foreign.add(exec.sessionId);
         this.recentCache.push(exec);
         if (this.recentCache.length >= ExecutionStore.MAX_CACHE_SIZE) break;
       }

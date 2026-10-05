@@ -12,6 +12,7 @@ import * as sessionNames from "./session-names.js";
 import { ExecutionStore } from "./execution-store.js";
 import { nextScheduledRun, scheduleTimeZone, scheduleTimeZoneLabel } from "./agent-schedule.js";
 import { resolveForkSource } from "./session-fork.js";
+import { isPathWithin } from "./path-scope.js";
 
 /** Max consecutive failures before auto-disabling an agent */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -168,7 +169,9 @@ export class AgentExecutor {
       console.log(`[agent-executor] Started ${started} scheduled agent(s)`);
     }
     // Temp dirs of runs whose sessions were archived/deleted while we were down.
-    for (const exec of this.executionStore.all()) this.cleanupTempCwd(exec);
+    // Only this instance's runs: history read from an older location may
+    // belong to another instance whose sessions are unknown here.
+    for (const exec of this.executionStore.own()) this.cleanupTempCwd(exec);
   }
 
   /** Re-arm every schedule, e.g. after the global timeZone setting changed. */
@@ -528,7 +531,7 @@ export class AgentExecutor {
   getRunResult(sessionId: string, maxChars: number): RunResult | null {
     const exec = this.activeRuns.get(sessionId)
       ?? [...this.executions.values()].flat().find((e) => e.sessionId === sessionId)
-      ?? this.executionStore.all().find((e) => e.sessionId === sessionId);
+      ?? this.executionStore.own().find((e) => e.sessionId === sessionId);
     if (!exec || !sessionId) return null;
     const text = exec.completedAt ? runAnswerText(this.wsBridge.getSession(sessionId)?.messageHistory ?? []) : null;
     const truncated = text !== null && text.length > maxChars;
@@ -590,7 +593,7 @@ export class AgentExecutor {
    * if its run is over (a still-running run cleans up when it finishes).
    */
   handleSessionClosed(sessionId: string): void {
-    for (const exec of this.executionStore.all()) {
+    for (const exec of this.executionStore.own()) {
       if (exec.sessionId === sessionId) this.cleanupTempCwd(exec);
     }
   }
@@ -665,7 +668,10 @@ export class AgentExecutor {
     if (!exec.completedAt || !isAgentTempDir(dir)) return;
     const own = exec.sessionId ? this.launcher.getSession(exec.sessionId) : undefined;
     if (own && !own.archived) return;
-    const inUse = this.launcher.listSessions().some((s) => !s.archived && resolve(s.cwd) === resolve(dir));
+    // Any live session in the dir or below it (e.g. a repo cloned there and
+    // opened as its own session) still uses it.
+    const inUse = this.launcher.listSessions().some((s) =>
+      !s.archived && [s.cwd, s.repoRoot].some((p) => !!p && isPathWithin(p, dir)));
     if (inUse || !existsSync(dir)) return;
     try {
       rmSync(dir, { recursive: true, force: true });

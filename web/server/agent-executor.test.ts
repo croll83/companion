@@ -48,6 +48,7 @@ const mockExecutionStoreInstance = vi.hoisted(() => ({
   list: vi.fn().mockReturnValue({ executions: [], total: 0 }),
   finalizeInterrupted: vi.fn().mockReturnValue(0),
   all: vi.fn().mockReturnValue([]),
+  own: vi.fn().mockReturnValue([]),
 }));
 
 // Use a proper class so `new ExecutionStore()` works correctly.
@@ -58,6 +59,7 @@ const MockExecutionStoreClass = vi.hoisted(() => {
     list = mockExecutionStoreInstance.list;
     finalizeInterrupted = mockExecutionStoreInstance.finalizeInterrupted;
     all = mockExecutionStoreInstance.all;
+    own = mockExecutionStoreInstance.own;
   };
 });
 
@@ -1517,7 +1519,7 @@ describe("AgentExecutor", () => {
       expect(existsSync(dir)).toBe(true);
 
       launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "exited", cwd: dir, createdAt: 1, archived: true });
-      mockExecutionStoreInstance.all.mockReturnValue(executor.getExecutions("temp-agent"));
+      mockExecutionStoreInstance.own.mockReturnValue(executor.getExecutions("temp-agent"));
       executor.handleSessionClosed("session-123");
 
       expect(existsSync(dir)).toBe(false);
@@ -1527,7 +1529,7 @@ describe("AgentExecutor", () => {
       useRealTempDir();
       await executor.executeAgent("temp-agent");
       launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "exited", cwd: dir, createdAt: 1, archived: true });
-      mockExecutionStoreInstance.all.mockReturnValue(executor.getExecutions("temp-agent"));
+      mockExecutionStoreInstance.own.mockReturnValue(executor.getExecutions("temp-agent"));
 
       executor.handleSessionClosed("session-123");
       expect(existsSync(dir)).toBe(true);
@@ -1550,6 +1552,37 @@ describe("AgentExecutor", () => {
       expect(existsSync(dir)).toBe(true);
     });
 
+    // Review finding: only an exact cwd match counted as "in use", so a live
+    // session opened in a subfolder (a repo the agent cloned there) lost its
+    // working tree when the run's session was archived. A session whose
+    // repoRoot is inside the dir counts too; a sibling with a common prefix
+    // does not.
+    it("keeps the dir when a live session works in a folder inside it", async () => {
+      useRealTempDir();
+      await executor.executeAgent("temp-agent");
+      launcher.getSession.mockReturnValue(undefined);
+      launcher.listSessions.mockReturnValue([
+        { sessionId: "nested", state: "connected", cwd: join(dir, "repo", "src"), createdAt: 1 },
+      ]);
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+      expect(existsSync(dir)).toBe(true);
+
+      launcher.listSessions.mockReturnValue([
+        { sessionId: "worktree", state: "connected", cwd: "/elsewhere", repoRoot: join(dir, "repo"), createdAt: 1 },
+      ]);
+      mockExecutionStoreInstance.own.mockReturnValue(executor.getExecutions("temp-agent"));
+      executor.handleSessionClosed("session-123");
+      expect(existsSync(dir)).toBe(true);
+
+      // Archived sessions and siblings that merely share the name prefix do not hold it.
+      launcher.listSessions.mockReturnValue([
+        { sessionId: "nested", state: "exited", cwd: join(dir, "repo"), createdAt: 1, archived: true },
+        { sessionId: "sibling", state: "connected", cwd: `${dir}-other`, createdAt: 1 },
+      ]);
+      executor.handleSessionClosed("session-123");
+      expect(existsSync(dir)).toBe(false);
+    });
+
     it("removes the dir right away when the launch itself failed", async () => {
       launcher.launch.mockImplementation(() => {
         throw new Error("spawn failed");
@@ -1560,7 +1593,7 @@ describe("AgentExecutor", () => {
     });
 
     it("sweeps finished runs' dirs of sessions deleted while the server was down", () => {
-      mockExecutionStoreInstance.all.mockReturnValue([
+      mockExecutionStoreInstance.own.mockReturnValue([
         { sessionId: "gone", agentId: "temp-agent", triggerType: "manual", startedAt: 1, completedAt: 2, success: true, tempCwd: dir },
       ]);
       launcher.getSession.mockReturnValue(undefined);
@@ -1708,7 +1741,7 @@ describe("AgentExecutor", () => {
     });
 
     it("reads finished runs from the execution store", () => {
-      mockExecutionStoreInstance.all.mockReturnValue([
+      mockExecutionStoreInstance.own.mockReturnValue([
         { sessionId: "old", agentId: "a", triggerType: "schedule", startedAt: 1, completedAt: 2, success: false, error: "boom" },
       ]);
       Object.assign(wsBridge, { getSession: vi.fn(() => undefined) });
