@@ -126,6 +126,71 @@ describe("MentionMenu", () => {
     expect(onSelect).toHaveBeenCalledWith(samplePrompts[1]);
   });
 
+  it("reports pointer movement over an item through onHover", () => {
+    // Validates hover counts as navigation: the composer uses it to let Enter
+    // pick the item under the pointer.
+    const onHover = vi.fn();
+    render(
+      <MentionMenu
+        open={true}
+        loading={false}
+        prompts={samplePrompts}
+        selectedIndex={0}
+        onSelect={onSelect}
+        onHover={onHover}
+        menuRef={menuRef}
+      />,
+    );
+    fireEvent.mouseMove(screen.getByText("@refactor"));
+    expect(onHover).toHaveBeenCalledWith(1);
+  });
+
+  it("explains the Tab / Enter rule under the list", () => {
+    // Validates the hint is shown with results (Enter alone sends) and is
+    // absent when there is nothing to pick.
+    const { rerender } = render(
+      <MentionMenu
+        open={true}
+        loading={false}
+        prompts={samplePrompts}
+        selectedIndex={0}
+        onSelect={onSelect}
+        menuRef={menuRef}
+      />,
+    );
+    expect(screen.getByText(/Enter alone sends as typed/)).toBeInTheDocument();
+    rerender(
+      <MentionMenu
+        open={true}
+        loading={false}
+        prompts={[]}
+        selectedIndex={0}
+        onSelect={onSelect}
+        menuRef={menuRef}
+      />,
+    );
+    expect(screen.queryByText(/Enter alone sends as typed/)).toBeNull();
+  });
+
+  // Review finding: with "@review" typed and a prompt named "review", Enter
+  // inserts the prompt, yet the hint still said "Enter alone sends as typed".
+  // When Enter would insert a prompt the hint must name it instead.
+  it("says which prompt Enter inserts when there is one", () => {
+    render(
+      <MentionMenu
+        open={true}
+        loading={false}
+        prompts={samplePrompts}
+        selectedIndex={0}
+        onSelect={onSelect}
+        enterPrompt={samplePrompts[0]}
+        menuRef={menuRef}
+      />,
+    );
+    expect(screen.getByText("Enter inserts @review")).toBeInTheDocument();
+    expect(screen.queryByText(/Enter alone sends as typed/)).toBeNull();
+  });
+
   it("passes axe accessibility checks", async () => {
     const { container } = render(
       <MentionMenu

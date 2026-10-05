@@ -72,6 +72,19 @@ The chat view displays messages in a timeline:
 
 The right-side panel shows a structured breakdown of the agent's work. Tasks are automatically extracted from `TodoWrite`, `TaskCreate`, and `TaskUpdate` tool calls. Each task shows its status: pending, in progress, or completed.
 
+At the top of the panel, the **Project** and **User** sections list the configuration files the agent loads:
+
+- **Claude Code sessions**:
+  - `CLAUDE.md` and `CLAUDE.local.md`, from the session's directory up to the repository root
+  - `.claude/settings.json`, `.claude/settings.local.json` and `.mcp.json`
+  - commands, agents and skills, including symlinked skills and skills synced from claude.ai
+- **Codex sessions**:
+  - `AGENTS.md` from the session's directory up to the repository root
+  - `~/.codex/AGENTS.md`. The Companion links it into every Codex session.
+  - `~/.codex/config.toml`. The Companion copies it into each Codex session when the session is created, so an edit applies only to sessions created afterwards. Existing and resumed sessions keep their own copy.
+
+Click a file to edit it. JSON and TOML files are checked before they are saved, and an invalid file is not written. Skills synced from claude.ai are read-only. Use the **+** button on a section to create a missing file, or a new command, agent or skill, from a template. The **+** button never overwrites an existing file.
+
 ### Session tabs
 
 | Tab | Description |

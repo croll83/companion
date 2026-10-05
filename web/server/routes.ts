@@ -814,7 +814,7 @@ export function createRoutes(
     return c.json({ error: "Use frontend defaults for this backend" }, 404);
   });
 
-  registerFsRoutes(api);
+  registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
   registerEnvRoutes(api);
 
   registerPromptRoutes(api);

@@ -685,23 +685,63 @@ export interface SavedPrompt {
 
 // ─── Claude Config Browser ──────────────────────────────────────────────────
 
+export interface ClaudeConfigFile {
+  path: string;
+  content: string;
+}
+
+export interface ClaudeConfigSkill {
+  slug: string;
+  name: string;
+  description: string;
+  path: string;
+  /** "synced" = synced from claude.ai (read-only), "link" = symlinked skill dir */
+  source?: "synced" | "link";
+}
+
+/** Mirrors ClaudeConfigListing in server/claude-config.ts */
 export interface ClaudeConfigResponse {
   project: {
     root: string;
-    claudeMd: { path: string; content: string }[];
-    settings: { path: string; content: string } | null;
-    settingsLocal: { path: string; content: string } | null;
+    cwd: string;
+    claudeMd: ClaudeConfigFile[];
+    claudeLocalMd: ClaudeConfigFile[];
+    settings: ClaudeConfigFile | null;
+    settingsLocal: ClaudeConfigFile | null;
+    mcpJson: ClaudeConfigFile | null;
     commands: { name: string; path: string }[];
+    agents: { name: string; path: string }[];
+    skills: ClaudeConfigSkill[];
+    agentsMd: ClaudeConfigFile[];
   };
   user: {
     root: string;
-    claudeMd: { path: string; content: string } | null;
-    skills: { slug: string; name: string; description: string; path: string }[];
+    claudeMd: ClaudeConfigFile | null;
+    skills: ClaudeConfigSkill[];
     agents: { name: string; path: string }[];
-    settings: { path: string; content: string } | null;
+    settings: ClaudeConfigFile | null;
+    settingsLocal: ClaudeConfigFile | null;
     commands: { name: string; path: string }[];
+    codex: {
+      root: string;
+      agentsMd: ClaudeConfigFile | null;
+      config: { path: string; editable: boolean } | null;
+    };
   };
 }
+
+export type ConfigFileFormat = "markdown" | "json" | "toml";
+
+export type NewConfigFileType =
+  | "claude-md"
+  | "claude-local-md"
+  | "settings"
+  | "settings-local"
+  | "mcp-json"
+  | "command"
+  | "agent"
+  | "skill"
+  | "agents-md";
 
 // ─── SSE Session Creation ────────────────────────────────────────────────────
 
@@ -1112,8 +1152,23 @@ export const api = {
     ),
   saveClaudeMd: (path: string, content: string) =>
     put<{ ok: boolean; path: string }>("/fs/claude-md", { path, content }),
-  getClaudeConfig: (cwd: string) =>
-    get<ClaudeConfigResponse>(`/fs/claude-config?cwd=${encodeURIComponent(cwd)}`),
+  getClaudeConfig: (cwd: string, sessionId?: string) =>
+    get<ClaudeConfigResponse>(
+      `/fs/claude-config?cwd=${encodeURIComponent(cwd)}${sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : ""}`,
+    ),
+  // Session-scoped config files: only known Claude/Codex config paths are accepted
+  readConfigFile: (sessionId: string, path: string) =>
+    get<{ path: string; content: string; format: ConfigFileFormat; readOnly: boolean }>(
+      `/fs/config-file?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`,
+    ),
+  writeConfigFile: (sessionId: string, path: string, content: string) =>
+    put<{ ok: boolean; path: string }>("/fs/config-file", { sessionId, path, content }),
+  createConfigFile: (
+    sessionId: string,
+    scope: "project" | "user",
+    type: NewConfigFileType,
+    name?: string,
+  ) => post<{ ok: boolean; path: string }>("/fs/config-file", { sessionId, scope, type, name }),
 
   // Usage limits
   getUsageLimits: () => get<UsageLimits>("/usage-limits"),

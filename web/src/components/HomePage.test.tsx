@@ -1226,22 +1226,24 @@ describe("HomePage", () => {
       render(<HomePage />);
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
-      // Type @ to open menu
+      // Type the exact prompt name: Enter picks a prompt only on an exact
+      // name or after navigating the menu (a bare "@" + Enter sends instead).
       await act(async () => {
-        fireEvent.change(textarea, { target: { value: "@", selectionStart: 1 } });
+        fireEvent.change(textarea, { target: { value: "@review", selectionStart: 7 } });
       });
 
-      // Wait for menu to appear
+      // Wait for menu to appear ("@review" itself is also the textarea text,
+      // so look for the other match the query brings up)
       await waitFor(() => {
-        expect(screen.getByText("@review")).toBeInTheDocument();
+        expect(screen.getByText("@test-review")).toBeInTheDocument();
       });
 
-      // Press Enter to select the first prompt
+      // Press Enter to select the exactly named prompt
       await act(async () => {
         fireEvent.keyDown(textarea, { key: "Enter" });
       });
 
-      // The textarea should contain the prompt content, not just "@"
+      // The textarea should contain the prompt content, not just "@review"
       expect(textarea.value).toBe("Please review this code ");
       // No session should have been created (createSessionStream should not be called)
       expect(createSessionStreamMock).not.toHaveBeenCalled();
@@ -1292,13 +1294,82 @@ describe("HomePage", () => {
         expect(screen.getByText("@review")).toBeInTheDocument();
       });
 
-      // Select the first prompt
+      // Select the first prompt (Tab accepts the highlighted suggestion)
       await act(async () => {
-        fireEvent.keyDown(textarea, { key: "Enter" });
+        fireEvent.keyDown(textarea, { key: "Tab" });
       });
 
       // Should replace @rev with the prompt content, keeping the prefix
       expect(textarea.value).toBe("Please Please review this code ");
+    });
+
+    it("sends on Enter after a bare @ instead of inserting the first prompt", async () => {
+      // Validates the Home composer follows the explicit-pick rule: the menu
+      // shows suggestions, but without navigation or an exact name Enter
+      // creates the session with the text as typed.
+      mockApi.listPrompts.mockResolvedValue(samplePrompts);
+      createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/repo" });
+
+      render(<HomePage />);
+      const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
+
+      await act(async () => {
+        fireEvent.change(textarea, { target: { value: "fix this @", selectionStart: 10 } });
+      });
+      await waitFor(() => {
+        expect(screen.getByText("@review")).toBeInTheDocument();
+      });
+      await act(async () => {
+        fireEvent.keyDown(textarea, { key: "Enter" });
+      });
+
+      await waitFor(() => {
+        expect(createSessionStreamMock).toHaveBeenCalled();
+      });
+    });
+
+    it("does not open the prompt menu for @file paths and sends on Enter", async () => {
+      // Validates "@src/foo.ts" is treated as a file reference (Claude Code /
+      // Codex habit): no prompt menu, and Enter still starts the session.
+      mockApi.listPrompts.mockResolvedValue(samplePrompts);
+      createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/repo" });
+
+      render(<HomePage />);
+      const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
+
+      await act(async () => {
+        fireEvent.change(textarea, { target: { value: "read @src/foo.ts", selectionStart: 16 } });
+      });
+      expect(screen.queryByText("@review")).not.toBeInTheDocument();
+      await act(async () => {
+        fireEvent.keyDown(textarea, { key: "Enter" });
+      });
+
+      await waitFor(() => {
+        expect(createSessionStreamMock).toHaveBeenCalled();
+      });
+    });
+
+    it("hovering a prompt then pressing Enter inserts it", async () => {
+      // Validates pointer navigation counts as an explicit pick on Home too.
+      mockApi.listPrompts.mockResolvedValue(samplePrompts);
+
+      render(<HomePage />);
+      const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
+
+      await act(async () => {
+        fireEvent.change(textarea, { target: { value: "@", selectionStart: 1 } });
+      });
+      const item = await screen.findByText("@refactor");
+      await act(async () => {
+        fireEvent.mouseMove(item);
+      });
+      await act(async () => {
+        fireEvent.keyDown(textarea, { key: "Enter" });
+      });
+
+      expect(textarea.value).toBe("Refactor this module ");
+      expect(createSessionStreamMock).not.toHaveBeenCalled();
     });
   });
 

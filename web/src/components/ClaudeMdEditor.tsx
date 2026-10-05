@@ -10,9 +10,11 @@ interface ClaudeMdEditorProps {
   cwd: string;
   open: boolean;
   onClose: () => void;
+  /** File to select when the editor opens (defaults to the first one found) */
+  initialPath?: string;
 }
 
-export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
+export function ClaudeMdEditor({ cwd, open, onClose, initialPath }: ClaudeMdEditorProps) {
   const [files, setFiles] = useState<ClaudeMdFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -30,8 +32,9 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
       .then((res) => {
         setFiles(res.files);
         if (res.files.length > 0) {
-          setSelectedIdx(0);
-          setEditContent(res.files[0].content);
+          const idx = Math.max(0, res.files.findIndex((f) => f.path === initialPath));
+          setSelectedIdx(idx);
+          setEditContent(res.files[idx].content);
           setCreateMode(null);
         } else {
           setCreateMode(null);
@@ -43,7 +46,7 @@ export function ClaudeMdEditor({ cwd, open, onClose }: ClaudeMdEditorProps) {
         setError(e.message);
         setLoading(false);
       });
-  }, [cwd]);
+  }, [cwd, initialPath]);
 
   useEffect(() => {
     if (open) load();

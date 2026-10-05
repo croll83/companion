@@ -426,12 +426,21 @@ describe("Composer slash menu", () => {
 // ─── Disabled state ──────────────────────────────────────────────────────────
 
 describe("Composer disabled state", () => {
-  it("textarea is disabled when CLI is not connected", () => {
+  // Behaviour change (review finding on Task B #5): the textarea used to be
+  // disabled while the CLI was disconnected, which made "Save as prompt"
+  // unusable in a session opened disconnected. It now stays editable, and
+  // what the old test protected (nothing reaches a disconnected CLI) is
+  // asserted instead: Enter does not send and the text is kept.
+  it("textarea stays editable when CLI is not connected, but Enter does not send", () => {
     setupMockStore({ isConnected: false });
     const { container } = render(<Composer sessionId="s1" />);
     const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
 
-    expect(textarea.disabled).toBe(true);
+    expect(textarea.disabled).toBe(false);
+    fireEvent.change(textarea, { target: { value: "draft" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(mockSendToSession).not.toHaveBeenCalled();
+    expect(textarea.value).toBe("draft");
   });
 
   it("textarea shows correct placeholder when connected", () => {
@@ -454,6 +463,8 @@ describe("Composer disabled state", () => {
 describe("Composer @ prompts menu", () => {
   it("opens @ menu and inserts selected prompt with Enter", async () => {
     // Validates keyboard insertion from @ suggestions without sending the message.
+    // Enter picks a prompt only after an explicit choice, so the user arrows
+    // onto the item first (a bare partial match + Enter now sends, see below).
     mockListPrompts.mockResolvedValue([
       {
         id: "p1",
@@ -469,6 +480,7 @@ describe("Composer @ prompts menu", () => {
 
     fireEvent.change(textarea, { target: { value: "@rev", selectionStart: 4 } });
     await screen.findByText("@review-pr");
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
 
     expect((textarea as HTMLTextAreaElement).value).toContain("Review this PR and list risks.");
@@ -524,14 +536,173 @@ describe("Composer @ prompts menu", () => {
       expect(mockListPrompts).toHaveBeenCalledTimes(1);
     });
 
+    // Opening the menu refreshes the list once (see "refreshes prompts each
+    // time the menu opens"); later keystrokes in the same token must not fetch.
     fireEvent.change(textarea, { target: { value: "@r", selectionStart: 2 } });
     await screen.findByText("@review-pr");
+    await waitFor(() => expect(mockListPrompts).toHaveBeenCalledTimes(2));
     fireEvent.change(textarea, { target: { value: "@re", selectionStart: 3 } });
     await screen.findByText("@review-pr");
     fireEvent.change(textarea, { target: { value: "@rev", selectionStart: 4 } });
     await screen.findByText("@review-pr");
 
-    expect(mockListPrompts).toHaveBeenCalledTimes(1);
+    expect(mockListPrompts).toHaveBeenCalledTimes(2);
+  });
+
+  const reviewPrompt = {
+    id: "p1",
+    name: "review-pr",
+    content: "Review this PR and list risks.",
+    scope: "global",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  function lastSentContent(): unknown {
+    const call = mockSendToSession.mock.calls.at(-1);
+    return (call?.[1] as { content?: string } | undefined)?.content;
+  }
+
+  it("sends a message ending in a bare @ instead of inserting the first prompt", async () => {
+    // Validates the explicit-pick rule: the menu is open and has items, but
+    // the user never navigated and "@" names no prompt, so Enter sends.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+
+    fireEvent.change(textarea, { target: { value: "ping @", selectionStart: 6 } });
+    await screen.findByText("@review-pr");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(lastSentContent()).toBe("ping @");
+  });
+
+  it("sends on Enter when the @token only partially matches a prompt", async () => {
+    // Validates that a prefix/substring match is a suggestion, not a choice.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+
+    fireEvent.change(textarea, { target: { value: "ask @rev", selectionStart: 8 } });
+    await screen.findByText("@review-pr");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(lastSentContent()).toBe("ask @rev");
+  });
+
+  it("sends on Enter when the @token matches no prompt", async () => {
+    // Regression: a trailing @token with no match used to swallow Enter, so
+    // the message silently never left the composer.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+
+    fireEvent.change(textarea, { target: { value: "look at @zzz", selectionStart: 12 } });
+    await screen.findByText("No prompts found.");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(lastSentContent()).toBe("look at @zzz");
+  });
+
+  it("does not open the prompt menu for @file paths and sends them on Enter", async () => {
+    // Validates the Claude Code / Codex @file habit: "@src/foo.ts" is a file
+    // reference, so no prompt menu appears and Enter sends the text as is.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    await waitFor(() => expect(mockListPrompts).toHaveBeenCalled());
+
+    fireEvent.change(textarea, { target: { value: "check @src/foo.ts", selectionStart: 17 } });
+    expect(screen.queryByText("@review-pr")).toBeNull();
+    expect(screen.queryByText("No prompts found.")).toBeNull();
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(lastSentContent()).toBe("check @src/foo.ts");
+  });
+
+  it("inserts the prompt on Enter when the token is its exact name", async () => {
+    // Validates the second explicit-pick path: "@review-pr" names the prompt.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: "@review-pr", selectionStart: 10 } });
+    await screen.findByText("@review-pr");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(textarea.value).toBe("Review this PR and list risks. ");
+    expect(mockSendToSession).not.toHaveBeenCalled();
+  });
+
+  it("inserts the highlighted prompt with Tab even without navigating", async () => {
+    // Validates Tab keeps its "accept the suggestion" meaning.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: "@rev", selectionStart: 4 } });
+    await screen.findByText("@review-pr");
+    fireEvent.keyDown(textarea, { key: "Tab" });
+
+    expect(textarea.value).toBe("Review this PR and list risks. ");
+    expect(mockSendToSession).not.toHaveBeenCalled();
+  });
+
+  it("hovering an item makes Enter insert it", async () => {
+    // Validates pointer navigation counts as an explicit choice.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: "@rev", selectionStart: 4 } });
+    fireEvent.mouseMove(await screen.findByText("@review-pr"));
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(textarea.value).toBe("Review this PR and list risks. ");
+    expect(mockSendToSession).not.toHaveBeenCalled();
+  });
+
+  it("clicking an item inserts it", async () => {
+    // Validates click selection still works alongside the new Enter rule.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: "@", selectionStart: 1 } });
+    fireEvent.click(await screen.findByText("@review-pr"));
+
+    expect(textarea.value).toBe("Review this PR and list risks. ");
+  });
+
+  it("refreshes prompts each time the menu opens", async () => {
+    // Validates prompts created elsewhere after mount show up: the list is
+    // fetched again on every open, not only once per cwd.
+    mockListPrompts.mockResolvedValueOnce([]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    await waitFor(() => expect(mockListPrompts).toHaveBeenCalledTimes(1));
+
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    fireEvent.change(textarea, { target: { value: "@", selectionStart: 1 } });
+
+    expect(await screen.findByText("@review-pr")).toBeTruthy();
+    expect(mockListPrompts).toHaveBeenCalledTimes(2);
+  });
+
+  it("Escape closes the menu and keeps it closed for that token", async () => {
+    // Validates Escape really dismisses the menu instead of it reopening on
+    // the next render, even while the user keeps typing the same token.
+    mockListPrompts.mockResolvedValue([reviewPrompt]);
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+
+    fireEvent.change(textarea, { target: { value: "@rev", selectionStart: 4 } });
+    await screen.findByText("@review-pr");
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByText("@review-pr")).toBeNull());
+
+    fireEvent.change(textarea, { target: { value: "@revi", selectionStart: 5 } });
+    expect(screen.queryByText("@review-pr")).toBeNull();
   });
 });
 
@@ -761,6 +932,44 @@ describe("Composer save prompt", () => {
 
     // cwd should no longer be shown
     expect(screen.queryByText("/test")).toBeFalsy();
+  });
+
+  it("Save as prompt stays usable when the CLI is disconnected", async () => {
+    // Validates saving a prompt needs only text: a session whose CLI dropped
+    // after the user typed can still turn that text into a saved prompt.
+    const { container, rerender } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "Reusable body" } });
+
+    setupMockStore({ isConnected: false });
+    rerender(<Composer sessionId="s1" />);
+
+    const saveButtons = screen.getAllByTitle("Save as prompt");
+    expect(saveButtons.every((b) => !b.hasAttribute("disabled"))).toBe(true);
+    fireEvent.click(saveButtons[0]);
+    fireEvent.change(screen.getByPlaceholderText("Prompt title"), { target: { value: "Reusable" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(mockCreatePrompt).toHaveBeenCalledWith({ name: "Reusable", content: "Reusable body", scope: "global" });
+    });
+  });
+
+  // Review finding: the previous test typed while connected; a session opened
+  // while its CLI is disconnected had a disabled textarea, so no text could
+  // ever be entered and Save as prompt stayed disabled.
+  it("Save as prompt works in a session that starts disconnected", async () => {
+    setupMockStore({ isConnected: false });
+    const { container } = render(<Composer sessionId="s1" />);
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "Offline body" } });
+
+    fireEvent.click(screen.getAllByTitle("Save as prompt")[0]);
+    fireEvent.change(screen.getByPlaceholderText("Prompt title"), { target: { value: "Offline" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(mockCreatePrompt).toHaveBeenCalledWith({ name: "Offline", content: "Offline body", scope: "global" });
+    });
   });
 
   it("passes axe accessibility checks", async () => {
