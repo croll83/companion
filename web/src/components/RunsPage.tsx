@@ -29,8 +29,12 @@ function triggerColor(type: string): string {
   }
 }
 
+/**
+ * A run is running until its session's first turn result (or the CLI exiting
+ * first); then it succeeded unless that result was an error.
+ */
 function statusIndicator(exec: AgentExecution): { label: string; color: string } {
-  if (exec.error) return { label: "Error", color: "text-cc-error" };
+  if (exec.error || (exec.completedAt && exec.success === false)) return { label: "Error", color: "text-cc-error" };
   if (exec.success) return { label: "Success", color: "text-cc-success" };
   if (!exec.completedAt) return { label: "Running", color: "text-cc-warning" };
   return { label: "Unknown", color: "text-cc-muted" };
@@ -106,7 +110,7 @@ export function RunsPage() {
       <div className="shrink-0 border-b border-cc-border px-6 py-4">
         <h1 className="text-lg font-semibold text-cc-fg">Runs</h1>
         <p className="text-sm text-cc-muted mt-1">
-          Monitor agent executions across all triggers
+          Monitor agent executions across all triggers. A run is done at its session's first turn result; the session stays open.
         </p>
       </div>
 
@@ -216,7 +220,7 @@ export function RunsPage() {
                         {triggerLabel(exec.triggerType)}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3" title={exec.error || undefined}>
                       <span className={`font-medium ${status.color}`}>
                         {!exec.completedAt && !exec.error && (
                           <span className="inline-block w-1.5 h-1.5 rounded-full bg-cc-warning mr-1.5 animate-pulse" />
@@ -283,6 +287,16 @@ export function RunsPage() {
               <span className="text-cc-muted">Duration</span>
               <p className="text-cc-fg font-mono">{formatDuration(selectedExec.startedAt, selectedExec.completedAt)}</p>
             </div>
+            <div>
+              <span className="text-cc-muted">Status</span>
+              <p className={`font-medium ${statusIndicator(selectedExec).color}`}>{statusIndicator(selectedExec).label}</p>
+            </div>
+            {selectedExec.subtype && (
+              <div>
+                <span className="text-cc-muted">Result</span>
+                <p className="text-cc-fg font-mono text-xs" data-testid="run-subtype">{selectedExec.subtype}</p>
+              </div>
+            )}
           </div>
           {selectedExec.error && (
             <div className="mt-3 p-2 bg-cc-error/10 rounded text-sm text-cc-error font-mono whitespace-pre-wrap">

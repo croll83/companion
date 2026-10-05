@@ -163,9 +163,6 @@ vi.mock("./components/EnvManager.js", () => ({
   EnvManager: () => <div data-testid="env-manager">EnvManager</div>,
 }));
 
-vi.mock("./components/CronManager.js", () => ({
-  CronManager: () => <div data-testid="cron-manager">CronManager</div>,
-}));
 
 vi.mock("./components/AgentsPage.js", () => ({
   AgentsPage: () => <div data-testid="agents-page">AgentsPage</div>,

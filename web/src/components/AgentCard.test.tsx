@@ -366,3 +366,36 @@ describe("getWebhookUrl", () => {
     expect(url).toContain("agent%20with%20spaces");
   });
 });
+
+// ─── Live run and schedule state ─────────────────────────────────────────────
+
+describe("AgentCard run/schedule state", () => {
+  it("shows a Running link to the Runs page while a run is in progress", () => {
+    render(<AgentCard {...makeProps({ agent: makeAgent({ running: true }) })} />);
+    const running = screen.getByTestId("run-in-progress");
+    expect(running).toHaveTextContent("Running");
+    expect(running).toHaveAttribute("href", "#/runs");
+  });
+
+  it("does not show Running when no run is in progress", () => {
+    render(<AgentCard {...makeProps({ agent: makeAgent({ running: false }) })} />);
+    expect(screen.queryByTestId("run-in-progress")).not.toBeInTheDocument();
+  });
+
+  it("reports a schedule problem (past one-shot, skipped run) on the card", () => {
+    // Past one-time dates are reported, not silently skipped.
+    render(<AgentCard {...makeProps({
+      agent: makeAgent({ scheduleError: "One-time run at 2020-01-01T08:00 did not run: that time has passed" }),
+    })} />);
+    expect(screen.getByTestId("schedule-error")).toHaveTextContent("Schedule: One-time run at 2020-01-01T08:00 did not run");
+  });
+
+  it("passes axe accessibility checks with running and schedule error shown", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<AgentCard {...makeProps({
+      agent: makeAgent({ running: true, scheduleError: "Scheduled run skipped" }),
+    })} />);
+    const results = await axe(container, { rules: { "heading-order": { enabled: false } } });
+    expect(results).toHaveNoViolations();
+  });
+});

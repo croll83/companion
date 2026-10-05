@@ -315,4 +315,31 @@ describe("RunsPage", () => {
     const select = screen.getByLabelText("Filter by agent");
     expect(select).toBeInTheDocument();
   });
+
+  it("shows a failed run as Error even without an error message, with its result subtype", async () => {
+    // A run fails when its first turn result is an error; the CLI's subtype
+    // (e.g. error_max_turns) says why.
+    const exec = makeExecution({ completedAt: Date.now(), success: false, subtype: "error_max_turns" });
+    mockApi.listExecutions.mockResolvedValue({ executions: [exec], total: 1 });
+    mockApi.listAgents.mockResolvedValue([makeAgent()]);
+
+    render(<RunsPage />);
+    await waitFor(() => expect(screen.getByText("Error")).toBeInTheDocument());
+
+    const tableCell = screen.getAllByText("Test Agent").find((el) => el.closest("td") !== null);
+    fireEvent.click(tableCell!);
+
+    await waitFor(() => expect(screen.getByTestId("run-subtype")).toHaveTextContent("error_max_turns"));
+  });
+
+  it("puts the error message in the status cell tooltip", async () => {
+    const exec = makeExecution({ completedAt: Date.now(), success: false, error: "CLI exited before the run finished" });
+    mockApi.listExecutions.mockResolvedValue({ executions: [exec], total: 1 });
+    mockApi.listAgents.mockResolvedValue([makeAgent()]);
+
+    render(<RunsPage />);
+    await waitFor(() => expect(screen.getAllByText("Test Agent").length).toBeGreaterThan(0));
+    const status = screen.getAllByText(/Error/).find((el) => el.closest("tbody"));
+    expect(status!.closest("td")).toHaveAttribute("title", "CLI exited before the run finished");
+  });
 });

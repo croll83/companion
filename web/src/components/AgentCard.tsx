@@ -122,6 +122,11 @@ export function AgentCard({
             {agent.description && (
               <p className="text-xs text-cc-muted mt-0.5 truncate max-w-md">{agent.description}</p>
             )}
+            {agent.scheduleError && (
+              <p className="text-[11px] text-cc-warning mt-1 max-w-md" data-testid="schedule-error">
+                Schedule: {agent.scheduleError}
+              </p>
+            )}
           </div>
         </div>
 
@@ -157,6 +162,11 @@ export function AgentCard({
           ))}
         </div>
         <div className="flex items-center gap-3 text-[10px] text-cc-muted">
+          {agent.running && (
+            <a href="#/runs" className="text-cc-warning font-medium hover:underline" data-testid="run-in-progress">
+              Running
+            </a>
+          )}
           {agent.totalRuns > 0 && <span>{agent.totalRuns} run{agent.totalRuns !== 1 ? "s" : ""}</span>}
           {agent.lastRunAt && <span>Last: {timeAgo(agent.lastRunAt)}</span>}
           {agent.nextRunAt && <span>Next: {timeAgo(agent.nextRunAt)}</span>}

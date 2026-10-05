@@ -558,38 +558,6 @@ export interface PRStatusResponse {
   pr: GitHubPRInfo | null;
 }
 
-export interface CronJobInfo {
-  id: string;
-  name: string;
-  prompt: string;
-  schedule: string;
-  recurring: boolean;
-  backendType: "claude" | "codex";
-  model: string;
-  cwd: string;
-  envSlug?: string;
-  enabled: boolean;
-  permissionMode: string;
-  codexInternetAccess?: boolean;
-  createdAt: number;
-  updatedAt: number;
-  lastRunAt?: number;
-  lastSessionId?: string;
-  consecutiveFailures: number;
-  totalRuns: number;
-  nextRunAt?: number | null;
-}
-
-export interface CronJobExecution {
-  sessionId: string;
-  jobId: string;
-  startedAt: number;
-  completedAt?: number;
-  success?: boolean;
-  error?: string;
-  costUsd?: number;
-}
-
 export interface McpServerConfigAgent {
   type: "stdio" | "sse" | "http";
   command?: string;
@@ -610,14 +578,11 @@ export interface AgentInfo {
   cwd: string;
   envSlug?: string;
   env?: Record<string, string>;
+  /** Claude only: built-in tools the agent is limited to (empty = all). */
   allowedTools?: string[];
   codexInternetAccess?: boolean;
   prompt: string;
   mcpServers?: Record<string, McpServerConfigAgent>;
-  skills?: string[];
-  branch?: string;
-  createBranch?: boolean;
-  useWorktree?: boolean;
   triggers?: {
     webhook?: {
       enabled: boolean;
@@ -655,6 +620,10 @@ export interface AgentInfo {
   totalRuns: number;
   consecutiveFailures: number;
   nextRunAt?: number | null;
+  /** A run of this agent is launching or waiting for its result. */
+  running?: boolean;
+  /** Why the schedule is not running as configured (past date, invalid, skipped run). */
+  scheduleError?: string | null;
 }
 
 export interface AgentExecution {
@@ -665,6 +634,8 @@ export interface AgentExecution {
   completedAt?: number;
   success?: boolean;
   error?: string;
+  /** Result subtype reported by the CLI (e.g. "success", "error_max_turns"). */
+  subtype?: string;
 }
 
 export interface ExecutionListResult {
@@ -675,7 +646,7 @@ export interface ExecutionListResult {
 /** Portable export format (no internal tracking fields) */
 export type AgentExport = Omit<
   AgentInfo,
-  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "nextRunAt"
+  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "nextRunAt" | "running" | "scheduleError"
 >;
 
 export interface SavedPrompt {
@@ -1203,18 +1174,6 @@ export const api = {
   forceCheckForUpdate: () => post<UpdateInfo>("/update-check"),
   triggerUpdate: () =>
     post<{ ok: boolean; message: string }>("/update"),
-
-  // Cron jobs
-  listCronJobs: () => get<CronJobInfo[]>("/cron/jobs"),
-  getCronJob: (id: string) => get<CronJobInfo>(`/cron/jobs/${encodeURIComponent(id)}`),
-  createCronJob: (data: Partial<CronJobInfo>) => post<CronJobInfo>("/cron/jobs", data),
-  updateCronJob: (id: string, data: Partial<CronJobInfo>) =>
-    put<CronJobInfo>(`/cron/jobs/${encodeURIComponent(id)}`, data),
-  deleteCronJob: (id: string) => del(`/cron/jobs/${encodeURIComponent(id)}`),
-  toggleCronJob: (id: string) => post<CronJobInfo>(`/cron/jobs/${encodeURIComponent(id)}/toggle`),
-  runCronJob: (id: string) => post(`/cron/jobs/${encodeURIComponent(id)}/run`),
-  getCronJobExecutions: (id: string) =>
-    get<CronJobExecution[]>(`/cron/jobs/${encodeURIComponent(id)}/executions`),
 
   // Background process management
   killProcess: (sessionId: string, taskId: string) =>

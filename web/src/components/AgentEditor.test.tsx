@@ -13,6 +13,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import type { AgentFormData } from "./AgentEditor.js";
 import { EMPTY_FORM, AgentEditor } from "./AgentEditor.js";
+import { useStore } from "../store.js";
 
 // ─── Mock setup ──────────────────────────────────────────────────────────────
 
@@ -385,5 +386,77 @@ describe("AgentEditor", () => {
     // The connection picker should not appear when linearEnabled is false.
     renderEditor({ linearEnabled: false });
     expect(screen.queryByTestId("linear-connection-picker")).not.toBeInTheDocument();
+  });
+});
+
+// ─── Agents overhaul: permissions, schedules, webhook, allowed tools ─────────
+
+describe("AgentEditor — run semantics shown to the user", () => {
+  afterEach(() => {
+    useStore.getState().setTimeZone("");
+  });
+
+  it("states that Claude agents run with full permissions (no misleading picker)", () => {
+    // Claude runs are unattended, so they always use bypassPermissions.
+    renderEditor();
+    expect(screen.getByTestId("claude-full-permissions")).toHaveTextContent("Full permissions");
+    expect(screen.getByTestId("permissions-note")).toHaveTextContent(/run unattended with full permissions/);
+  });
+
+  it("explains the Codex sandbox choice instead", () => {
+    renderEditor({ backendType: "codex", permissionMode: "bypassPermissions" });
+    expect(screen.queryByTestId("claude-full-permissions")).not.toBeInTheDocument();
+    expect(screen.getByTestId("permissions-note")).toHaveTextContent(/workspace-write sandbox/);
+  });
+
+  it("shows which time zone schedules run in", () => {
+    // Schedules follow the global timeZone setting; "" means the server's zone.
+    const { unmount } = renderEditor({ scheduleEnabled: true });
+    expect(screen.getByTestId("schedule-timezone")).toHaveTextContent("server's local time zone");
+    unmount();
+
+    useStore.getState().setTimeZone("Europe/Rome");
+    renderEditor({ scheduleEnabled: true });
+    expect(screen.getByTestId("schedule-timezone")).toHaveTextContent("Times are in Europe/Rome");
+  });
+
+  it("tells the user the webhook only answers this machine and the tailnet", () => {
+    renderEditor({ webhookEnabled: true });
+    expect(screen.getByText(/Accepted only from this machine or your Tailscale network/)).toBeInTheDocument();
+  });
+
+  it("gates Allowed tools to Claude Code", () => {
+    // --tools exists only for Claude; Codex has no per-tool restriction.
+    renderEditor({ backendType: "codex", allowedTools: ["Read"] });
+    fireEvent.click(screen.getByText("Advanced"));
+    expect(screen.getByTestId("allowed-tools-codex-note")).toHaveTextContent("Requires Claude Code");
+    expect(screen.queryByPlaceholderText("Type tool name and press Enter")).not.toBeInTheDocument();
+  });
+
+  it("does not offer the removed branch and skills options", () => {
+    renderEditor({ cwd: "/repo" });
+    fireEvent.click(screen.getByText("Advanced"));
+    expect(screen.queryByText("branch")).not.toBeInTheDocument();
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
+    expect(mockApi.listSkills).not.toHaveBeenCalled();
+  });
+
+  it("removes an allowed tool via its labelled remove button", () => {
+    const { getForm } = renderEditor({ allowedTools: ["Read", "Grep"] });
+    fireEvent.click(screen.getByLabelText("Remove Read"));
+    expect(getForm().allowedTools).toEqual(["Grep"]);
+  });
+
+  it("passes axe accessibility checks with Codex, webhook and schedule shown", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = renderEditor({
+      name: "Codex Agent",
+      prompt: "Run",
+      backendType: "codex",
+      webhookEnabled: true,
+      scheduleEnabled: true,
+    });
+    const results = await axe(container, axeRules);
+    expect(results).toHaveNoViolations();
   });
 });

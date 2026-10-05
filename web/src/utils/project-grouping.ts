@@ -16,8 +16,6 @@ export interface SessionItem {
   backendType: "claude" | "codex";
   repoRoot: string;
   permCount: number;
-  cronJobId?: string;
-  cronJobName?: string;
   agentId?: string;
   agentName?: string;
 }

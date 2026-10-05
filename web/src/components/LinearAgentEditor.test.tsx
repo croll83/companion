@@ -59,11 +59,7 @@ const defaultForm: AgentFormData = {
   envSlug: "",
   env: [],
   codexInternetAccess: false,
-  branch: "",
-  createBranch: false,
-  useWorktree: false,
   mcpServers: {},
-  skills: [],
   allowedTools: [],
   webhookEnabled: false,
   scheduleEnabled: false,
@@ -343,25 +339,35 @@ describe("LinearAgentEditor", () => {
 
   it("opens mode dropdown and allows selection", () => {
     // Validates clicking the mode pill opens a dropdown with available modes,
-    // and selecting one calls setForm with the chosen mode value
+    // and selecting one calls setForm with the chosen mode value. Only Codex
+    // has the picker (its sandbox); Claude agents always run with full
+    // permissions, see the next test.
     const setFormMock = vi.fn();
-    const props = makeProps({ setForm: setFormMock });
+    const codexForm = { ...defaultForm, backendType: "codex" as const, permissionMode: "auto" };
+    const props = makeProps({ setForm: setFormMock, form: codexForm });
     render(<LinearAgentEditor {...props} />);
 
-    // Click the mode pill to open the dropdown (shows "Allow edits" label)
-    const modePill = screen.getByText("Allow edits");
+    // Click the mode pill to open the dropdown (shows "Auto" label)
+    const modePill = screen.getByText("Auto");
     fireEvent.click(modePill);
 
     // The dropdown should now be visible with the mode option
-    const modeOptions = screen.getAllByText("Allow edits");
+    const modeOptions = screen.getAllByText("Auto");
     // Click the dropdown option (the last instance)
     fireEvent.click(modeOptions[modeOptions.length - 1]);
 
     expect(setFormMock).toHaveBeenCalled();
     const lastCall = setFormMock.mock.calls[0][0];
     const result =
-      typeof lastCall === "function" ? lastCall(defaultForm) : lastCall;
-    expect(result.permissionMode).toBe("allowEdits");
+      typeof lastCall === "function" ? lastCall(codexForm) : lastCall;
+    expect(result.permissionMode).toBe("auto");
+  });
+
+  it("shows a fixed full-permissions badge instead of a picker for Claude", () => {
+    // Unattended Claude runs always use bypassPermissions; a picker would lie.
+    render(<LinearAgentEditor {...makeProps()} />);
+    expect(screen.getByTestId("claude-full-permissions")).toHaveTextContent("Full permissions");
+    expect(screen.queryByText("Allow edits")).not.toBeInTheDocument();
   });
 
   // --- Folder picker ---
