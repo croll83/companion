@@ -98,9 +98,15 @@ const MCP_ROUTES: Array<[method: string, pattern: RegExp]> = [
   ["GET", /^\/executions\/[^/]+\/result$/],
 ];
 
-/** Whether an MCP session token may call `method path` (path with or without the /api prefix). */
-export function isMcpRouteAllowed(method: string, path: string): boolean {
+/**
+ * Whether the MCP token of session `caller` may call `method path` (path
+ * with or without the /api prefix). The full session record is readable for
+ * the caller's own session only (the tools need its folder, backend, model).
+ */
+export function isMcpRouteAllowed(method: string, path: string, caller: string): boolean {
   const rel = path.replace(/^\/api(?=\/)/, "");
+  const own = /^\/sessions\/([^/]+)$/.exec(rel);
+  if (own && decodeURIComponent(own[1]) !== caller) return false;
   return MCP_ROUTES.some(([m, re]) => m === method.toUpperCase() && re.test(rel));
 }
 

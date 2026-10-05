@@ -161,7 +161,7 @@ export function createRoutes(
       if (!caller || !launcher.getSession(caller)) {
         return c.json({ error: "Invalid or expired Companion MCP token (the session no longer exists?)" }, 401);
       }
-      if (!isMcpRouteAllowed(c.req.method, c.req.path)) {
+      if (!isMcpRouteAllowed(c.req.method, c.req.path, caller)) {
         return c.json({ error: "Not available to Companion MCP tokens" }, 403);
       }
       return next();

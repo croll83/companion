@@ -52,7 +52,8 @@ describe("MCP session tokens", () => {
   it("rejects tampered, foreign and malformed tokens", () => {
     const token = mcpTokenFor("sess-1");
     expect(verifyMcpToken(token.replace("sess-1", "sess-2"))).toBeNull();
-    expect(verifyMcpToken(`${token.slice(0, -1)}0`)).toBeNull();
+    const flipped = token.endsWith("0") ? "1" : "0"; // always a different last digit
+    expect(verifyMcpToken(`${token.slice(0, -1)}${flipped}`)).toBeNull();
     expect(verifyMcpToken("cmcp_nodot")).toBeNull();
     expect(verifyMcpToken("cmcp_.abc")).toBeNull();
     expect(verifyMcpToken("not-a-token")).toBeNull();
@@ -111,7 +112,7 @@ describe("MCP route allowlist", () => {
       ["GET", "/api/executions"],
       ["GET", "/api/executions/s1/result"],
     ];
-    for (const [method, path] of allowed) expect(isMcpRouteAllowed(method, path), `${method} ${path}`).toBe(true);
+    for (const [method, path] of allowed) expect(isMcpRouteAllowed(method, path, "s1"), `${method} ${path}`).toBe(true);
 
     const denied: Array<[string, string]> = [
       ["GET", "/api/auth/token"],
@@ -127,7 +128,16 @@ describe("MCP route allowlist", () => {
       ["POST", "/api/agents/a/toggle"],
       ["GET", "/api/sessions"],
     ];
-    for (const [method, path] of denied) expect(isMcpRouteAllowed(method, path), `${method} ${path}`).toBe(false);
+    for (const [method, path] of denied) expect(isMcpRouteAllowed(method, path, "s1"), `${method} ${path}`).toBe(false);
+  });
+
+  // The full session record (which can hold launch details) is readable for
+  // the caller's own session only; wake-ups of other sessions stay reachable
+  // (access levels are checked by the wake-up routes).
+  it("limits the session record to the caller's own session", () => {
+    expect(isMcpRouteAllowed("GET", "/api/sessions/s1", "s1")).toBe(true);
+    expect(isMcpRouteAllowed("GET", "/api/sessions/s2", "s1")).toBe(false);
+    expect(isMcpRouteAllowed("GET", "/api/sessions/s2/wakeups", "s1")).toBe(true);
   });
 });
 

@@ -4296,7 +4296,7 @@ describe("auth middleware with Companion MCP tokens", () => {
   // Session control, settings and the auth token stay out of reach.
   it("refuses routes the MCP tools do not use", async () => {
     launcher.getSession.mockReturnValue({ sessionId: "s1" });
-    for (const [method, path] of [["GET", "/api/auth/token"], ["GET", "/api/settings"], ["DELETE", "/api/sessions/s1"]]) {
+    for (const [method, path] of [["GET", "/api/auth/token"], ["GET", "/api/settings"], ["DELETE", "/api/sessions/s1"], ["GET", "/api/sessions/other"]]) {
       const res = await app.request(path, { method, ...bearer(mcpTokenFor("s1")) });
       expect(res.status, `${method} ${path}`).toBe(403);
     }
