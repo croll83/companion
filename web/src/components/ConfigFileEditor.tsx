@@ -34,6 +34,9 @@ export function ConfigFileEditor({
   const [format, setFormat] = useState<ConfigFileFormat>("markdown");
   const [readOnly, setReadOnly] = useState(false);
   const [loading, setLoading] = useState(true);
+  // A file that could not be read (too large, unreadable...) must never be
+  // replaced by whatever is typed into an editor that only LOOKS empty.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +45,7 @@ export function ConfigFileEditor({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadFailed(false);
     api.readConfigFile(sessionId, path).then((res) => {
       if (cancelled) return;
       setContent(res.content);
@@ -51,6 +55,7 @@ export function ConfigFileEditor({
     }).catch((e: unknown) => {
       if (cancelled) return;
       setError(e instanceof Error ? e.message : "Failed to read file");
+      setLoadFailed(true);
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -119,6 +124,11 @@ export function ConfigFileEditor({
         {loading ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="w-5 h-5 border-2 border-cc-primary border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : loadFailed ? (
+          // No textarea and no Save: the error below says why the file did not open.
+          <div className="flex-1 flex items-center justify-center px-4 text-[12px] text-cc-muted">
+            This file could not be opened, so it cannot be edited here.
           </div>
         ) : (
           <>

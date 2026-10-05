@@ -44,6 +44,9 @@ interface NewOption {
 
 const basename = (p: string) => p.split("/").pop() || p;
 
+const CODEX_CONFIG_NOTE =
+  "Copied into each new Codex session; existing sessions keep their own copy";
+
 function relTo(root: string, p: string): string {
   return p.startsWith(root + "/") ? p.slice(root.length + 1) : p;
 }
@@ -90,8 +93,13 @@ function buildGroups(config: ClaudeConfigResponse, isCodex: boolean): Record<Sco
             title: "Companion links ~/.codex/AGENTS.md into every Codex session's CODEX_HOME",
             description: "User instructions for Codex (linked into every session)",
           })] : []),
+          // Unlike AGENTS.md, config.toml is COPIED into a session's CODEX_HOME
+          // when that home is first created (cli-launcher prepareCodexHome),
+          // so an edit here reaches only sessions created afterwards.
           ...(user.codex.config ? [fileItem("config.toml", user.codex.config.path, {
-            sublabel: user.codex.config.editable ? undefined : "read-only",
+            sublabel: user.codex.config.editable ? "new sessions only" : "read-only",
+            title: CODEX_CONFIG_NOTE,
+            description: CODEX_CONFIG_NOTE,
           })] : []),
         ],
       }],
@@ -184,7 +192,8 @@ function SectionHeader({
   title: string;
   expanded: boolean;
   onToggle: () => void;
-  onNew: () => void;
+  /** Absent when there is nothing left to create: the "+" button is hidden. */
+  onNew?: () => void;
   newOpen: boolean;
 }) {
   return (
@@ -213,17 +222,19 @@ function SectionHeader({
           {title}
         </span>
       </button>
-      <button
-        onClick={onNew}
-        aria-label={`New ${icon} config file`}
-        aria-expanded={newOpen}
-        title="New…"
-        className="mr-3 w-5 h-5 flex items-center justify-center rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
-      >
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3" aria-hidden="true">
-          <path d="M8 3v10M3 8h10" strokeLinecap="round" />
-        </svg>
-      </button>
+      {onNew && (
+        <button
+          onClick={onNew}
+          aria-label={`New ${icon} config file`}
+          aria-expanded={newOpen}
+          title="New…"
+          className="mr-3 w-5 h-5 flex items-center justify-center rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3" aria-hidden="true">
+            <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
     </div>
   );
 }
@@ -398,7 +409,10 @@ export function ClaudeConfigBrowser({ sessionId }: { sessionId: string }) {
 
   const renderSection = (scope: Scope, title: string, emptyText: string) => {
     const n = count(scope);
-    const open = expanded[scope] || newMenu === scope;
+    // Codex has no named types, so once AGENTS.md exists there is nothing to create.
+    const options = newOptions(config, scope, isCodex);
+    const menuOpen = newMenu === scope && options.length > 0;
+    const open = expanded[scope] || menuOpen;
     return (
       <>
         <SectionHeader
@@ -409,15 +423,15 @@ export function ClaudeConfigBrowser({ sessionId }: { sessionId: string }) {
             setExpanded((e) => ({ ...e, [scope]: !open }));
             if (open) setNewMenu(null);
           }}
-          onNew={() => setNewMenu((m) => (m === scope ? null : scope))}
-          newOpen={newMenu === scope}
+          onNew={options.length > 0 ? () => setNewMenu((m) => (m === scope ? null : scope)) : undefined}
+          newOpen={menuOpen}
         />
         {open && (
           <div className="pb-1">
-            {newMenu === scope && (
+            {menuOpen && (
               <NewFileMenu
                 scope={scope}
-                options={newOptions(config, scope, isCodex)}
+                options={options}
                 onCreate={(type, name) => create(scope, type, name)}
                 onCancel={() => setNewMenu(null)}
               />

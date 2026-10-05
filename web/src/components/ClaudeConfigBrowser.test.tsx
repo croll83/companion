@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const mockGetClaudeConfig = vi.fn();
@@ -416,6 +416,60 @@ describe("ClaudeConfigBrowser: discovery, New… and Codex", () => {
     // Cancel closes the menu
     fireEvent.click(screen.getByText("Cancel"));
     expect(screen.queryByTestId("new-project-menu")).not.toBeInTheDocument();
+  });
+
+  // Review finding: nothing checked that EVERY existing fixed file is left out
+  // of the menu (a menu offering an existing settings.json would only get a 409).
+  it("offers only the named types when every fixed file already exists", async () => {
+    mockGetClaudeConfig.mockResolvedValue({
+      ...richConfig,
+      project: {
+        ...richConfig.project,
+        settings: { path: "/repo/.claude/settings.json", content: "{}" },
+      },
+      user: {
+        ...richConfig.user,
+        settings: { path: "/Users/test/.claude/settings.json", content: "{}" },
+      },
+    });
+    render(<ClaudeConfigBrowser sessionId="s1" />);
+    await waitFor(() => expect(screen.getByText("Project (8)")).toBeInTheDocument());
+    for (const scope of ["project", "user"] as const) {
+      fireEvent.click(screen.getByLabelText(`New ${scope} config file`));
+      const options = within(screen.getByTestId(`new-${scope}-menu`)).getAllByRole("button").map((b) => b.textContent);
+      expect(options).toEqual(["Command…", "Agent…", "Skill…", "Cancel"]);
+      fireEvent.click(screen.getByText("Cancel"));
+    }
+  });
+
+  // Codex has no named types: once AGENTS.md exists in a scope there is nothing
+  // to create, so the "+" button is hidden instead of opening an empty menu.
+  it("hides the New button for Codex scopes whose AGENTS.md already exists", async () => {
+    resetStore({ sessions: new Map([["s1", { cwd: "/repo", backend_type: "codex" }]]) });
+    render(<ClaudeConfigBrowser sessionId="s1" />);
+    await waitFor(() => expect(screen.getByText("Project (1)")).toBeInTheDocument());
+    expect(screen.queryByLabelText("New project config file")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("New user config file")).not.toBeInTheDocument();
+  });
+
+  // Review finding: config.toml is COPIED into each session's CODEX_HOME when
+  // the session is created (AGENTS.md is linked), so editing it does not reach
+  // existing sessions. The row and the editor must say so.
+  it("labels ~/.codex/config.toml as applying to new sessions only", async () => {
+    resetStore({ sessions: new Map([["s1", { cwd: "/repo", backend_type: "codex" }]]) });
+    mockGetClaudeConfig.mockResolvedValue({
+      ...richConfig,
+      user: { ...richConfig.user, codex: { ...richConfig.user.codex, config: { path: "/Users/test/.codex/config.toml", editable: true } } },
+    });
+    render(<ClaudeConfigBrowser sessionId="s1" />);
+    await waitFor(() => expect(screen.getByText("User (2)")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("User (2)"));
+    const row = screen.getByText("config.toml").closest("button")!;
+    expect(row).toHaveTextContent("new sessions only");
+    expect(row.getAttribute("title")).toMatch(/existing sessions keep their own copy/);
+    fireEvent.click(row);
+    await waitFor(() => expect(mockReadFile).toHaveBeenCalledWith("s1", "/Users/test/.codex/config.toml"));
+    expect(screen.getByRole("dialog")).toHaveTextContent("existing sessions keep their own copy");
   });
 
   // Creating a project CLAUDE.md opens it in ClaudeMdEditor.

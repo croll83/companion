@@ -127,6 +127,19 @@ describe("ConfigFileEditor", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Failed to read file"));
   });
 
+  // Review finding: after a failed read the editor showed an empty, editable
+  // textarea with Save, so a >2MB or unreadable file could be overwritten by
+  // whatever the user typed. Neither the textarea nor Save may be offered.
+  it("never offers to edit or save a file that failed to load", async () => {
+    mockRead.mockRejectedValue(new Error("File too large (>2MB)"));
+    renderEditor();
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("File too large"));
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByText("Save")).not.toBeInTheDocument();
+    expect(screen.getByText(/could not be opened/)).toBeInTheDocument();
+    expect(mockWrite).not.toHaveBeenCalled();
+  });
+
   // Closing with unsaved changes asks first; cancelling keeps the editor open.
   it("confirms before discarding unsaved changes", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);

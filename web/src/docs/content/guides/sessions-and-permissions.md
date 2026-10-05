@@ -82,7 +82,7 @@ At the top of the panel, the **Project** and **User** sections list the configur
 - **Codex sessions**:
   - `AGENTS.md` from the session's directory up to the repository root
   - `~/.codex/AGENTS.md`. The Companion links it into every Codex session.
-  - `~/.codex/config.toml`
+  - `~/.codex/config.toml`. The Companion copies it into each Codex session when the session is created, so an edit applies only to sessions created afterwards. Existing and resumed sessions keep their own copy.
 
 Click a file to edit it. JSON and TOML files are checked before they are saved, and an invalid file is not written. Skills synced from claude.ai are read-only. Use the **+** button on a section to create a missing file, or a new command, agent or skill, from a template. The **+** button never overwrites an existing file.
 
