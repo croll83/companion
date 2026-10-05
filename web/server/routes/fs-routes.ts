@@ -3,6 +3,16 @@ import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Hono } from "hono";
+import {
+  classifyConfigPath,
+  collectWalkUp,
+  discoverClaudeConfig,
+  planNewConfigFile,
+  resolveConfigContext,
+  validateConfigContent,
+  type ConfigContext,
+  type NewConfigType,
+} from "../claude-config.js";
 
 /** Ensure a resolved path is within one of the allowed base directories.
  *  Returns the resolved absolute path, or null if it escapes all bases. */
@@ -58,10 +68,20 @@ function resolveBranchDiffBases(repoRoot: string): string[] {
   return ["main"];
 }
 
-export function registerFsRoutes(api: Hono, opts?: { allowedBases?: string[] }): void {
+export interface FsRoutesOptions {
+  /** Override the [home, process.cwd()] guard of the generic /fs/* routes (tests). */
+  allowedBases?: string[];
+  /** Home directory holding ~/.claude and ~/.codex (tests). Defaults to os.homedir(). */
+  homeDir?: string;
+  /** Session id -> launch cwd; anchors the project root of the config routes. */
+  getSessionCwd?: (sessionId: string) => string | undefined;
+}
+
+export function registerFsRoutes(api: Hono, opts?: FsRoutesOptions): void {
   // Allowed base directories for filesystem access.
   // Requests must target paths under the user's home directory or process cwd.
   const allowedBases = () => opts?.allowedBases ?? [homedir(), process.cwd()];
+  const homeDir = () => opts?.homeDir ?? homedir();
 
   api.get("/fs/list", async (c) => {
     const rawPath = c.req.query("path") || homedir();
@@ -366,215 +386,109 @@ export function registerFsRoutes(api: Hono, opts?: { allowedBases?: string[] }):
     }
   });
 
-  /** Find CLAUDE.md files for a project (root + .claude/) */
+  /** Find CLAUDE.md files for a project (root + .claude/), from cwd up to the repo root */
   api.get("/fs/claude-md", async (c) => {
     const cwd = c.req.query("cwd");
     if (!cwd) return c.json({ error: "cwd required" }, 400);
-    const resolvedCwd = resolve(cwd);
-
-    // Find the git repo root so we can search upward from cwd.
-    let repoRoot: string | null = null;
-    try {
-      repoRoot = execSync("git rev-parse --show-toplevel", {
-        cwd: resolvedCwd,
-        encoding: "utf-8",
-        timeout: 3000,
-      }).trim();
-    } catch {
-      // Not a git repo — only search the exact cwd
-    }
-
-    // Collect candidate directories: cwd, then each parent up to repo root.
-    const searchDirs: string[] = [];
-    let dir = resolvedCwd;
-    const stop = repoRoot ? resolve(repoRoot) : resolvedCwd;
-    while (true) {
-      searchDirs.push(dir);
-      if (dir === stop) break;
-      const parent = dirname(dir);
-      if (parent === dir) break; // filesystem root
-      dir = parent;
-    }
-
-    // Check CLAUDE.md and .claude/CLAUDE.md in each directory.
-    const seen = new Set<string>();
-    const files: { path: string; content: string }[] = [];
-    for (const d of searchDirs) {
-      for (const rel of ["CLAUDE.md", join(".claude", "CLAUDE.md")]) {
-        const p = join(d, rel);
-        if (seen.has(p)) continue;
-        seen.add(p);
-        try {
-          const content = await readFile(p, "utf-8");
-          files.push({ path: p, content });
-        } catch {
-          // file doesn't exist — skip
-        }
-      }
-    }
-
-    return c.json({ cwd: resolvedCwd, files });
+    const ctx = resolveConfigContext(cwd, homeDir());
+    const files = await collectWalkUp(ctx.walkDirs, ["CLAUDE.md", join(".claude", "CLAUDE.md")]);
+    return c.json({ cwd: ctx.cwd, files });
   });
 
+  /** Config context of a launcher-known session (its launch cwd), or null. */
+  const sessionContext = (sessionId: unknown): ConfigContext | null => {
+    if (typeof sessionId !== "string" || !sessionId) return null;
+    const cwd = opts?.getSessionCwd?.(sessionId);
+    return cwd ? resolveConfigContext(cwd, homeDir()) : null;
+  };
+
+  /**
+   * List Claude Code / Codex config files for the session's project and user.
+   * A `sessionId` known to the launcher wins over `cwd`, so the listing uses
+   * the same project root the config-file routes validate against.
+   */
   api.get("/fs/claude-config", async (c) => {
     const cwd = c.req.query("cwd");
-    if (!cwd) return c.json({ error: "cwd required" }, 400);
-    const resolvedCwd = resolve(cwd);
+    const ctx = sessionContext(c.req.query("sessionId"))
+      ?? (cwd ? resolveConfigContext(cwd, homeDir()) : null);
+    if (!ctx) return c.json({ error: "cwd required" }, 400);
+    return c.json(await discoverClaudeConfig(ctx));
+  });
 
-    // Find repo root
-    let repoRoot: string | null = null;
+  // ── Dedicated config file routes ──────────────────────────────────────
+  // These bypass the generic [home, process.cwd()] guard of /fs/read and
+  // /fs/write so projects outside $HOME work, but accept ONLY the known
+  // config files of the session's project or of ~/.claude / ~/.codex
+  // (see classifyConfigPath). The session cwd comes from the launcher, so a
+  // client cannot widen the allow-list by inventing a cwd.
+
+  api.get("/fs/config-file", async (c) => {
+    const ctx = sessionContext(c.req.query("sessionId"));
+    if (!ctx) return c.json({ error: "Unknown session" }, 404);
+    const filePath = c.req.query("path");
+    if (!filePath) return c.json({ error: "path required" }, 400);
+    const info = classifyConfigPath(filePath, ctx);
+    if (!info) return c.json({ error: "Not a known config file for this session" }, 403);
+    const absPath = resolve(filePath);
     try {
-      repoRoot = execSync("git rev-parse --show-toplevel", {
-        cwd: resolvedCwd,
-        encoding: "utf-8",
-        timeout: 3000,
-      }).trim();
-    } catch {
-      // Not a git repo
+      const st = await stat(absPath);
+      if (st.size > 2 * 1024 * 1024) return c.json({ error: "File too large (>2MB)" }, 413);
+      const content = await readFile(absPath, "utf-8");
+      return c.json({ path: absPath, content, format: info.format, readOnly: info.readOnly });
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Cannot read file" }, 404);
     }
-    const projectRoot = repoRoot ? resolve(repoRoot) : resolvedCwd;
+  });
 
-    // ── Project-level items ─────────────────────────────────────────────
-    // CLAUDE.md files — reuse walk-up logic
-    const searchDirs: string[] = [];
-    let dir = resolvedCwd;
-    const stop = projectRoot;
-    while (true) {
-      searchDirs.push(dir);
-      if (dir === stop) break;
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
+  api.put("/fs/config-file", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const ctx = sessionContext(body.sessionId);
+    if (!ctx) return c.json({ error: "Unknown session" }, 404);
+    const { path: filePath, content } = body;
+    if (typeof filePath !== "string" || !filePath || typeof content !== "string") {
+      return c.json({ error: "path and content required" }, 400);
     }
-    const seen = new Set<string>();
-    const projectClaudeMd: { path: string; content: string }[] = [];
-    for (const d of searchDirs) {
-      for (const rel of ["CLAUDE.md", join(".claude", "CLAUDE.md")]) {
-        const p = join(d, rel);
-        if (seen.has(p)) continue;
-        seen.add(p);
-        try {
-          const content = await readFile(p, "utf-8");
-          projectClaudeMd.push({ path: p, content });
-        } catch {
-          // file doesn't exist
-        }
-      }
+    const info = classifyConfigPath(filePath, ctx);
+    if (!info) return c.json({ error: "Not a known config file for this session" }, 403);
+    if (info.readOnly) return c.json({ error: "This file is read-only" }, 403);
+    const invalid = validateConfigContent(info.format, content);
+    if (invalid) return c.json({ error: invalid }, 400);
+    const absPath = resolve(filePath);
+    try {
+      await mkdir(dirname(absPath), { recursive: true });
+      await writeFile(absPath, content, "utf-8");
+      return c.json({ ok: true, path: absPath });
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Cannot write file" }, 500);
     }
+  });
 
-    // settings.json / settings.local.json
-    const claudeDir = join(projectRoot, ".claude");
-    let projectSettings: { path: string; content: string } | null = null;
-    let projectSettingsLocal: { path: string; content: string } | null = null;
+  /** Create a config file from a template ("New..." in the panel). Never overwrites. */
+  api.post("/fs/config-file", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const ctx = sessionContext(body.sessionId);
+    if (!ctx) return c.json({ error: "Unknown session" }, 404);
+    const { scope, type, name } = body as { scope?: unknown; type?: unknown; name?: unknown };
+    if ((scope !== "project" && scope !== "user") || typeof type !== "string") {
+      return c.json({ error: "scope and type required" }, 400);
+    }
+    const plan = planNewConfigFile(ctx, scope, type as NewConfigType, typeof name === "string" ? name : undefined);
+    if ("error" in plan) return c.json({ error: plan.error }, 400);
     try {
-      const p = join(claudeDir, "settings.json");
-      projectSettings = { path: p, content: await readFile(p, "utf-8") };
-    } catch { /* missing */ }
+      await mkdir(dirname(plan.path), { recursive: true });
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Cannot create directory" }, 500);
+    }
     try {
-      const p = join(claudeDir, "settings.local.json");
-      projectSettingsLocal = { path: p, content: await readFile(p, "utf-8") };
-    } catch { /* missing */ }
-
-    // commands/*.md
-    const projectCommands: { name: string; path: string }[] = [];
-    try {
-      const commandsDir = join(claudeDir, "commands");
-      const entries = await readdir(commandsDir, { withFileTypes: true });
-      for (const e of entries) {
-        if (e.isFile() && e.name.endsWith(".md")) {
-          projectCommands.push({ name: e.name.replace(/\.md$/, ""), path: join(commandsDir, e.name) });
-        }
+      // "wx" fails with EEXIST instead of overwriting (it also refuses a dangling symlink).
+      await writeFile(plan.path, plan.content, { encoding: "utf-8", flag: "wx" });
+      return c.json({ ok: true, path: plan.path });
+    } catch (e: unknown) {
+      if ((e as { code?: string }).code === "EEXIST") {
+        return c.json({ error: `${plan.path} already exists` }, 409);
       }
-      projectCommands.sort((a, b) => a.name.localeCompare(b.name));
-    } catch { /* missing dir */ }
-
-    // ── User-level items ────────────────────────────────────────────────
-    const userRoot = join(homedir(), ".claude");
-
-    // User CLAUDE.md
-    let userClaudeMd: { path: string; content: string } | null = null;
-    try {
-      const p = join(userRoot, "CLAUDE.md");
-      userClaudeMd = { path: p, content: await readFile(p, "utf-8") };
-    } catch { /* missing */ }
-
-    // Skills
-    const userSkills: { slug: string; name: string; description: string; path: string }[] = [];
-    try {
-      const skillsDir = join(userRoot, "skills");
-      const entries = await readdir(skillsDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const skillMdPath = join(skillsDir, entry.name, "SKILL.md");
-        try {
-          const content = await readFile(skillMdPath, "utf-8");
-          const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-          let name = entry.name;
-          let description = "";
-          if (fmMatch) {
-            for (const line of fmMatch[1].split("\n")) {
-              const nameMatch = line.match(/^name:\s*(.+)/);
-              if (nameMatch) name = nameMatch[1].trim().replace(/^["']|["']$/g, "");
-              const descMatch = line.match(/^description:\s*["']?(.+?)["']?\s*$/);
-              if (descMatch) description = descMatch[1];
-            }
-          }
-          userSkills.push({ slug: entry.name, name, description, path: skillMdPath });
-        } catch { /* no SKILL.md */ }
-      }
-      userSkills.sort((a, b) => a.name.localeCompare(b.name));
-    } catch { /* missing dir */ }
-
-    // Agents
-    const userAgents: { name: string; path: string }[] = [];
-    try {
-      const agentsDir = join(userRoot, "agents");
-      const entries = await readdir(agentsDir, { withFileTypes: true });
-      for (const e of entries) {
-        if (e.isFile() && e.name.endsWith(".md")) {
-          userAgents.push({ name: e.name.replace(/\.md$/, ""), path: join(agentsDir, e.name) });
-        }
-      }
-      userAgents.sort((a, b) => a.name.localeCompare(b.name));
-    } catch { /* missing dir */ }
-
-    // User settings.json
-    let userSettings: { path: string; content: string } | null = null;
-    try {
-      const p = join(userRoot, "settings.json");
-      userSettings = { path: p, content: await readFile(p, "utf-8") };
-    } catch { /* missing */ }
-
-    // User commands/*.md
-    const userCommands: { name: string; path: string }[] = [];
-    try {
-      const commandsDir = join(userRoot, "commands");
-      const entries = await readdir(commandsDir, { withFileTypes: true });
-      for (const e of entries) {
-        if (e.isFile() && e.name.endsWith(".md")) {
-          userCommands.push({ name: e.name.replace(/\.md$/, ""), path: join(commandsDir, e.name) });
-        }
-      }
-      userCommands.sort((a, b) => a.name.localeCompare(b.name));
-    } catch { /* missing dir */ }
-
-    return c.json({
-      project: {
-        root: projectRoot,
-        claudeMd: projectClaudeMd,
-        settings: projectSettings,
-        settingsLocal: projectSettingsLocal,
-        commands: projectCommands,
-      },
-      user: {
-        root: userRoot,
-        claudeMd: userClaudeMd,
-        skills: userSkills,
-        agents: userAgents,
-        settings: userSettings,
-        commands: userCommands,
-      },
-    });
+      return c.json({ error: e instanceof Error ? e.message : "Cannot create file" }, 500);
+    }
   });
 
   api.put("/fs/claude-md", async (c) => {

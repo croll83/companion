@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, realpathSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -1194,5 +1194,152 @@ describe("GET /fs/claude-config", () => {
     expect(body.project.root).toBe(resolve(nonGitDir));
 
     rmSync(nonGitDir, { recursive: true, force: true });
+  });
+});
+
+describe("session-scoped config routes", () => {
+  // These routes replace /fs/read and /fs/write for the config panel. The
+  // project here lives OUTSIDE allowedBases on purpose: projects outside $HOME
+  // must be readable/writable, but only their known config files.
+  let project: string;
+  let home: string;
+  let cfgApp: Hono;
+  const SESSION = "sess-1";
+
+  beforeEach(() => {
+    project = mkRealTempDir("cfg-project-");
+    home = mkRealTempDir("cfg-home-");
+    execSync("git init -q", { cwd: project });
+    cfgApp = new Hono();
+    registerFsRoutes(cfgApp, {
+      allowedBases: [join(home, "nowhere")],
+      homeDir: home,
+      getSessionCwd: (id) => (id === SESSION ? project : undefined),
+    });
+  });
+
+  afterEach(() => {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const put = (body: object) =>
+    cfgApp.request("/fs/config-file", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const post = (body: object) =>
+    cfgApp.request("/fs/config-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const get = (path: string, sessionId = SESSION) =>
+    cfgApp.request(`/fs/config-file?sessionId=${sessionId}&path=${encodeURIComponent(path)}`);
+
+  // The listing prefers the launcher's cwd for a known session, so it agrees
+  // with what the config routes will accept.
+  it("GET /fs/claude-config uses the session cwd and the configured home", async () => {
+    writeFileSync(join(project, ".mcp.json"), "{}");
+    mkdirSync(join(home, ".claude"));
+    writeFileSync(join(home, ".claude", "settings.local.json"), "{}");
+    const res = await cfgApp.request(`/fs/claude-config?sessionId=${SESSION}&cwd=/elsewhere`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.project.root).toBe(project);
+    expect(body.project.mcpJson.path).toBe(join(project, ".mcp.json"));
+    expect(body.user.settingsLocal.path).toBe(join(home, ".claude", "settings.local.json"));
+  });
+
+  it("GET /fs/config-file reads a known config file outside the generic guard", async () => {
+    writeFileSync(join(project, "CLAUDE.local.md"), "# local");
+    const res = await get(join(project, "CLAUDE.local.md"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      path: join(project, "CLAUDE.local.md"),
+      content: "# local",
+      format: "markdown",
+      readOnly: false,
+    });
+  });
+
+  it("GET /fs/config-file rejects unknown sessions, missing paths and non-config files", async () => {
+    writeFileSync(join(project, "secret.txt"), "x");
+    expect((await get(join(project, "CLAUDE.md"), "nope")).status).toBe(404);
+    expect((await cfgApp.request(`/fs/config-file?sessionId=${SESSION}`)).status).toBe(400);
+    expect((await get(join(project, "secret.txt"))).status).toBe(403);
+    expect((await get(join(project, "CLAUDE.md"))).status).toBe(404); // known path, file missing
+  });
+
+  it("GET /fs/config-file refuses files larger than 2MB", async () => {
+    writeFileSync(join(project, "CLAUDE.md"), "x".repeat(2 * 1024 * 1024 + 1));
+    expect((await get(join(project, "CLAUDE.md"))).status).toBe(413);
+  });
+
+  // settings.json used to be read-only; now it is editable but only with valid JSON.
+  it("PUT /fs/config-file saves valid JSON and rejects invalid JSON without writing", async () => {
+    const settings = join(project, ".claude", "settings.json");
+    const ok = await put({ sessionId: SESSION, path: settings, content: '{"a":1}' });
+    expect(ok.status).toBe(200);
+    expect(readFileSync(settings, "utf-8")).toBe('{"a":1}');
+
+    const bad = await put({ sessionId: SESSION, path: settings, content: "{broken" });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toMatch(/^Invalid JSON/);
+    expect(readFileSync(settings, "utf-8")).toBe('{"a":1}');
+  });
+
+  it("PUT /fs/config-file refuses read-only, unknown and malformed requests", async () => {
+    const synced = join(home, ".claude", "skills", "synced", "id", "pdf", "SKILL.md");
+    expect((await put({ sessionId: SESSION, path: synced, content: "x" })).status).toBe(403);
+    expect((await put({ sessionId: SESSION, path: join(home, ".bashrc"), content: "x" })).status).toBe(403);
+    expect((await put({ sessionId: "nope", path: join(project, "CLAUDE.md"), content: "x" })).status).toBe(404);
+    expect((await put({ sessionId: SESSION, path: join(project, "CLAUDE.md") })).status).toBe(400);
+  });
+
+  it("PUT /fs/config-file reports write failures", async () => {
+    // A directory where the file should be makes writeFile fail.
+    mkdirSync(join(project, "CLAUDE.md"));
+    const res = await put({ sessionId: SESSION, path: join(project, "CLAUDE.md"), content: "x" });
+    expect(res.status).toBe(500);
+  });
+
+  // "New..." creates parent dirs and a template, and never overwrites.
+  it("POST /fs/config-file creates from a template and refuses to overwrite", async () => {
+    const res = await post({ sessionId: SESSION, scope: "user", type: "skill", name: "my-skill" });
+    expect(res.status).toBe(200);
+    const path = join(home, ".claude", "skills", "my-skill", "SKILL.md");
+    expect((await res.json()).path).toBe(path);
+    expect(readFileSync(path, "utf-8")).toContain("name: my-skill");
+
+    writeFileSync(path, "edited");
+    const again = await post({ sessionId: SESSION, scope: "user", type: "skill", name: "my-skill" });
+    expect(again.status).toBe(409);
+    expect(readFileSync(path, "utf-8")).toBe("edited");
+  });
+
+  it("POST /fs/config-file validates session, scope, type and name", async () => {
+    expect((await post({ sessionId: "nope", scope: "project", type: "claude-md" })).status).toBe(404);
+    expect((await post({ sessionId: SESSION, scope: "global", type: "claude-md" })).status).toBe(400);
+    expect((await post({ sessionId: SESSION, scope: "project", type: "command", name: "../x" })).status).toBe(400);
+  });
+
+  it("POST /fs/config-file reports filesystem failures", async () => {
+    // A file where the parent directory should be makes mkdir fail.
+    writeFileSync(join(project, ".claude"), "not a dir");
+    const res = await post({ sessionId: SESSION, scope: "project", type: "settings" });
+    expect(res.status).toBe(500);
+
+    // A non-writable parent makes the exclusive create fail with a non-EEXIST error.
+    const locked = join(home, ".claude");
+    mkdirSync(locked);
+    chmodSync(locked, 0o500);
+    try {
+      const denied = await post({ sessionId: SESSION, scope: "user", type: "settings" });
+      expect(denied.status).toBe(500);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
   });
 });
