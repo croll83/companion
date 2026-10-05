@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.3.0](https://github.com/croll83/companion/compare/the-companion-v1.2.0...the-companion-v1.3.0) (2026-10-05)
+
+
+### Features
+
+* **agents-ui:** pick Brief or Fork a session in the agent editor ([a2c1595](https://github.com/croll83/companion/commit/a2c159515bcd7f233926b30b2b8a1c977482389e))
+* **agents-ui:** Runs in the sidebar, honest permissions, run and schedule state ([d85a96c](https://github.com/croll83/companion/commit/d85a96c873bce1508de00ca07999c4faced43dbc))
+* **agents:** "fork" context mode — runs start from a copy of a session ([084a666](https://github.com/croll83/companion/commit/084a666fb96dcbb9be927b9e6cbacfed86dd6891))
+* **agents:** finish runs on their result, guard the webhook, validate schedules ([ce50ee5](https://github.com/croll83/companion/commit/ce50ee5bab168495194e3d6da3d527a3cf872a69))
+* **config-panel:** editable settings, New… actions and Codex files in the Project/User panel ([7a85b47](https://github.com/croll83/companion/commit/7a85b4720c28d99ac3231a91d70940fe9899bd3f))
+* **envs:** folder-scoped env profiles resolved at every spawn and relaunch ([852c441](https://github.com/croll83/companion/commit/852c4418edaddc3d9bbb6f74fb977ce0d5cc8375))
+* **envs:** scope editor, grouped list and applied profiles in the UI ([f326065](https://github.com/croll83/companion/commit/f3260651022cfa5ad844c0d6f610b5a7e0a1e6aa))
+* folder-scoped environments, agents overhaul, session wake-ups and a built-in Companion MCP ([186954d](https://github.com/croll83/companion/commit/186954d537da4830bb053ad898d883862bc5f799))
+* **mcp-ui:** Settings switch, "Created by session" on agents, Companion MCP guide ([2ba67b1](https://github.com/croll83/companion/commit/2ba67b100651070c51e2539e42d58f136e76e54d))
+* **mcp:** built-in companion MCP server for wake-ups and agents ([17e8ae7](https://github.com/croll83/companion/commit/17e8ae701ab843ca166cdc57f9f71b47c9e15e51))
+* **server:** discover Claude/Codex config like the CLIs and add session-scoped config file routes ([e596db1](https://github.com/croll83/companion/commit/e596db1473fb94e2c944f154df623ca23f1bbc8b))
+* **sessions:** scheduled wake-ups and messages to stopped sessions ([92947ed](https://github.com/croll83/companion/commit/92947ede776d70a42a3c20098696d749eabff721))
+
+
+### Bug Fixes
+
+* **agents:** leave other instances' runs and live sessions' folders alone ([aaea8b3](https://github.com/croll83/companion/commit/aaea8b35ddab447d983c1a9b0f2d652b1303ab23))
+* **codex:** give Companion sessions the user's global AGENTS.md ([ba6d8c6](https://github.com/croll83/companion/commit/ba6d8c68414f9fddc67031ecb480692a34c6161b))
+* **codex:** give Companion sessions the user's global AGENTS.md ([d0b1387](https://github.com/croll83/companion/commit/d0b1387fc6b0c962428951e49b3d9906b9690acb))
+* **codex:** keep workspace-write sessions in their sandbox on every turn ([13807ac](https://github.com/croll83/companion/commit/13807ac5689c2927b8dafe7f6e669b5a896c2d61))
+* **config-panel:** guard failed loads, label config.toml scope, hide empty New menus ([a4f262f](https://github.com/croll83/companion/commit/a4f262fe0b154e8d86d12d26b2a504d6783e0a0f))
+* **config-panel:** make the Project/User panel discover, create and edit config like the CLIs; fix the @ prompt menu ([af82559](https://github.com/croll83/companion/commit/af8255942aef42e2413bc5d587b1b73caf710967))
+* **logger:** never delete the service's live stdout/stderr log files ([9a34fc9](https://github.com/croll83/companion/commit/9a34fc9316d22a5a76403072bf9429e21d0c751c))
+* **logger:** never delete the service's live stdout/stderr log files ([f00265e](https://github.com/croll83/companion/commit/f00265ef4d87a3c3379fa5fb00eb702a1100dd55))
+* **mcp:** MCP tokens read only their own session record ([800074f](https://github.com/croll83/companion/commit/800074f7e67630803540cdb88f16ffbf28476d96))
+* **mcp:** scope session tokens and close the ways out of a restricted session ([108d3d7](https://github.com/croll83/companion/commit/108d3d7915b1876839988cfaf98e4d614fb7b200))
+* **prompts:** editable composer while disconnected and an honest Enter hint ([4e1bc09](https://github.com/croll83/companion/commit/4e1bc09f720f6cd70666f98936706bed20958b73))
+* **prompts:** let Enter send unless a saved prompt was explicitly picked ([a8c907f](https://github.com/croll83/companion/commit/a8c907fc74b7ef2d4d411e8aba097050159eda56))
+* **server:** honour COMPANION_HOME for the auth token and Linear connections ([591dcf5](https://github.com/croll83/companion/commit/591dcf5dffd09f982e7fbc480739ccc3a81b9da8))
+* **server:** keep config-file routes from following project symlinks outside the project ([d010f1e](https://github.com/croll83/companion/commit/d010f1e6ea0082fdc521411dc47902d1bf5c7f08))
+* **server:** reject session requests that ask for a removed sandbox ([8e42f53](https://github.com/croll83/companion/commit/8e42f5394c6a31b70b9d9392a083e4e2afd7e9df))
+* **server:** warn at startup about a Funnel left on by older versions ([c6ec997](https://github.com/croll83/companion/commit/c6ec997299ead6443dd164cad4d6134850d98a0f))
+* **server:** write agents, settings and Linear connections owner-only ([c6bfe13](https://github.com/croll83/companion/commit/c6bfe137765962216602f73bb0d38d974304f430))
+
+
+### Code Refactoring
+
+* drop the container-only creation progress detail ([cc3ccbe](https://github.com/croll83/companion/commit/cc3ccbe9cce292abc1bfcfc27b387ea9e266bebd))
+* **logger:** drop the redundant rotation dedupe and document the bound's scope ([a9ac20d](https://github.com/croll83/companion/commit/a9ac20d231312c7b6ac09ae161dd0e6368464185))
+* remove container sessions and sandboxes ([d887f5f](https://github.com/croll83/companion/commit/d887f5f17cbd9de5d0484b423bf4323f398b330c))
+* remove the Tailscale integration and container sandboxes ([f8c53cb](https://github.com/croll83/companion/commit/f8c53cb00bddc77e9e1e12d77b33d9c0ee430c6f))
+* **server:** delete the unused session-creation-service ([3da909c](https://github.com/croll83/companion/commit/3da909ccba59021b2836dbc976d25bda1871b58b))
+* **server:** remove the Tailscale Funnel manager and routes ([abbca25](https://github.com/croll83/companion/commit/abbca25a9d827272b3af35ba672fd0ef9c46327d))
+* **ui:** remove the Tailscale integration page and card ([a2b32ec](https://github.com/croll83/companion/commit/a2b32ec583eb64da2b18fa8010caa2b59b1e5641))
+
 ## [1.2.0](https://github.com/croll83/companion/compare/the-companion-v1.1.0...the-companion-v1.2.0) (2026-10-04)
 
 
