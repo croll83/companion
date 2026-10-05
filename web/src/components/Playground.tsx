@@ -2209,7 +2209,10 @@ export function Playground() {
               <div className="border-t border-cc-border bg-cc-card px-4 py-3">
                 <div className="relative bg-cc-input-bg/95 border border-cc-border rounded-[14px] shadow-[0_10px_30px_rgba(0,0,0,0.10)] overflow-visible">
                   {/* Real MentionMenu: "@rev" suggests review-pr. Tab, a click,
-                      or arrows/hover + Enter insert it; Enter alone sends. */}
+                      or arrows/hover + Enter insert it; Enter alone sends.
+                      No enterPrompt here, so the hint reads "Enter alone
+                      sends as typed" (an exact "@review-pr" would read
+                      "Enter inserts @review-pr"). */}
                   <MentionMenu
                     open
                     loading={false}

@@ -842,6 +842,7 @@ export function HomePage() {
             selectedIndex={mention.mentionMenuIndex}
             onSelect={handleSelectPrompt}
             onHover={mention.hoverPrompt}
+            enterPrompt={mention.enterPrompt}
             menuRef={mention.mentionMenuRef}
             className="absolute left-2 right-2 bottom-full mb-1"
           />

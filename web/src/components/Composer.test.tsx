@@ -427,12 +427,21 @@ describe("Composer slash menu", () => {
 // ─── Disabled state ──────────────────────────────────────────────────────────
 
 describe("Composer disabled state", () => {
-  it("textarea is disabled when CLI is not connected", () => {
+  // Behaviour change (review finding on Task B #5): the textarea used to be
+  // disabled while the CLI was disconnected, which made "Save as prompt"
+  // unusable in a session opened disconnected. It now stays editable, and
+  // what the old test protected (nothing reaches a disconnected CLI) is
+  // asserted instead: Enter does not send and the text is kept.
+  it("textarea stays editable when CLI is not connected, but Enter does not send", () => {
     setupMockStore({ isConnected: false });
     const { container } = render(<Composer sessionId="s1" />);
     const textarea = container.querySelector("textarea")! as HTMLTextAreaElement;
 
-    expect(textarea.disabled).toBe(true);
+    expect(textarea.disabled).toBe(false);
+    fireEvent.change(textarea, { target: { value: "draft" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(mockSendToSession).not.toHaveBeenCalled();
+    expect(textarea.value).toBe("draft");
   });
 
   it("textarea shows correct placeholder when connected", () => {
@@ -944,6 +953,23 @@ describe("Composer save prompt", () => {
 
     await waitFor(() => {
       expect(mockCreatePrompt).toHaveBeenCalledWith({ name: "Reusable", content: "Reusable body", scope: "global" });
+    });
+  });
+
+  // Review finding: the previous test typed while connected; a session opened
+  // while its CLI is disconnected had a disabled textarea, so no text could
+  // ever be entered and Save as prompt stayed disabled.
+  it("Save as prompt works in a session that starts disconnected", async () => {
+    setupMockStore({ isConnected: false });
+    const { container } = render(<Composer sessionId="s1" />);
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "Offline body" } });
+
+    fireEvent.click(screen.getAllByTitle("Save as prompt")[0]);
+    fireEvent.change(screen.getByPlaceholderText("Prompt title"), { target: { value: "Offline" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(mockCreatePrompt).toHaveBeenCalledWith({ name: "Offline", content: "Offline body", scope: "global" });
     });
   });
 

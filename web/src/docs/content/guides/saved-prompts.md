@@ -58,6 +58,8 @@ Once you've created prompts, you can insert them with `@` in the session compose
 
 **Enter alone sends.** If you have not moved through the menu and the `@token` is not an exact prompt name, Enter sends the message as typed, `@token` included. This applies to a bare `@`, to a partial name such as `@rev`, and to a token that matches no prompt. A message ending in `@something` is never silently held back.
 
+The line at the bottom of the menu tells you what Enter will do. It reads **Enter inserts @name** when Enter would insert a prompt (an exact name, or a prompt you highlighted). Otherwise it reads **Enter alone sends as typed**.
+
 **Escape** closes the menu. It stays closed until you leave that `@token`. **Shift+Enter** always inserts a new line.
 
 ### File references are left alone

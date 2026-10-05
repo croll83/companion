@@ -472,6 +472,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             selectedIndex={mention.mentionMenuIndex}
             onSelect={selectPrompt}
             onHover={mention.hoverPrompt}
+            enterPrompt={mention.enterPrompt}
             menuRef={mention.mentionMenuRef}
             className="absolute left-2 right-2 bottom-full mb-1"
           />
@@ -633,14 +634,16 @@ export function Composer({ sessionId }: { sessionId: string }) {
               onKeyUp={syncCaret}
               onPaste={handlePaste}
               aria-label="Message input"
+              // Stays editable while the CLI is disconnected: drafting and
+              // "Save as prompt" need only text. Sending is still blocked
+              // (canSend / handleSend check isConnected).
               placeholder={!isConnected
-                ? "Waiting for CLI connection..."
+                ? "Waiting for CLI connection... (you can type, sending waits)"
                 : willSteer
                   ? "Add to what it's doing now... (/ + @)"
                   : "Type a message... (/ + @)"}
-              disabled={!isConnected}
               rows={1}
-              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
+              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted overflow-y-auto"
               style={{ minHeight: "36px", maxHeight: "200px" }}
             />
           </div>

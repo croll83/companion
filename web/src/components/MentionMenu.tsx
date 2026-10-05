@@ -8,6 +8,9 @@ interface MentionMenuProps {
   onSelect: (prompt: SavedPrompt) => void;
   /** Pointer moved over item `index`: highlight it so Enter picks it. */
   onHover?: (index: number) => void;
+  /** The prompt a plain Enter would insert (useMentionMenu's `enterPrompt`);
+   *  null/absent means Enter sends the message as typed. Drives the hint line. */
+  enterPrompt?: SavedPrompt | null;
   menuRef: React.RefObject<HTMLDivElement | null>;
   className?: string;
 }
@@ -19,6 +22,7 @@ export function MentionMenu({
   selectedIndex,
   onSelect,
   onHover,
+  enterPrompt,
   menuRef,
   className = "",
 }: MentionMenuProps) {
@@ -64,7 +68,9 @@ export function MentionMenu({
             </button>
           ))}
           <div className="px-3 pt-1.5 pb-1 mt-1 border-t border-cc-border text-[10px] text-cc-muted">
-            Tab or ↑↓ + Enter inserts · Enter alone sends as typed
+            {enterPrompt
+              ? `Enter inserts @${enterPrompt.name}`
+              : "Tab or ↑↓ + Enter inserts · Enter alone sends as typed"}
           </div>
         </>
       ) : (

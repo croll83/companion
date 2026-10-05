@@ -168,6 +168,19 @@ export function useMentionMenu({ text, caretPos, cwd, enabled = true }: UseMenti
     [mentionContext, text, caretPos],
   );
 
+  /**
+   * The prompt a plain Enter inserts, or null when Enter sends the message as
+   * typed: the highlighted prompt once the user navigated the menu, otherwise
+   * a prompt whose name is exactly the typed token. The menu's hint line uses
+   * this too, so what it says matches what Enter does.
+   */
+  const enterPrompt = useMemo<SavedPrompt | null>(() => {
+    if (!mentionMenuOpen || filteredPrompts.length === 0) return null;
+    if (navigated) return filteredPrompts[mentionMenuIndex] ?? null;
+    const lowerQuery = mentionContext?.query.toLowerCase() ?? "";
+    return filteredPrompts.find((p) => p.name.toLowerCase() === lowerQuery) ?? null;
+  }, [mentionMenuOpen, filteredPrompts, navigated, mentionMenuIndex, mentionContext]);
+
   /** Pointer movement over an item highlights it and counts as navigation. */
   const hoverPrompt = useCallback((index: number) => {
     setMentionMenuIndex(index);
@@ -208,18 +221,14 @@ export function useMentionMenu({ text, caretPos, cwd, enabled = true }: UseMenti
         if (count > 0) onSelect(filteredPrompts[mentionMenuIndex] ?? filteredPrompts[0]);
         return true;
       }
-      if (e.key === "Enter" && count > 0) {
-        const lowerQuery = mentionContext?.query.toLowerCase() ?? "";
-        const exact = filteredPrompts.find((p) => p.name.toLowerCase() === lowerQuery);
-        const choice = navigated ? filteredPrompts[mentionMenuIndex] : exact;
-        if (!choice) return false;
+      if (e.key === "Enter" && enterPrompt) {
         e.preventDefault();
-        onSelect(choice);
+        onSelect(enterPrompt);
         return true;
       }
       return false;
     },
-    [mentionMenuOpen, mentionContext, filteredPrompts, mentionMenuIndex, navigated],
+    [mentionMenuOpen, mentionContext, filteredPrompts, mentionMenuIndex, enterPrompt],
   );
 
   return {
@@ -236,5 +245,6 @@ export function useMentionMenu({ text, caretPos, cwd, enabled = true }: UseMenti
     mentionMenuRef,
     hoverPrompt,
     handleMentionKeyDown,
+    enterPrompt,
   };
 }

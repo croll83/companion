@@ -328,6 +328,27 @@ describe("useMentionMenu behaviour", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  // enterPrompt feeds the menu's hint line, so it must agree with what a
+  // plain Enter does in every case: nothing for a bare/partial token, the
+  // exact-name prompt, and the highlighted prompt after navigation.
+  it("exposes the prompt a plain Enter would insert as enterPrompt", async () => {
+    const { result, rerender } = renderHook((props) => useMentionMenu(props), {
+      initialProps: { text: "@rev", caretPos: 4, cwd: "/repo" },
+    });
+    await act(async () => {});
+    expect(result.current.enterPrompt).toBeNull();
+
+    rerender({ text: "@review", caretPos: 7, cwd: "/repo" });
+    await act(async () => {});
+    expect(result.current.enterPrompt).toBe(samplePrompts[0]);
+
+    rerender({ text: "@", caretPos: 1, cwd: "/repo" });
+    await act(async () => {});
+    expect(result.current.enterPrompt).toBeNull();
+    act(() => { result.current.hoverPrompt(2); });
+    expect(result.current.enterPrompt).toBe(samplePrompts[2]);
+  });
+
   it("hovering counts as navigation", async () => {
     const { result } = renderHook(() => useMentionMenu({ text: "@", caretPos: 1, cwd: "/repo" }));
     await act(async () => {});
