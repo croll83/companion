@@ -23,7 +23,6 @@ import { TerminalManager } from "./terminal-manager.js";
 import { PRPoller } from "./pr-poller.js";
 import { RecorderManager } from "./recorder.js";
 import { initLogFile, closeLogFile } from "./logger.js";
-import { CronScheduler } from "./cron-scheduler.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
@@ -58,7 +57,6 @@ const worktreeTracker = new WorktreeTracker();
 const terminalManager = new TerminalManager();
 const prPoller = new PRPoller(wsBridge);
 const recorder = new RecorderManager();
-const cronScheduler = new CronScheduler(launcher, wsBridge);
 const agentExecutor = new AgentExecutor(launcher, wsBridge);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
@@ -103,7 +101,7 @@ app.get("/health", (c) => {
 });
 
 app.use("/api/*", cors());
-app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
+app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, agentExecutor, linearAgentBridge, port));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
 // on first launch. iOS gives standalone PWAs isolated storage from Safari,
@@ -348,10 +346,8 @@ if (process.env.NODE_ENV !== "production") {
   console.log("Dev mode: frontend at http://localhost:5174");
 }
 
-// ── Cron scheduler ──────────────────────────────────────────────────────────
-cronScheduler.startAll();
-
 // ── Agent system ────────────────────────────────────────────────────────────
+// Old installs' "Scheduled Runs" jobs become agents (once, flag file).
 migrateCronJobsToAgents();
 migrateLinearCredentialsToAgents();
 agentExecutor.startAll();

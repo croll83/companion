@@ -1,14 +1,16 @@
 import { Cron } from "croner";
-import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { AgentConfig, AgentExecution } from "./agent-types.js";
 import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
+import type { BrowserIncomingMessage, CLIResultMessage } from "./session-types.js";
 import * as agentStore from "./agent-store.js";
 import * as envManager from "./env-manager.js";
 import * as sessionNames from "./session-names.js";
 import { ExecutionStore } from "./execution-store.js";
+import { nextScheduledRun, scheduleTimeZone, scheduleTimeZoneLabel } from "./agent-schedule.js";
 
 /** Max consecutive failures before auto-disabling an agent */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -16,15 +18,67 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 const CLI_CONNECT_TIMEOUT_MS = 30_000;
 /** Poll interval when waiting for CLI connection */
 const CLI_CONNECT_POLL_MS = 500;
+/** Prefix of the working directories created for cwd:"temp" agents. */
+const TEMP_CWD_PREFIX = "companion-agent-";
+/** Longest error text kept on a run record. */
+const MAX_ERROR_LENGTH = 2000;
 
 export interface ExecuteAgentOptions {
+  /**
+   * Skip both the enabled and the overlap checks. Used by the Linear trigger,
+   * where every Linear thread gets its own session.
+   */
   force?: boolean;
-  triggerType?: "manual" | "webhook" | "schedule" | "linear";
+  /** Run even if the agent is disabled (manual "Run now"). Overlap still applies. */
+  ignoreEnabled?: boolean;
+  triggerType?: AgentExecution["triggerType"];
   additionalEnv?: Record<string, string>;
   systemPrompt?: string;
 }
 
+/** Outcome of asking for a run: started, or refused with an HTTP-like status. */
+export type StartRunResult =
+  | { ok: true }
+  | { ok: false; status: 404 | 409; error: string };
+
+/**
+ * The prompt sent for a run. `{{input}}` placeholders are replaced by the
+ * trigger input (or removed when there is none). A prompt without the
+ * placeholder still gets non-empty input, appended as a delimited block so
+ * webhook payloads and Linear context are never silently dropped.
+ */
+export function buildAgentPrompt(template: string, input?: string): string {
+  if (template.includes("{{input}}")) {
+    // Function replacer: "$&"-style patterns in the input stay literal.
+    return template.replace(/\{\{input\}\}/g, () => input ?? "");
+  }
+  if (input === undefined || !input.trim()) return template;
+  return `${template}\n\nInput provided by the trigger:\n<trigger_input>\n${input}\n</trigger_input>`;
+}
+
+/**
+ * True for a directory this executor created with mkdtemp for a "temp"
+ * agent — the only kind of directory it will ever delete.
+ */
+export function isAgentTempDir(dir: string | undefined): dir is string {
+  if (!dir) return false;
+  const full = resolve(dir);
+  return resolve(dirname(full)) === resolve(tmpdir()) && basename(full).startsWith(TEMP_CWD_PREFIX);
+}
+
+function resultErrorText(data: CLIResultMessage): string {
+  const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean).join("; ") : "";
+  const text = errors || (typeof data.result === "string" && data.result.trim()) || `Run ended with ${data.subtype}`;
+  return text.length > MAX_ERROR_LENGTH ? `${text.slice(0, MAX_ERROR_LENGTH)}…` : text;
+}
+
 export class AgentExecutor {
+  /**
+   * After the CLI exits without a result, wait this long before failing the
+   * run: the result line can still be on its way through the stdout reader.
+   */
+  static EXIT_GRACE_MS = 2000;
+
   private timers = new Map<string, Cron>();
   private launcher: CliLauncher;
   private wsBridge: WsBridge;
@@ -33,10 +87,24 @@ export class AgentExecutor {
   private static readonly MAX_EXECUTIONS_PER_AGENT = 50;
   /** Persistent execution store (JSONL on disk) */
   private executionStore = new ExecutionStore();
+  /** Runs whose session exists and has not produced a result yet, by session id. */
+  private activeRuns = new Map<string, AgentExecution>();
+  /** Runs being launched (no session id yet), counted per agent id. */
+  private launching = new Map<string, number>();
+  /** Pending "CLI exited first" failures, by session id. */
+  private exitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Schedule problems to show on the agent (invalid, past or skipped), by agent id. */
+  private scheduleIssues = new Map<string, string>();
 
   constructor(launcher: CliLauncher, wsBridge: WsBridge) {
     this.launcher = launcher;
     this.wsBridge = wsBridge;
+    // A server restart kills every CLI: runs still open on disk can never
+    // report a result, and leaving them "running" would block their agents.
+    const closed = this.executionStore.finalizeInterrupted("Interrupted: the server restarted before the run finished");
+    if (closed > 0) {
+      console.log(`[agent-executor] Closed ${closed} run(s) interrupted by a server restart`);
+    }
   }
 
   /** Start all enabled agents with schedule triggers from disk. Called once at server startup. */
@@ -52,60 +120,80 @@ export class AgentExecutor {
     if (started > 0) {
       console.log(`[agent-executor] Started ${started} scheduled agent(s)`);
     }
+    // Temp dirs of runs whose sessions were archived/deleted while we were down.
+    for (const exec of this.executionStore.all()) this.cleanupTempCwd(exec);
   }
 
-  /** Schedule (or reschedule) an agent's cron trigger. */
+  /** Re-arm every schedule, e.g. after the global timeZone setting changed. */
+  rescheduleAll(): void {
+    for (const agent of agentStore.listAgents()) this.scheduleAgent(agent);
+  }
+
+  /** Schedule (or reschedule) an agent's cron trigger in the global timeZone setting. */
   scheduleAgent(agent: AgentConfig): void {
     this.stopAgent(agent.id);
 
     const schedule = agent.triggers?.schedule;
     if (!agent.enabled || !schedule?.enabled || !schedule.expression) return;
 
+    const timezone = scheduleTimeZone();
     try {
       if (schedule.recurring) {
-        const cronTask = new Cron(schedule.expression, {}, () => {
-          this.executeAgent(agent.id, undefined, { triggerType: "schedule" }).catch((err) => {
-            console.error(`[agent-executor] Unhandled error in agent "${agent.name}":`, err);
-          });
+        const cronTask = new Cron(schedule.expression.trim(), { mode: "5-part", timezone }, () => {
+          this.fireSchedule(agent.id, false);
         });
         this.timers.set(agent.id, cronTask);
-        console.log(`[agent-executor] Scheduled "${agent.name}" with cron "${schedule.expression}"`);
-      } else {
-        // One-shot: schedule for the specified datetime
-        const targetTime = new Date(schedule.expression);
-        if (targetTime.getTime() > Date.now()) {
-          const cronTask = new Cron(targetTime, () => {
-            this.executeAgent(agent.id, undefined, { triggerType: "schedule" })
-              .then(() => {
-                // Auto-disable schedule after one-shot execution
-                const current = agentStore.getAgent(agent.id);
-                if (current?.triggers?.schedule) {
-                  agentStore.updateAgent(agent.id, {
-                    triggers: {
-                      ...current.triggers,
-                      schedule: { ...current.triggers.schedule, enabled: false },
-                    },
-                  });
-                }
-                this.timers.delete(agent.id);
-              })
-              .catch((err) => {
-                console.error(`[agent-executor] Unhandled error in one-shot agent "${agent.name}":`, err);
-              });
-          });
-          this.timers.set(agent.id, cronTask);
-          console.log(`[agent-executor] Scheduled one-shot "${agent.name}" at ${targetTime.toISOString()}`);
-        } else {
-          console.log(`[agent-executor] Skipping one-shot "${agent.name}" — target time is in the past`);
-        }
+        console.log(`[agent-executor] Scheduled "${agent.name}" with cron "${schedule.expression}" (${scheduleTimeZoneLabel(timezone)})`);
+        return;
       }
+      const target = nextScheduledRun(schedule, timezone);
+      if (!target) {
+        const issue = `One-time run at ${schedule.expression} (${scheduleTimeZoneLabel(timezone)}) did not run: that time has passed`;
+        this.scheduleIssues.set(agent.id, issue);
+        console.warn(`[agent-executor] "${agent.name}": ${issue}`);
+        return;
+      }
+      const cronTask = new Cron(target, () => {
+        this.timers.delete(agent.id);
+        this.disableOneShot(agent.id);
+        this.fireSchedule(agent.id, true);
+      });
+      this.timers.set(agent.id, cronTask);
+      console.log(`[agent-executor] Scheduled one-shot "${agent.name}" at ${target.toISOString()}`);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.scheduleIssues.set(agent.id, `Schedule not armed: ${message}`);
       console.error(`[agent-executor] Failed to schedule "${agent.name}":`, err);
     }
   }
 
-  /** Stop an agent's cron timer. */
+  /** A schedule fired: start a run, reporting (not hiding) a refused one. */
+  private fireSchedule(agentId: string, oneShot: boolean): void {
+    const result = this.startRun(agentId, undefined, { triggerType: "schedule" });
+    if (result.ok) {
+      this.scheduleIssues.delete(agentId);
+      return;
+    }
+    const issue = `${oneShot ? "One-time" : "Scheduled"} run at ${new Date().toISOString()} skipped: ${result.error}`;
+    this.scheduleIssues.set(agentId, issue);
+    console.log(`[agent-executor] ${agentId}: ${issue}`);
+  }
+
+  /** A one-shot schedule is spent once it fires. */
+  private disableOneShot(agentId: string): void {
+    const current = agentStore.getAgent(agentId);
+    if (!current?.triggers?.schedule) return;
+    agentStore.updateAgent(agentId, {
+      triggers: {
+        ...current.triggers,
+        schedule: { ...current.triggers.schedule, enabled: false },
+      },
+    });
+  }
+
+  /** Stop an agent's cron timer (and forget its schedule problems). */
   stopAgent(agentId: string): void {
+    this.scheduleIssues.delete(agentId);
     const timer = this.timers.get(agentId);
     if (timer) {
       timer.stop();
@@ -113,23 +201,69 @@ export class AgentExecutor {
     }
   }
 
+  /** Why the agent's schedule is not running as configured, if it is not. */
+  getScheduleIssue(agentId: string): string | null {
+    return this.scheduleIssues.get(agentId) ?? null;
+  }
+
+  /** True while a run of this agent is launching or waiting for its result. */
+  isRunInProgress(agentId: string): boolean {
+    return this.activeRunSession(agentId) !== undefined;
+  }
+
+  /** Session of the agent's run in progress ("" while launching), or undefined. */
+  private activeRunSession(agentId: string): string | undefined {
+    for (const [sessionId, exec] of this.activeRuns) {
+      if (exec.agentId === agentId) return sessionId;
+    }
+    return (this.launching.get(agentId) ?? 0) > 0 ? "" : undefined;
+  }
+
+  private checkStart(agent: AgentConfig | null, opts: ExecuteAgentOptions): StartRunResult {
+    if (!agent) return { ok: false, status: 404, error: "Agent not found" };
+    if (opts.force) return { ok: true };
+    if (!agent.enabled && !opts.ignoreEnabled) {
+      return { ok: false, status: 409, error: `Agent "${agent.name}" is disabled` };
+    }
+    const running = this.activeRunSession(agent.id);
+    if (running !== undefined) {
+      return {
+        ok: false,
+        status: 409,
+        error: `A run of agent "${agent.name}" is still in progress${running ? ` (session ${running})` : ""}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Start a run in the background after the synchronous checks (exists,
+   * enabled, no run in progress). The run is reserved before this returns,
+   * so two triggers arriving together cannot both start one.
+   */
+  startRun(agentId: string, input?: string, opts: ExecuteAgentOptions = {}): StartRunResult {
+    const gate = this.checkStart(agentStore.getAgent(agentId), opts);
+    if (!gate.ok) return gate;
+    this.executeAgent(agentId, input, opts).catch((err) => {
+      console.error(`[agent-executor] Unhandled error running agent "${agentId}":`, err);
+    });
+    return { ok: true };
+  }
+
   /** Execute an agent: create a session, configure MCP, send the prompt, track the result. */
   async executeAgent(
     agentId: string,
     input?: string,
-    opts?: ExecuteAgentOptions,
+    opts: ExecuteAgentOptions = {},
   ): Promise<SdkSessionInfo | undefined> {
     const agent = agentStore.getAgent(agentId);
-    if (!agent) return;
-    if (!agent.enabled && !opts?.force) return;
-
-    // Overlap prevention: skip if previous execution is still running (unless forced)
-    if (!opts?.force && agent.lastSessionId && this.launcher.isAlive(agent.lastSessionId)) {
-      console.log(`[agent-executor] Skipping "${agent.name}" — previous execution still running (${agent.lastSessionId})`);
-      return;
+    const gate = this.checkStart(agent, opts);
+    if (!gate.ok || !agent) {
+      if (agent && !gate.ok) console.log(`[agent-executor] Skipping "${agent.name}": ${gate.error}`);
+      return undefined;
     }
 
-    const triggerType = opts?.triggerType || "manual";
+    const triggerType = opts.triggerType || "manual";
     console.log(`[agent-executor] Executing agent "${agent.name}" (${agentId}) via ${triggerType}`);
 
     const execution: AgentExecution = {
@@ -137,6 +271,16 @@ export class AgentExecutor {
       agentId,
       triggerType,
       startedAt: Date.now(),
+    };
+    // Reserve synchronously (before any await) so overlapping triggers see it.
+    this.launching.set(agentId, (this.launching.get(agentId) ?? 0) + 1);
+    let reserved = true;
+    const release = () => {
+      if (!reserved) return;
+      reserved = false;
+      const left = (this.launching.get(agentId) ?? 1) - 1;
+      if (left > 0) this.launching.set(agentId, left);
+      else this.launching.delete(agentId);
     };
 
     try {
@@ -147,7 +291,7 @@ export class AgentExecutor {
       if (agent.env) {
         envVars = { ...agent.env };
       }
-      if (opts?.additionalEnv) {
+      if (opts.additionalEnv) {
         envVars = { ...envVars, ...opts.additionalEnv };
       }
       const envSlug = agent.envSlug && envManager.getEnv(agent.envSlug) ? agent.envSlug : undefined;
@@ -155,14 +299,14 @@ export class AgentExecutor {
       // Resolve working directory
       let cwd = agent.cwd;
       if (cwd === "temp" || !cwd) {
-        cwd = mkdtempSync(join(tmpdir(), `companion-agent-${agent.id}-`));
+        cwd = mkdtempSync(join(tmpdir(), `${TEMP_CWD_PREFIX}${agent.id}-`));
+        execution.tempCwd = cwd;
       }
 
-      // Launch the session via CliLauncher.
-      // Agents always run with full permissions — no interactive prompts.
-      // For Claude Code this sets --permission-mode bypassPermissions;
-      // for Codex, approvalPolicy is already hardcoded to "never".
-      if (agent.permissionMode && agent.permissionMode !== "bypassPermissions") {
+      // Agents always run unattended, so Claude gets bypassPermissions: any
+      // other mode would block on approvals nobody answers. Codex never asks
+      // for approvals in Companion; its permissionMode picks the sandbox.
+      if (agent.backendType === "claude" && agent.permissionMode && agent.permissionMode !== "bypassPermissions") {
         console.warn(
           `[agent-executor] Agent "${agent.name}" has permissionMode="${agent.permissionMode}" ` +
           `but agent sessions always run with bypassPermissions`,
@@ -174,24 +318,31 @@ export class AgentExecutor {
         cwd,
         env: envVars,
         envSlug,
-        allowedTools: agent.allowedTools,
+        // Claude only (`--tools`); Codex has no per-tool restriction.
+        tools: agent.backendType === "claude" && agent.allowedTools?.length ? agent.allowedTools : undefined,
         backendType: agent.backendType,
         codexInternetAccess: agent.backendType === "codex" ? (agent.codexInternetAccess ?? true) : undefined,
         codexSandbox: agent.backendType === "codex"
           ? (agent.permissionMode === "bypassPermissions" ? "danger-full-access" : "workspace-write")
           : undefined,
-        systemPrompt: agent.backendType === "codex" ? opts?.systemPrompt : undefined,
+        systemPrompt: agent.backendType === "codex" ? opts.systemPrompt : undefined,
       });
 
       execution.sessionId = sessionInfo.sessionId;
+      this.activeRuns.set(sessionInfo.sessionId, execution);
+      release();
+      this.addExecution(agentId, execution);
 
       // Tag the session as agent-originated
       sessionInfo.agentId = agentId;
       sessionInfo.agentName = agent.name;
+      sessionNames.setName(sessionInfo.sessionId, `🤖 ${agent.name}`);
 
-      // Set the session name
-      const runLabel = `🤖 ${agent.name}`;
-      sessionNames.setName(sessionInfo.sessionId, runLabel);
+      agentStore.updateAgent(agentId, {
+        lastRunAt: Date.now(),
+        lastSessionId: sessionInfo.sessionId,
+        totalRuns: agent.totalRuns + 1,
+      });
 
       // Wait for CLI to connect
       await this.waitForCLIConnection(sessionInfo.sessionId);
@@ -207,64 +358,37 @@ export class AgentExecutor {
         await new Promise((r) => setTimeout(r, MCP_INIT_DELAY_MS));
       }
 
-      if (opts?.systemPrompt && agent.backendType === "claude") {
+      if (opts.systemPrompt && agent.backendType === "claude") {
         this.wsBridge.injectSystemPrompt(sessionInfo.sessionId, opts.systemPrompt);
       }
 
-      // Resolve prompt: replace {{input}} placeholder with trigger input
-      let resolvedPrompt = agent.prompt;
-      if (input !== undefined) {
-        resolvedPrompt = resolvedPrompt.replace(/\{\{input\}\}/g, input);
-      } else {
-        resolvedPrompt = resolvedPrompt.replace(/\{\{input\}\}/g, "");
-      }
-
-      // Send the prompt with agent prefix for traceability
-      const fullPrompt = `[agent:${agent.id} ${agent.name}]\n\n${resolvedPrompt}`;
+      // Send the prompt with agent prefix for traceability. The run stays
+      // "running" until handleSessionResult (or the CLI exiting first).
+      const fullPrompt = `[agent:${agent.id} ${agent.name}]\n\n${buildAgentPrompt(agent.prompt, input)}`;
       this.wsBridge.injectUserMessage(sessionInfo.sessionId, fullPrompt);
-
-      // Update agent tracking
-      agentStore.updateAgent(agentId, {
-        lastRunAt: Date.now(),
-        lastSessionId: sessionInfo.sessionId,
-        totalRuns: agent.totalRuns + 1,
-        consecutiveFailures: 0,
-      });
-
-      // Execution is now "running" — completedAt/success will be set
-      // when the CLI process exits via handleSessionExited().
-      this.addExecution(agentId, execution);
 
       return sessionInfo;
     } catch (err) {
+      release();
       console.error(`[agent-executor] Agent "${agent.name}" failed:`, err);
-      execution.error = err instanceof Error ? err.message : String(err);
-      execution.completedAt = Date.now();
-      this.addExecution(agentId, execution);
-
-      const failures = agent.consecutiveFailures + 1;
-      const updates: Partial<AgentConfig> = {
-        consecutiveFailures: failures,
-        lastRunAt: Date.now(),
-      };
-
-      // Auto-disable after too many failures
-      if (failures >= MAX_CONSECUTIVE_FAILURES) {
-        updates.enabled = false;
-        this.stopAgent(agentId);
-        console.warn(`[agent-executor] Agent "${agent.name}" disabled after ${failures} consecutive failures`);
+      const error = err instanceof Error ? err.message : String(err);
+      if (execution.sessionId) {
+        this.finishRun(execution, { success: false, error });
+      } else {
+        // Never got a session: record the failed attempt as a closed run.
+        this.finishRun(execution, { success: false, error }, { lastRunAt: Date.now() });
+        this.addExecution(agentId, execution);
       }
-
-      agentStore.updateAgent(agentId, updates);
       return undefined;
     }
   }
 
-  /** Manual trigger (run now regardless of schedule, bypasses enabled check). */
-  executeAgentManually(agentId: string, input?: string): void {
-    this.executeAgent(agentId, input, { force: true, triggerType: "manual" }).catch((err) => {
-      console.error(`[agent-executor] Manual execution of agent "${agentId}" failed:`, err);
-    });
+  /**
+   * Manual "Run now": runs even when the agent is disabled, but not while
+   * another run of it is still in progress.
+   */
+  executeAgentManually(agentId: string, input?: string): StartRunResult {
+    return this.startRun(agentId, input, { ignoreEnabled: true, triggerType: "manual" });
   }
 
   /** Wait for CLI to be connected (poll up to timeout). */
@@ -315,23 +439,130 @@ export class AgentExecutor {
     return this.executionStore.list(opts);
   }
 
-  /** Handle session exit: mark the corresponding execution as completed. */
+  /**
+   * A turn result arrived. The first one for a run's session completes the
+   * run (success = !is_error). The session is kept: the user can open it,
+   * read the outcome and continue the conversation.
+   */
+  handleSessionResult(sessionId: string, message: BrowserIncomingMessage): void {
+    if (message.type !== "result") return;
+    const exec = this.activeRuns.get(sessionId);
+    if (!exec) return;
+    const data = message.data;
+    const success = !data.is_error;
+    this.finishRun(exec, {
+      success,
+      subtype: data.subtype,
+      error: success ? undefined : resultErrorText(data),
+    });
+  }
+
+  /**
+   * The CLI exited. If its run had no result yet, fail the run — after a
+   * short grace period in case the result line is still being read.
+   */
   handleSessionExited(sessionId: string, exitCode: number | null): void {
-    for (const [, execs] of this.executions) {
-      const exec = execs.find((e) => e.sessionId === sessionId && !e.completedAt);
-      if (exec) {
-        exec.completedAt = Date.now();
-        exec.success = exitCode === 0 || exitCode === null;
-        if (exitCode && exitCode !== 0) {
-          exec.error = exec.error || `Process exited with code ${exitCode}`;
-        }
-        this.executionStore.update(sessionId, {
-          completedAt: exec.completedAt,
-          success: exec.success,
-          error: exec.error,
-        });
-        break;
+    const exec = this.activeRuns.get(sessionId);
+    if (!exec || this.exitTimers.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.exitTimers.delete(sessionId);
+      this.finishRun(exec, {
+        success: false,
+        error: exitCode
+          ? `CLI exited with code ${exitCode} before the run finished`
+          : "CLI exited before the run finished",
+      });
+    }, AgentExecutor.EXIT_GRACE_MS);
+    this.exitTimers.set(sessionId, timer);
+  }
+
+  /**
+   * A session was archived or deleted: its temp working directory can go,
+   * if its run is over (a still-running run cleans up when it finishes).
+   */
+  handleSessionClosed(sessionId: string): void {
+    for (const exec of this.executionStore.all()) {
+      if (exec.sessionId === sessionId) this.cleanupTempCwd(exec);
+    }
+  }
+
+  /**
+   * An archived session is back. Its temp working directory may have been
+   * cleaned up meanwhile; recreate it (empty) so the CLI can start there.
+   */
+  handleSessionUnarchived(sessionId: string): void {
+    const cwd = this.launcher.getSession(sessionId)?.cwd;
+    if (!isAgentTempDir(cwd) || existsSync(cwd)) return;
+    try {
+      mkdirSync(cwd, { recursive: true, mode: 0o700 });
+    } catch (err) {
+      console.warn(`[agent-executor] Could not recreate temp dir ${cwd}:`, err);
+    }
+  }
+
+  /** Close a run once; persist it, update the agent's counters, tidy up. */
+  private finishRun(
+    exec: AgentExecution,
+    outcome: { success: boolean; error?: string; subtype?: string },
+    agentUpdates: Partial<AgentConfig> = {},
+  ): void {
+    if (exec.completedAt) return;
+    exec.completedAt = Date.now();
+    exec.success = outcome.success;
+    if (outcome.error !== undefined) exec.error = outcome.error;
+    if (outcome.subtype !== undefined) exec.subtype = outcome.subtype;
+    if (exec.sessionId) {
+      this.activeRuns.delete(exec.sessionId);
+      const timer = this.exitTimers.get(exec.sessionId);
+      if (timer) clearTimeout(timer);
+      this.exitTimers.delete(exec.sessionId);
+      this.executionStore.update(exec.sessionId, {
+        completedAt: exec.completedAt,
+        success: exec.success,
+        error: exec.error,
+        subtype: exec.subtype,
+      });
+    }
+    this.recordOutcome(exec.agentId, outcome.success, agentUpdates);
+    this.cleanupTempCwd(exec);
+  }
+
+  /** Reset or bump consecutiveFailures; auto-disable after too many in a row. */
+  private recordOutcome(agentId: string, success: boolean, extra: Partial<AgentConfig>): void {
+    const agent = agentStore.getAgent(agentId);
+    if (!agent) return;
+    if (success) {
+      if (agent.consecutiveFailures !== 0 || Object.keys(extra).length > 0) {
+        agentStore.updateAgent(agentId, { ...extra, consecutiveFailures: 0 });
       }
+      return;
+    }
+    const failures = agent.consecutiveFailures + 1;
+    const updates: Partial<AgentConfig> = { ...extra, consecutiveFailures: failures };
+    if (failures >= MAX_CONSECUTIVE_FAILURES && agent.enabled) {
+      updates.enabled = false;
+      this.stopAgent(agentId);
+      console.warn(`[agent-executor] Agent "${agent.name}" disabled after ${failures} consecutive failures`);
+    }
+    agentStore.updateAgent(agentId, updates);
+  }
+
+  /**
+   * Delete a finished run's temp working directory once nothing uses it: its
+   * session is archived or gone, and no other live session sits in it.
+   */
+  private cleanupTempCwd(exec: AgentExecution): void {
+    const dir = exec.tempCwd;
+    if (!exec.completedAt || !isAgentTempDir(dir)) return;
+    const own = exec.sessionId ? this.launcher.getSession(exec.sessionId) : undefined;
+    if (own && !own.archived) return;
+    const inUse = this.launcher.listSessions().some((s) => !s.archived && resolve(s.cwd) === resolve(dir));
+    if (inUse || !existsSync(dir)) return;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      console.log(`[agent-executor] Removed temp dir ${dir} of finished run ${exec.sessionId || "(no session)"}`);
+    } catch (err) {
+      console.warn(`[agent-executor] Could not remove temp dir ${dir}:`, err);
     }
   }
 
@@ -341,6 +572,11 @@ export class AgentExecutor {
       timer.stop();
     }
     this.timers.clear();
+    for (const timer of this.exitTimers.values()) clearTimeout(timer);
+    this.exitTimers.clear();
     this.executions.clear();
+    this.activeRuns.clear();
+    this.launching.clear();
+    this.scheduleIssues.clear();
   }
 }

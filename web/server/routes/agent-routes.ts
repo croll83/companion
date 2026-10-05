@@ -1,21 +1,43 @@
 import crypto from "node:crypto";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import * as agentStore from "../agent-store.js";
 import type { AgentExecutor } from "../agent-executor.js";
 import type { AgentConfig, AgentConfigCreateInput, AgentConfigExport } from "../agent-types.js";
+import { validateSchedule } from "../agent-schedule.js";
 import { getSettings, updateSettings } from "../settings-manager.js";
 import * as staging from "../linear-staging.js";
 import { getOAuthConnection, createOAuthConnection } from "../linear-oauth-connections.js";
+import { isTrustedRequest, socketAddress } from "../network-trust.js";
 
 /** Fields the user can set when creating/updating an agent */
 const EDITABLE_FIELDS = [
   "name", "description", "icon", "version",
   "backendType", "model", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
-  "prompt", "mcpServers", "skills",
-  "branch", "createBranch", "useWorktree",
+  "prompt", "mcpServers",
   "triggers", "enabled",
 ] as const;
+
+/** A built-in Claude tool name, as `--tools` accepts it (no permission patterns). */
+const TOOL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/**
+ * Reject what would otherwise fail later and silently: a schedule croner
+ * cannot arm (or a one-time date already past, when `rejectPast`), and
+ * allowedTools entries `--tools` cannot take. Returns an error or null.
+ */
+function validateAgentFields(fields: Partial<AgentConfig>, opts: { rejectPast: boolean }): string | null {
+  const scheduleError = validateSchedule(fields.triggers?.schedule, { rejectPast: opts.rejectPast });
+  if (scheduleError) return scheduleError;
+  if (fields.allowedTools !== undefined) {
+    if (!Array.isArray(fields.allowedTools)) return "allowedTools must be an array of tool names";
+    const bad = fields.allowedTools.find((t) => typeof t !== "string" || !TOOL_NAME_PATTERN.test(t));
+    if (bad !== undefined) {
+      return `Invalid tool name "${String(bad)}": use built-in tool names such as Read, Grep or Bash (permission patterns like Bash(git *) are not supported)`;
+    }
+  }
+  return null;
+}
 
 function pickEditable(body: Record<string, unknown>): Partial<AgentConfig> {
   const result: Record<string, unknown> = {};
@@ -44,17 +66,21 @@ function buildCreateInput(
     codexInternetAccess: body.codexInternetAccess as boolean | undefined,
     prompt: (body.prompt as string | undefined) || "",
     mcpServers: body.mcpServers as AgentConfig["mcpServers"] | undefined,
-    skills: body.skills as string[] | undefined,
-    branch: body.branch as string | undefined,
-    createBranch: body.createBranch as boolean | undefined,
-    useWorktree: body.useWorktree as boolean | undefined,
     triggers: body.triggers as AgentConfig["triggers"] | undefined,
     enabled: overrides?.enabled ?? ((body.enabled as boolean | undefined) ?? true),
   };
 }
 
+type AgentWithRuntime = AgentConfig & {
+  nextRunAt?: number | null;
+  /** A run of this agent is launching or waiting for its result. */
+  running?: boolean;
+  /** Why the schedule is not running as configured (past, invalid, skipped). */
+  scheduleError?: string | null;
+};
+
 /** Strip sensitive Linear OAuth credentials before sending to the browser */
-function sanitizeAgent(agent: AgentConfig & { nextRunAt?: number | null }): Record<string, unknown> {
+function sanitizeAgent(agent: AgentWithRuntime): Record<string, unknown> {
   if (!agent.triggers?.linear) return agent as unknown as Record<string, unknown>;
   const { oauthClientSecret, webhookSecret, accessToken, refreshToken, ...safeLinear } = agent.triggers.linear;
 
@@ -106,30 +132,33 @@ export function registerAgentRoutes(
   api: Hono,
   agentExecutor?: AgentExecutor,
 ): void {
+  /** The agent as the browser sees it: live run/schedule state, no secrets. */
+  const present = (agent: AgentConfig) => sanitizeAgent({
+    ...agent,
+    nextRunAt: agentExecutor?.getNextRunTime(agent.id)?.getTime() ?? null,
+    running: agentExecutor?.isRunInProgress(agent.id) ?? false,
+    scheduleError: agentExecutor?.getScheduleIssue(agent.id) ?? null,
+  });
+
   // ── CRUD ────────────────────────────────────────────────────────────────
 
   api.get("/agents", (c) => {
-    const agents = agentStore.listAgents();
-    const enriched = agents.map((a) => sanitizeAgent({
-      ...a,
-      nextRunAt: agentExecutor?.getNextRunTime(a.id)?.getTime() ?? null,
-    }));
-    return c.json(enriched);
+    return c.json(agentStore.listAgents().map(present));
   });
 
   api.get("/agents/:id", (c) => {
     const agent = agentStore.getAgent(c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    return c.json(sanitizeAgent({
-      ...agent,
-      nextRunAt: agentExecutor?.getNextRunTime(agent.id)?.getTime() ?? null,
-    }));
+    return c.json(present(agent));
   });
 
   api.post("/agents", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     try {
-      const agent = agentStore.createAgent(buildCreateInput(body));
+      const input = buildCreateInput(body);
+      const invalid = validateAgentFields(input, { rejectPast: true });
+      if (invalid) return c.json({ error: invalid }, 400);
+      const agent = agentStore.createAgent(input);
 
       // If this is a Linear agent, resolve credentials:
       // New model: oauthConnectionId already set in triggers.linear
@@ -268,6 +297,8 @@ export function registerAgentRoutes(
     const body = await c.req.json().catch(() => ({}));
     try {
       const allowed = pickEditable(body);
+      const invalid = validateAgentFields(allowed, { rejectPast: true });
+      if (invalid) return c.json({ error: invalid }, 400);
       const agent = agentStore.updateAgent(id, allowed);
       if (!agent) return c.json({ error: "Agent not found" }, 404);
       // Stop old timer (id may differ after a rename)
@@ -280,7 +311,7 @@ export function registerAgentRoutes(
       } else {
         agentExecutor?.stopAgent(agent.id);
       }
-      return c.json(sanitizeAgent({ ...agent, nextRunAt: agentExecutor?.getNextRunTime(agent.id)?.getTime() ?? null }));
+      return c.json(present(agent));
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
     }
@@ -306,7 +337,7 @@ export function registerAgentRoutes(
     } else if (updated) {
       agentExecutor?.stopAgent(updated.id);
     }
-    return c.json(updated ? sanitizeAgent({ ...updated, nextRunAt: agentExecutor?.getNextRunTime(updated.id)?.getTime() ?? null }) : updated);
+    return c.json(updated ? present(updated) : updated);
   });
 
   // ── Run (manual trigger) ───────────────────────────────────────────────
@@ -317,7 +348,9 @@ export function registerAgentRoutes(
     if (!agent) return c.json({ error: "Agent not found" }, 404);
     const body = await c.req.json().catch(() => ({}));
     const input = typeof body.input === "string" ? body.input : undefined;
-    agentExecutor?.executeAgentManually(id, input);
+    // Runs even if the agent is disabled, but not on top of a run in progress.
+    const result = agentExecutor?.executeAgentManually(id, input);
+    if (result && !result.ok) return c.json({ error: result.error }, result.status);
     return c.json({ ok: true, message: "Agent triggered" });
   });
 
@@ -345,11 +378,16 @@ export function registerAgentRoutes(
   api.post("/agents/import", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     try {
-      // Accept an exported agent JSON and create a new agent from it
-      const agent = agentStore.createAgent(buildCreateInput(body, {
+      // Accept an exported agent JSON and create a new agent from it.
+      // Fields of removed features (skills, branch, ...) are simply ignored.
+      const input = buildCreateInput(body, {
         version: (body.version as AgentConfigCreateInput["version"] | undefined) || 1,
         enabled: false, // Imported agents start disabled for safety
-      }));
+      });
+      // A past one-time date is fine here: the agent starts disabled.
+      const invalid = validateAgentFields(input, { rejectPast: false });
+      if (invalid) return c.json({ error: invalid }, 400);
+      const agent = agentStore.createAgent(input);
       return c.json(sanitizeAgent({ ...agent, nextRunAt: null }), 201);
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
@@ -368,12 +406,65 @@ export function registerAgentRoutes(
     const id = c.req.param("id");
     const agent = agentStore.regenerateWebhookSecret(id);
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    return c.json(sanitizeAgent({ ...agent, nextRunAt: agentExecutor?.getNextRunTime(agent.id)?.getTime() ?? null }));
+    return c.json(present(agent));
   });
+}
 
-  // ── Webhook Trigger ────────────────────────────────────────────────────
+// ── Webhook trigger ─────────────────────────────────────────────────────────
+
+/** Webhook triggers allowed per agent per window (failed launches included). */
+const WEBHOOK_RATE_LIMIT = 10;
+const WEBHOOK_RATE_WINDOW_MS = 60_000;
+/** Largest webhook body accepted (the input ends up in the prompt). */
+const WEBHOOK_MAX_BODY_BYTES = 256 * 1024;
+
+/** Fixed-window counter per key; returns seconds to wait, or 0 if allowed. */
+function createRateLimiter(limit: number, windowMs: number) {
+  const hits = new Map<string, number[]>();
+  return (key: string, now = Date.now()): number => {
+    const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
+    if (recent.length >= limit) {
+      hits.set(key, recent);
+      return Math.max(1, Math.ceil((windowMs - (now - recent[0])) / 1000));
+    }
+    recent.push(now);
+    hits.set(key, recent);
+    return 0;
+  };
+}
+
+/** The `input` of a webhook call: JSON `{"input": "..."}` or a plain-text body. */
+async function readWebhookInput(c: Context): Promise<{ input?: string } | { tooLarge: true }> {
+  const declared = Number(c.req.header("content-length") || 0);
+  if (declared > WEBHOOK_MAX_BODY_BYTES) return { tooLarge: true };
+  const text = await c.req.text().catch(() => "");
+  if (Buffer.byteLength(text) > WEBHOOK_MAX_BODY_BYTES) return { tooLarge: true };
+  if ((c.req.header("content-type") || "").includes("application/json")) {
+    try {
+      const body = JSON.parse(text) as { input?: unknown };
+      return { input: typeof body?.input === "string" ? body.input : undefined };
+    } catch {
+      return {};
+    }
+  }
+  return text.trim() ? { input: text.trim() } : {};
+}
+
+/**
+ * POST /agents/:id/webhook/:secret — authenticated by the per-agent secret
+ * alone, so it is registered BEFORE the auth middleware (like the Linear
+ * webhook). It must never be reachable from the internet: only loopback and
+ * the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) are accepted, and a request
+ * relayed by a local proxy/tunnel is judged by its forwarded client address.
+ */
+export function registerAgentWebhookRoute(api: Hono, agentExecutor?: AgentExecutor): void {
+  const rateLimit = createRateLimiter(WEBHOOK_RATE_LIMIT, WEBHOOK_RATE_WINDOW_MS);
 
   api.post("/agents/:id/webhook/:secret", async (c) => {
+    if (!isTrustedRequest(socketAddress(c.env, c.req.raw), c.req.raw.headers)) {
+      return c.json({ error: "Agent webhooks are accepted only from this machine or the tailnet" }, 403);
+    }
+
     const id = c.req.param("id");
     const secret = c.req.param("secret");
 
@@ -391,18 +482,20 @@ export function registerAgentRoutes(
       return c.json({ error: "Invalid webhook secret" }, 401);
     }
 
-    // Extract input from body — accept JSON { input: "..." } or plain text
-    let input: string | undefined;
-    const contentType = c.req.header("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const body = await c.req.json().catch(() => ({}));
-      input = typeof body.input === "string" ? body.input : undefined;
-    } else {
-      const text = await c.req.text().catch(() => "");
-      if (text.trim()) input = text.trim();
+    const retryAfter = rateLimit(agent.id);
+    if (retryAfter > 0) {
+      c.header("Retry-After", String(retryAfter));
+      return c.json({ error: `Too many webhook calls for this agent; retry in ${retryAfter}s` }, 429);
     }
 
-    agentExecutor?.executeAgentManually(id, input);
+    const body = await readWebhookInput(c);
+    if ("tooLarge" in body) {
+      return c.json({ error: `Webhook body exceeds ${WEBHOOK_MAX_BODY_BYTES / 1024} KB` }, 413);
+    }
+
+    // Honours agent.enabled and refuses to overlap a run in progress.
+    const result = agentExecutor?.startRun(agent.id, body.input, { triggerType: "webhook" });
+    if (result && !result.ok) return c.json({ error: result.error }, result.status);
     return c.json({ ok: true, message: "Agent triggered via webhook" });
   });
 }

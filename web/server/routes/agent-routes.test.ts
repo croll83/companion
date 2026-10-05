@@ -60,7 +60,7 @@ import * as agentStore from "../agent-store.js";
 import { getSettings, updateSettings } from "../settings-manager.js";
 import * as staging from "../linear-staging.js";
 import type { AgentConfig } from "../agent-types.js";
-import { registerAgentRoutes } from "./agent-routes.js";
+import { registerAgentRoutes, registerAgentWebhookRoute } from "./agent-routes.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -91,11 +91,23 @@ function createMockExecutor() {
     getNextRunTime: vi.fn(() => null as Date | null),
     scheduleAgent: vi.fn(),
     stopAgent: vi.fn(),
-    executeAgentManually: vi.fn(),
+    executeAgentManually: vi.fn((): { ok: true } | { ok: false; status: 404 | 409; error: string } => ({ ok: true })),
+    startRun: vi.fn((): { ok: true } | { ok: false; status: 404 | 409; error: string } => ({ ok: true })),
+    isRunInProgress: vi.fn(() => false),
+    getScheduleIssue: vi.fn(() => null as string | null),
     getExecutions: vi.fn(() => []),
     listAllExecutions: vi.fn(() => ({ executions: [] as Record<string, unknown>[], total: 0 })),
   };
 }
+
+/**
+ * Bun server stand-in passed as Hono's env: the webhook route reads the TCP
+ * peer address through `requestIP` and accepts only loopback/tailnet peers.
+ */
+function peer(address: string) {
+  return { requestIP: () => ({ address }) };
+}
+const LOOPBACK = peer("127.0.0.1");
 
 // ─── Test setup ─────────────────────────────────────────────────────────────
 
@@ -110,6 +122,7 @@ beforeEach(() => {
   // Create a Hono app and mount agent routes under /api
   app = new Hono();
   const api = new Hono();
+  registerAgentWebhookRoute(api, executor as any);
   registerAgentRoutes(api, executor as any);
   app.route("/api", api);
 });
@@ -581,13 +594,16 @@ describe("POST /api/agents/:id/webhook/:secret", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: "webhook payload" }),
-    });
+    }, LOOPBACK);
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.ok).toBe(true);
     expect(json.message).toBe("Agent triggered via webhook");
-    expect(executor.executeAgentManually).toHaveBeenCalledWith("webhook-agent", "webhook payload");
+    // A webhook run is recorded as such and goes through the enabled/overlap
+    // gate (startRun), not the manual path that skips the enabled check.
+    expect(executor.startRun).toHaveBeenCalledWith("webhook-agent", "webhook payload", { triggerType: "webhook" });
+    expect(executor.executeAgentManually).not.toHaveBeenCalled();
   });
 
   it("returns 401 when the webhook secret is invalid", async () => {
@@ -603,13 +619,14 @@ describe("POST /api/agents/:id/webhook/:secret", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
-    });
+    }, LOOPBACK);
 
     expect(res.status).toBe(401);
     const json = await res.json();
     expect(json.error).toBe("Invalid webhook secret");
     // Should NOT trigger the agent
     expect(executor.executeAgentManually).not.toHaveBeenCalled();
+    expect(executor.startRun).not.toHaveBeenCalled();
   });
 
   it("returns 403 when the webhook trigger is disabled", async () => {
@@ -625,12 +642,13 @@ describe("POST /api/agents/:id/webhook/:secret", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
-    });
+    }, LOOPBACK);
 
     expect(res.status).toBe(403);
     const json = await res.json();
     expect(json.error).toBe("Webhook not enabled for this agent");
     expect(executor.executeAgentManually).not.toHaveBeenCalled();
+    expect(executor.startRun).not.toHaveBeenCalled();
   });
 
   it("returns 404 when agent does not exist", async () => {
@@ -640,7 +658,7 @@ describe("POST /api/agents/:id/webhook/:secret", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
-    });
+    }, LOOPBACK);
 
     expect(res.status).toBe(404);
   });
@@ -659,10 +677,10 @@ describe("POST /api/agents/:id/webhook/:secret", () => {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: "plain text input",
-    });
+    }, LOOPBACK);
 
     expect(res.status).toBe(200);
-    expect(executor.executeAgentManually).toHaveBeenCalledWith("webhook-agent", "plain text input");
+    expect(executor.startRun).toHaveBeenCalledWith("webhook-agent", "plain text input", { triggerType: "webhook" });
   });
 });
 
@@ -1398,3 +1416,207 @@ describe("POST /api/agents/:id/regenerate-secret", () => {
   });
 });
 
+// ─── Webhook trigger: network origin, gate, limits ──────────────────────────
+
+describe("POST /api/agents/:id/webhook/:secret — network and run rules", () => {
+  const hookAgent = () => makeAgent({
+    id: "hook",
+    triggers: { webhook: { enabled: true, secret: "s3cret" } },
+  });
+  const call = (env: object | undefined, init: RequestInit = {}) =>
+    app.request("/api/agents/hook/webhook/s3cret", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: "x" }),
+      ...init,
+    }, env);
+
+  beforeEach(() => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(hookAgent());
+  });
+
+  it("rejects callers from the internet with 403, even with the right secret", async () => {
+    // The secret alone must never expose a run trigger to the internet.
+    const res = await call(peer("203.0.113.7"));
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toMatch(/only from this machine or the tailnet/);
+    expect(executor.startRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects requests whose peer address is unknown", async () => {
+    // No Bun server (no requestIP): fail closed.
+    const res = await call(undefined);
+    expect(res.status).toBe(403);
+  });
+
+  it("accepts Tailscale IPv4 and IPv6 peers", async () => {
+    expect((await call(peer("100.101.102.103"))).status).toBe(200);
+    expect((await call(peer("fd7a:115c:a1e0:ab12:4843:cd96:6258:b240"))).status).toBe(200);
+    expect(executor.startRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("judges a request relayed by a local proxy by its forwarded client address", async () => {
+    // cloudflared/nginx on this host connect from loopback: the forwarded
+    // address is the real caller.
+    const fromInternet = await call(LOOPBACK, { headers: { "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.4" } });
+    expect(fromInternet.status).toBe(403);
+    const fromTailnet = await call(LOOPBACK, { headers: { "Content-Type": "application/json", "X-Forwarded-For": "100.64.0.9" } });
+    expect(fromTailnet.status).toBe(200);
+  });
+
+  it("returns 409 with the reason when the agent is disabled or already running", async () => {
+    executor.startRun.mockReturnValueOnce({ ok: false, status: 409, error: 'A run of agent "Hook" is still in progress' });
+    const res = await call(LOOPBACK);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('A run of agent "Hook" is still in progress');
+  });
+
+  it("rate-limits each agent to 10 calls a minute with Retry-After", async () => {
+    for (let i = 0; i < 10; i++) {
+      expect((await call(LOOPBACK)).status).toBe(200);
+    }
+    const limited = await call(LOOPBACK);
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("Retry-After"))).toBeGreaterThan(0);
+    expect(executor.startRun).toHaveBeenCalledTimes(10);
+  });
+
+  it("rejects bodies over 256 KB with 413", async () => {
+    const res = await call(LOOPBACK, {
+      headers: { "Content-Type": "text/plain" },
+      body: "x".repeat(256 * 1024 + 1),
+    });
+    expect(res.status).toBe(413);
+    expect(executor.startRun).not.toHaveBeenCalled();
+  });
+
+  it("passes no input for a JSON body without input or with invalid JSON", async () => {
+    await call(LOOPBACK, { body: JSON.stringify({ other: 1 }) });
+    await call(LOOPBACK, { body: "{not json" });
+    expect(executor.startRun).toHaveBeenNthCalledWith(1, "hook", undefined, { triggerType: "webhook" });
+    expect(executor.startRun).toHaveBeenNthCalledWith(2, "hook", undefined, { triggerType: "webhook" });
+  });
+
+  it("is answered before an auth middleware registered after it", async () => {
+    // routes.ts registers the webhook before api.use("/*", auth): the secret
+    // is the only credential, while every other agent route stays protected.
+    const guarded = new Hono();
+    const inner = new Hono();
+    registerAgentWebhookRoute(inner, executor as any);
+    inner.use("/*", async (c) => c.json({ error: "unauthorized" }, 401));
+    registerAgentRoutes(inner, executor as any);
+    guarded.route("/api", inner);
+
+    const hook = await guarded.request("/api/agents/hook/webhook/s3cret", { method: "POST", body: "" }, LOOPBACK);
+    expect(hook.status).toBe(200);
+    const list = await guarded.request("/api/agents", {}, LOOPBACK);
+    expect(list.status).toBe(401);
+  });
+});
+
+// ─── Validation of schedules and allowed tools ──────────────────────────────
+
+describe("agent validation", () => {
+  const post = (path: string, body: object) =>
+    app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const schedule = (expression: string, recurring = true) => ({
+    schedule: { enabled: true, expression, recurring },
+  });
+
+  it("rejects an invalid cron expression on create with a clear 400", async () => {
+    const res = await post("/api/agents", { name: "A", prompt: "p", triggers: schedule("61 * * * *") });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/^Invalid cron expression "61 \* \* \* \*"/);
+    expect(agentStore.createAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cron expression with a seconds field", async () => {
+    const res = await post("/api/agents", { name: "A", prompt: "p", triggers: schedule("0 0 8 * * *") });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/a seconds field is not supported/);
+  });
+
+  it("rejects a one-time date in the past on create", async () => {
+    const res = await post("/api/agents", { name: "A", prompt: "p", triggers: schedule("2020-01-01T08:00", false) });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/is in the past/);
+  });
+
+  it("rejects an invalid schedule on update without touching the agent", async () => {
+    const res = await app.request("/api/agents/test-agent", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ triggers: schedule("every day") }),
+    });
+    expect(res.status).toBe(400);
+    expect(agentStore.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not validate a disabled schedule", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent());
+    const res = await post("/api/agents", {
+      name: "A", prompt: "p",
+      triggers: { schedule: { enabled: false, expression: "garbage", recurring: true } },
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("rejects allowedTools entries --tools cannot take", async () => {
+    const res = await post("/api/agents", { name: "A", prompt: "p", allowedTools: ["Read", "Bash(rm *)"] });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Invalid tool name "Bash\(rm \*\)"/);
+    const notArray = await post("/api/agents", { name: "A", prompt: "p", allowedTools: "Read" });
+    expect(notArray.status).toBe(400);
+  });
+
+  it("import accepts a past one-time date (agent starts disabled) but not an invalid cron", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent({ enabled: false }));
+    const past = await post("/api/agents/import", { name: "A", prompt: "p", triggers: schedule("2020-01-01T08:00", false) });
+    expect(past.status).toBe(201);
+    const bad = await post("/api/agents/import", { name: "B", prompt: "p", triggers: schedule("* * *") });
+    expect(bad.status).toBe(400);
+  });
+
+  it("ignores the removed skills/branch/createBranch/useWorktree fields on create and import", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent());
+    const legacy = { skills: ["s"], branch: "main", createBranch: true, useWorktree: true };
+    await post("/api/agents", { name: "A", prompt: "p", ...legacy });
+    await post("/api/agents/import", { name: "B", prompt: "p", ...legacy });
+    for (const [input] of vi.mocked(agentStore.createAgent).mock.calls) {
+      for (const field of Object.keys(legacy)) expect(input).not.toHaveProperty(field);
+    }
+  });
+});
+
+// ─── Live run state and manual run refusal ──────────────────────────────────
+
+describe("agent run state", () => {
+  it("lists agents with running and scheduleError from the executor", async () => {
+    vi.mocked(agentStore.listAgents).mockReturnValue([makeAgent({ id: "busy" })]);
+    executor.isRunInProgress.mockReturnValue(true);
+    executor.getScheduleIssue.mockReturnValue("One-time run at 2020-01-01T08:00 did not run: that time has passed");
+
+    const json = await (await app.request("/api/agents")).json();
+
+    expect(json[0].running).toBe(true);
+    expect(json[0].scheduleError).toMatch(/did not run/);
+  });
+
+  it("returns 409 from Run now while a run is still in progress", async () => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ id: "busy" }));
+    executor.executeAgentManually.mockReturnValueOnce({ ok: false, status: 409, error: "still in progress" });
+
+    const res = await app.request("/api/agents/busy/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("still in progress");
+  });
+});

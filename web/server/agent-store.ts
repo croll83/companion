@@ -45,13 +45,17 @@ function generateWebhookSecret(): string {
  *   load prevents leaking those secrets via the API.
  * - `container`: Docker container sessions were removed; the old per-agent
  *   container config is ignored so it is not shown, exported or re-saved.
+ * - `skills`, `branch`, `createBranch`, `useWorktree`: stored by older editors
+ *   but never applied to a run; dropped so they are not shown or exported.
  */
+const REMOVED_AGENT_FIELDS = ["container", "skills", "branch", "createBranch", "useWorktree"] as const;
+
 function stripLegacyFields(agent: AgentConfig): AgentConfig {
   let result = agent;
-  if ("container" in result) {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { container: _container, ...rest } = result as AgentConfig & { container?: unknown };
-    result = rest;
+  if (REMOVED_AGENT_FIELDS.some((field) => field in result)) {
+    const rest: Record<string, unknown> = { ...result };
+    for (const field of REMOVED_AGENT_FIELDS) delete rest[field];
+    result = rest as unknown as AgentConfig;
   }
   if (!result.triggers || !("chat" in result.triggers)) return result;
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

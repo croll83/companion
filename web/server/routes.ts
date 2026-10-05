@@ -15,8 +15,7 @@ import * as sessionLinearIssues from "./session-linear-issues.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
-import { registerCronRoutes } from "./routes/cron-routes.js";
-import { registerAgentRoutes } from "./routes/agent-routes.js";
+import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
@@ -50,7 +49,6 @@ export function createRoutes(
   terminalManager: TerminalManager,
   prPoller?: import("./pr-poller.js").PRPoller,
   recorder?: import("./recorder.js").RecorderManager,
-  cronScheduler?: import("./cron-scheduler.js").CronScheduler,
   agentExecutor?: import("./agent-executor.js").AgentExecutor,
   linearAgentBridge?: import("./linear-agent-bridge.js").LinearAgentBridge,
   port?: number,
@@ -134,6 +132,11 @@ export function createRoutes(
   if (linearAgentBridge) {
     registerLinearAgentWebhookRoute(api, linearAgentBridge);
   }
+
+  // ─── Agent webhook trigger (exempt from auth middleware) ─────────────
+  // Authenticated by the per-agent secret; accepted only from loopback and
+  // the tailnet (see registerAgentWebhookRoute).
+  registerAgentWebhookRoute(api, agentExecutor);
 
   // ─── Auth middleware (protects all routes below) ───────────────────
 
@@ -818,7 +821,7 @@ export function createRoutes(
   registerEnvRoutes(api);
 
   registerPromptRoutes(api);
-  registerSettingsRoutes(api);
+  registerSettingsRoutes(api, { onTimeZoneChanged: () => agentExecutor?.rescheduleAll() });
   registerTelegramRoutes(api);
 
   // ─── Linear ────────────────────────────────────────────────────────
@@ -836,7 +839,6 @@ export function createRoutes(
   });
 
   registerSkillRoutes(api);
-  registerCronRoutes(api, cronScheduler);
   registerAgentRoutes(api, agentExecutor);
   registerMetricsRoutes(api, { gaugeProvider: wsBridge });
 

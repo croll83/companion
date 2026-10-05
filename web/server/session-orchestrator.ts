@@ -174,6 +174,10 @@ export class SessionOrchestrator {
     companionBus.on("session:exited", ({ sessionId, exitCode }) => {
       this.agentExecutor.handleSessionExited(sessionId, exitCode);
     });
+    // An agent run is complete on its session's first turn result.
+    companionBus.on("message:result", ({ sessionId, message }) => {
+      this.agentExecutor.handleSessionResult(sessionId, message);
+    });
     companionBus.on("session:exited", ({ sessionId, exitCode }) => {
       for (const cb of this.exitCallbacks) {
         try {
@@ -604,6 +608,7 @@ export class SessionOrchestrator {
     const worktreeResult = this.cleanupWorktree(sessionId, options?.force);
     this.launcher.setArchived(sessionId, true);
     this.sessionStore.setArchived(sessionId, true);
+    this.agentExecutor.handleSessionClosed(sessionId);
 
     return { ok: true, worktree: worktreeResult, linearTransition: linearTransitionResult };
   }
@@ -620,6 +625,7 @@ export class SessionOrchestrator {
     sessionLinearIssues.removeLinearIssue(sessionId);
     this.launcher.removeSession(sessionId);
     this.wsBridge.closeSession(sessionId);
+    this.agentExecutor.handleSessionClosed(sessionId);
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
@@ -632,6 +638,8 @@ export class SessionOrchestrator {
   unarchiveSession(sessionId: string): { ok: boolean } {
     this.launcher.setArchived(sessionId, false);
     this.sessionStore.setArchived(sessionId, false);
+    // An agent run's temp cwd may have been removed while it was archived.
+    this.agentExecutor.handleSessionUnarchived(sessionId);
     return { ok: true };
   }
 

@@ -100,3 +100,26 @@ describe("PUT /settings cliBridgeMode round-trip", () => {
     expect((await get.json()).cliBridgeMode).toBe("tlsLoopback");
   });
 });
+
+describe("PUT /settings timeZone → agent schedules", () => {
+  // Agent schedules are armed in the global timeZone setting, so a change
+  // must re-arm them; anything else must not.
+  it("calls onTimeZoneChanged only when the zone actually changes", async () => {
+    const onTimeZoneChanged = vi.fn();
+    const hooked = new Hono();
+    registerSettingsRoutes(hooked, { onTimeZoneChanged });
+    const put = (body: unknown) => hooked.request("/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    expect((await put({ timeZone: "Europe/Rome" })).status).toBe(200);
+    expect(onTimeZoneChanged).toHaveBeenCalledTimes(1);
+    await put({ timeZone: "Europe/Rome" });
+    await put({ cliBridgeMode: "stdio" });
+    expect(onTimeZoneChanged).toHaveBeenCalledTimes(1);
+    await put({ timeZone: "" });
+    expect(onTimeZoneChanged).toHaveBeenCalledTimes(2);
+  });
+});

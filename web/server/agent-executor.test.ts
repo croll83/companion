@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { AgentConfig, AgentExecution } from "./agent-types.js";
 import type { SdkSessionInfo } from "./cli-launcher.js";
+import type { BrowserIncomingMessage, CLIResultMessage } from "./session-types.js";
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 // These must be hoisted so vi.mock() factory functions can reference them.
@@ -42,6 +46,8 @@ const mockExecutionStoreInstance = vi.hoisted(() => ({
   append: vi.fn(),
   update: vi.fn(),
   list: vi.fn().mockReturnValue({ executions: [], total: 0 }),
+  finalizeInterrupted: vi.fn().mockReturnValue(0),
+  all: vi.fn().mockReturnValue([]),
 }));
 
 // Use a proper class so `new ExecutionStore()` works correctly.
@@ -50,6 +56,8 @@ const MockExecutionStoreClass = vi.hoisted(() => {
     append = mockExecutionStoreInstance.append;
     update = mockExecutionStoreInstance.update;
     list = mockExecutionStoreInstance.list;
+    finalizeInterrupted = mockExecutionStoreInstance.finalizeInterrupted;
+    all = mockExecutionStoreInstance.all;
   };
 });
 
@@ -69,6 +77,20 @@ vi.mock("./execution-store.js", () => ({
   ExecutionStore: MockExecutionStoreClass,
 }));
 
+// Schedule parsing has its own tests (agent-schedule.test.ts, real croner);
+// here croner is mocked, so resolve one-shot dates directly. The time zone
+// comes from settings in production; tests pin it through this mock.
+const mockSchedule = vi.hoisted(() => ({ timezone: undefined as string | undefined }));
+vi.mock("./agent-schedule.js", () => ({
+  scheduleTimeZone: () => mockSchedule.timezone,
+  scheduleTimeZoneLabel: (tz?: string) => tz ?? "server local time",
+  nextScheduledRun: (schedule: { expression: string }) => {
+    const date = new Date(schedule.expression);
+    if (Number.isNaN(date.getTime())) throw new Error(`Invalid one-time date "${schedule.expression}"`);
+    return date.getTime() > Date.now() ? date : null;
+  },
+}));
+
 // Mock mkdtempSync to avoid filesystem side effects in tests.
 // The agent-executor uses it for "temp" cwd.
 vi.mock("node:fs", async (importOriginal) => {
@@ -81,7 +103,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 // ─── Import the class under test (after mocks are set up) ───────────────────
 
-import { AgentExecutor } from "./agent-executor.js";
+import { AgentExecutor, buildAgentPrompt, isAgentTempDir } from "./agent-executor.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -116,6 +138,7 @@ function makeMockLauncher() {
       createdAt: Date.now(),
     })),
     isAlive: vi.fn<(id: string) => boolean>().mockReturnValue(false),
+    listSessions: vi.fn<() => SdkSessionInfo[]>().mockReturnValue([]),
     getSession: vi.fn<(id: string) => SdkSessionInfo | undefined>().mockReturnValue({
       sessionId: "session-123",
       state: "connected",
@@ -132,6 +155,11 @@ function makeMockWsBridge() {
     injectSystemPrompt: vi.fn(),
     injectUserMessage: vi.fn(),
   };
+}
+
+/** A turn result as ws-bridge emits it on companionBus "message:result". */
+function resultMessage(data: Partial<CLIResultMessage>): BrowserIncomingMessage {
+  return { type: "result", data: { type: "result", ...data } as CLIResultMessage } as BrowserIncomingMessage;
 }
 
 /** Helper to get the most recently created Cron mock instance. */
@@ -316,6 +344,8 @@ describe("AgentExecutor", () => {
 
       // Cron should NOT be created for a past date
       expect(mockCronState.constructorCalls).toHaveLength(0);
+      // ...and the skip is reported on the agent, not silent.
+      expect(executor.getScheduleIssue("past-one-shot")).toMatch(/did not run: that time has passed/);
     });
   });
 
@@ -386,12 +416,14 @@ describe("AgentExecutor", () => {
       expect(sentPrompt).toContain("[agent:exec-agent Exec Agent]");
       expect(sentPrompt).toContain("Run the tests");
 
-      // Should update agent tracking (lastRunAt, totalRuns, etc.)
+      // Should update agent tracking (lastRunAt, totalRuns, etc.).
+      // consecutiveFailures is no longer reset at launch: only a successful
+      // result resets it (see "run lifecycle" below), otherwise failing runs
+      // could never add up to the auto-disable threshold.
       expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("exec-agent", expect.objectContaining({
         lastRunAt: expect.any(Number),
         lastSessionId: "session-123",
         totalRuns: 1,
-        consecutiveFailures: 0,
       }));
 
       // Should persist execution to the ExecutionStore
@@ -439,19 +471,17 @@ describe("AgentExecutor", () => {
     });
 
     it("skips when previous execution is still running (overlap prevention)", async () => {
-      // Simulate an agent whose previous session is still alive
-      const agent = makeAgent({
-        id: "overlapping",
-        lastSessionId: "still-running-session",
-      });
+      // Overlap is "a run of this agent has no result yet", not "its CLI
+      // process is alive": a finished run's session stays alive on purpose.
+      const agent = makeAgent({ id: "overlapping" });
       mockAgentStore.getAgent.mockReturnValue(agent);
-      // isAlive returns true for the previous session
-      launcher.isAlive.mockReturnValue(true);
 
+      const first = await executor.executeAgent("overlapping");
+      expect(first).toBeDefined();
       const result = await executor.executeAgent("overlapping");
 
       expect(result).toBeUndefined();
-      expect(launcher.launch).not.toHaveBeenCalled();
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
     });
 
     it("handles errors: marks execution as failed, increments consecutiveFailures", async () => {
@@ -788,27 +818,28 @@ describe("AgentExecutor", () => {
   // handleSessionExited
   // =========================================================================
   describe("handleSessionExited", () => {
-    it("marks execution as completed with exit code 0 (success)", async () => {
-      // First, create an execution by running an agent
+    // A run is complete on its first turn result. A CLI that exits before
+    // producing one never finished the run, whatever its exit code — but the
+    // result line may still be in the stdout reader, hence the grace period.
+    it("fails a run whose CLI exits with code 0 before any result", async () => {
       const agent = makeAgent({ id: "exit-agent", name: "Exit Agent" });
       mockAgentStore.getAgent.mockReturnValue(agent);
 
       await executor.executeAgent("exit-agent");
-
-      // Now simulate the session exiting with code 0
       executor.handleSessionExited("session-123", 0);
+      // Still running during the grace period
+      expect(executor.getExecutions("exit-agent")[0].completedAt).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
 
-      // executionStore.update should be called with success=true
       expect(mockExecutionStoreInstance.update).toHaveBeenCalledWith("session-123", expect.objectContaining({
         completedAt: expect.any(Number),
-        success: true,
+        success: false,
+        error: "CLI exited before the run finished",
       }));
-
-      // In-memory execution should also be updated
       const executions = executor.getExecutions("exit-agent");
       expect(executions).toHaveLength(1);
       expect(executions[0].completedAt).toBeGreaterThan(0);
-      expect(executions[0].success).toBe(true);
+      expect(executions[0].success).toBe(false);
     });
 
     it("marks execution as failed with non-zero exit code", async () => {
@@ -818,34 +849,39 @@ describe("AgentExecutor", () => {
       await executor.executeAgent("fail-exit-agent");
 
       executor.handleSessionExited("session-123", 1);
+      await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
 
       expect(mockExecutionStoreInstance.update).toHaveBeenCalledWith("session-123", expect.objectContaining({
         completedAt: expect.any(Number),
         success: false,
-        error: "Process exited with code 1",
+        error: "CLI exited with code 1 before the run finished",
       }));
 
       const executions = executor.getExecutions("fail-exit-agent");
       expect(executions[0].success).toBe(false);
-      expect(executions[0].error).toContain("Process exited with code 1");
+      expect(executions[0].error).toContain("exited with code 1");
     });
 
-    it("treats null exit code as success (e.g. signalled/normal termination)", async () => {
-      const agent = makeAgent({ id: "null-exit-agent" });
+    it("keeps the result when it arrives within the grace period after the exit", async () => {
+      // Exit noticed first, result line read just after: the run succeeded.
+      const agent = makeAgent({ id: "late-result-agent" });
       mockAgentStore.getAgent.mockReturnValue(agent);
 
-      await executor.executeAgent("null-exit-agent");
-
+      await executor.executeAgent("late-result-agent");
       executor.handleSessionExited("session-123", null);
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+      await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
 
-      expect(mockExecutionStoreInstance.update).toHaveBeenCalledWith("session-123", expect.objectContaining({
-        success: true,
-      }));
+      const exec = executor.getExecutions("late-result-agent")[0];
+      expect(exec.success).toBe(true);
+      expect(exec.error).toBeUndefined();
+      expect(mockExecutionStoreInstance.update).toHaveBeenCalledTimes(1);
     });
 
-    it("does nothing for an unknown session", () => {
+    it("does nothing for an unknown session", async () => {
       // No executions have been tracked, so this should be a no-op
       executor.handleSessionExited("unknown-session-id", 0);
+      await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
 
       expect(mockExecutionStoreInstance.update).not.toHaveBeenCalled();
     });
@@ -863,29 +899,25 @@ describe("AgentExecutor", () => {
       });
       await executor.executeAgent("multi-exec-agent");
 
-      // Run the agent again with session-bbb
+      // Run the agent again with session-bbb. session-aaa has no result yet,
+      // so only a forced run (as Linear does) may overlap it.
       launcher.launch.mockReturnValueOnce({
         sessionId: "session-bbb",
         state: "starting" as const,
         cwd: "/tmp",
         createdAt: Date.now(),
       });
-      // Need to reset isAlive to allow second execution
-      launcher.isAlive.mockReturnValue(false);
-      // Need to reset getAgent to match the updated lastSessionId
-      mockAgentStore.getAgent.mockReturnValue(
-        makeAgent({ id: "multi-exec-agent", lastSessionId: "session-aaa" }),
-      );
-      await executor.executeAgent("multi-exec-agent");
+      await executor.executeAgent("multi-exec-agent", undefined, { force: true });
 
       // Exit session-aaa
       executor.handleSessionExited("session-aaa", 0);
+      await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
 
       const executions = executor.getExecutions("multi-exec-agent");
       const aaa = executions.find((e) => e.sessionId === "session-aaa");
       const bbb = executions.find((e) => e.sessionId === "session-bbb");
       expect(aaa!.completedAt).toBeDefined();
-      expect(aaa!.success).toBe(true);
+      expect(aaa!.success).toBe(false);
       // session-bbb should still be running (no completedAt)
       expect(bbb!.completedAt).toBeUndefined();
     });
@@ -895,23 +927,46 @@ describe("AgentExecutor", () => {
   // executeAgentManually
   // =========================================================================
   describe("executeAgentManually", () => {
-    it("calls executeAgent with force=true and triggerType='manual'", async () => {
+    it("calls executeAgent with ignoreEnabled=true and triggerType='manual'", async () => {
       // Even though the agent is disabled, executeAgentManually should
-      // call executeAgent with force=true to bypass the enabled check.
+      // call executeAgent with ignoreEnabled to bypass the enabled check
+      // (but, unlike force, not the overlap check).
       const agent = makeAgent({ id: "manual-agent", enabled: false });
       mockAgentStore.getAgent.mockReturnValue(agent);
 
       const executeSpy = vi.spyOn(executor, "executeAgent");
 
-      executor.executeAgentManually("manual-agent", "some input");
+      const result = executor.executeAgentManually("manual-agent", "some input");
 
       // Need to advance timers to let the async execute complete
       await vi.advanceTimersByTimeAsync(100);
 
+      expect(result).toEqual({ ok: true });
       expect(executeSpy).toHaveBeenCalledWith("manual-agent", "some input", {
-        force: true,
+        ignoreEnabled: true,
         triggerType: "manual",
       });
+    });
+
+    it("refuses with 409 while a run of the agent is still in progress", async () => {
+      // "Run now" must not stack a second run on one still waiting for its result.
+      const agent = makeAgent({ id: "busy-agent", name: "Busy Agent" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("busy-agent");
+
+      const result = executor.executeAgentManually("busy-agent");
+
+      expect(result).toEqual({
+        ok: false,
+        status: 409,
+        error: 'A run of agent "Busy Agent" is still in progress (session session-123)',
+      });
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns 404 for an unknown agent", () => {
+      mockAgentStore.getAgent.mockReturnValue(null);
+      expect(executor.executeAgentManually("ghost")).toEqual({ ok: false, status: 404, error: "Agent not found" });
     });
   });
 
@@ -1106,6 +1161,425 @@ describe("AgentExecutor", () => {
 
       expect(mockExecutionStoreInstance.list).toHaveBeenCalledWith({ agentId: "a1", limit: 10 });
       expect(result).toEqual(mockResult);
+    });
+  });
+
+  // =========================================================================
+  // Run lifecycle: a run is complete on its session's first turn result
+  // =========================================================================
+  describe("run lifecycle (handleSessionResult)", () => {
+    it("completes the run on the first result, keeps the session and resets failures", async () => {
+      // The run is done when the CLI reports its turn result. The session is
+      // NOT killed (the user can open it and continue), and a success resets
+      // consecutiveFailures.
+      const agent = makeAgent({ id: "ok-agent", consecutiveFailures: 3 });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("ok-agent");
+      expect(executor.isRunInProgress("ok-agent")).toBe(true);
+
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+
+      const exec = executor.getExecutions("ok-agent")[0];
+      expect(exec.success).toBe(true);
+      expect(exec.subtype).toBe("success");
+      expect(exec.completedAt).toBeGreaterThan(0);
+      expect(mockExecutionStoreInstance.update).toHaveBeenCalledWith("session-123", expect.objectContaining({
+        success: true,
+        subtype: "success",
+      }));
+      expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("ok-agent", { consecutiveFailures: 0 });
+      expect(executor.isRunInProgress("ok-agent")).toBe(false);
+      // The session is kept: the mock launcher has no kill(), so any attempt
+      // to end the session would have thrown above.
+      expect(launcher).not.toHaveProperty("kill");
+    });
+
+    it("records an error result with its subtype and message, and counts the failure", async () => {
+      const agent = makeAgent({ id: "err-agent", consecutiveFailures: 1 });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("err-agent");
+
+      executor.handleSessionResult("session-123", resultMessage({
+        is_error: true,
+        subtype: "error_max_turns",
+        errors: ["Reached the maximum number of turns"],
+      }));
+
+      const exec = executor.getExecutions("err-agent")[0];
+      expect(exec.success).toBe(false);
+      expect(exec.subtype).toBe("error_max_turns");
+      expect(exec.error).toBe("Reached the maximum number of turns");
+      expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("err-agent", { consecutiveFailures: 2 });
+    });
+
+    it("falls back to the result text, then the subtype, for the error message", async () => {
+      const agent = makeAgent({ id: "err-text-agent" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("err-text-agent");
+      executor.handleSessionResult("session-123", resultMessage({ is_error: true, subtype: "error_during_execution", result: "API overloaded" }));
+      expect(executor.getExecutions("err-text-agent")[0].error).toBe("API overloaded");
+
+      launcher.launch.mockReturnValueOnce({ sessionId: "session-2", state: "starting", cwd: "/tmp", createdAt: Date.now() });
+      await executor.executeAgent("err-text-agent");
+      executor.handleSessionResult("session-2", resultMessage({ is_error: true, subtype: "error_max_budget_usd" }));
+      expect(executor.getExecutions("err-text-agent")[1].error).toBe("Run ended with error_max_budget_usd");
+    });
+
+    it("auto-disables the agent after five failed results in a row", async () => {
+      const agent = makeAgent({ id: "flaky-agent", consecutiveFailures: 4 });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("flaky-agent");
+
+      executor.handleSessionResult("session-123", resultMessage({ is_error: true, subtype: "error_during_execution" }));
+
+      expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("flaky-agent", expect.objectContaining({
+        enabled: false,
+        consecutiveFailures: 5,
+      }));
+    });
+
+    it("ignores later results of the same session and non-result messages", async () => {
+      // Only the FIRST result completes the run; follow-up turns in the kept
+      // session (or a Linear follow-up) must not rewrite it.
+      const agent = makeAgent({ id: "once-agent" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("once-agent");
+
+      executor.handleSessionResult("session-123", { type: "cli_connected" } as never);
+      expect(executor.isRunInProgress("once-agent")).toBe(true);
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+      executor.handleSessionResult("session-123", resultMessage({ is_error: true, subtype: "error_during_execution" }));
+
+      expect(executor.getExecutions("once-agent")[0].success).toBe(true);
+      expect(mockExecutionStoreInstance.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("allows a new run once the previous one has its result", async () => {
+      const agent = makeAgent({ id: "again-agent" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      await executor.executeAgent("again-agent");
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+
+      expect(executor.startRun("again-agent")).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(launcher.launch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // =========================================================================
+  // startRun: synchronous gate + reservation
+  // =========================================================================
+  describe("startRun", () => {
+    it("reserves the run synchronously so two triggers at once start only one", () => {
+      // The second call happens before the first launch's async work runs;
+      // it must already see the run in progress.
+      const agent = makeAgent({ id: "race-agent", name: "Race Agent" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+
+      const first = executor.startRun("race-agent", undefined, { triggerType: "webhook" });
+      const second = executor.startRun("race-agent", undefined, { triggerType: "webhook" });
+
+      expect(first).toEqual({ ok: true });
+      expect(second).toMatchObject({ ok: false, status: 409 });
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses a disabled agent unless ignoreEnabled/force is set", () => {
+      const agent = makeAgent({ id: "off-agent", name: "Off Agent", enabled: false });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+
+      expect(executor.startRun("off-agent", undefined, { triggerType: "webhook" })).toEqual({
+        ok: false,
+        status: 409,
+        error: 'Agent "Off Agent" is disabled',
+      });
+      expect(launcher.launch).not.toHaveBeenCalled();
+    });
+
+    it("records the trigger type and appends non-placeholder input as a delimited block", async () => {
+      const agent = makeAgent({ id: "hook-agent", prompt: "Summarize the payload." });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+
+      executor.startRun("hook-agent", "event=push", { triggerType: "webhook" });
+      await vi.advanceTimersByTimeAsync(10);
+
+      const appended = mockExecutionStoreInstance.append.mock.calls[0][0] as AgentExecution;
+      expect(appended.triggerType).toBe("webhook");
+      const sent = wsBridge.injectUserMessage.mock.calls[0][1] as string;
+      expect(sent).toContain("Summarize the payload.\n\nInput provided by the trigger:\n<trigger_input>\nevent=push\n</trigger_input>");
+    });
+
+    it("counts a run as in progress while it is still launching", async () => {
+      // Between the launch and the CLI connecting there is no result yet.
+      const agent = makeAgent({ id: "slow-agent" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "starting", cwd: "/tmp", createdAt: Date.now() });
+
+      executor.startRun("slow-agent");
+      expect(executor.isRunInProgress("slow-agent")).toBe(true);
+      await vi.advanceTimersByTimeAsync(35_000);
+      // Connection timeout closes the run as failed
+      expect(executor.isRunInProgress("slow-agent")).toBe(false);
+      expect(executor.getExecutions("slow-agent")[0].success).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // buildAgentPrompt
+  // =========================================================================
+  describe("buildAgentPrompt", () => {
+    it("replaces every placeholder and keeps $-patterns in the input literal", () => {
+      // String.replace with a string replacement would expand "$&".
+      expect(buildAgentPrompt("A {{input}} B {{input}}", "x$&y")).toBe("A x$&y B x$&y");
+    });
+
+    it("leaves a prompt without placeholder unchanged when there is no input", () => {
+      expect(buildAgentPrompt("Do it", undefined)).toBe("Do it");
+      expect(buildAgentPrompt("Do it", "   ")).toBe("Do it");
+    });
+
+    it("appends input to a prompt without placeholder", () => {
+      expect(buildAgentPrompt("Do it", "data")).toBe(
+        "Do it\n\nInput provided by the trigger:\n<trigger_input>\ndata\n</trigger_input>",
+      );
+    });
+  });
+
+  // =========================================================================
+  // Schedules: time zone, mode, firing, reporting
+  // =========================================================================
+  describe("schedules", () => {
+    afterEach(() => {
+      mockSchedule.timezone = undefined;
+    });
+
+    it("arms recurring schedules in 5-field mode and the configured time zone", () => {
+      mockSchedule.timezone = "Europe/Rome";
+      executor.scheduleAgent(makeAgent({
+        id: "tz-agent",
+        triggers: { schedule: { enabled: true, expression: "0 9 * * 1-5", recurring: true } },
+      }));
+      expect(mockCronState.constructorCalls[0].args[1]).toEqual({ mode: "5-part", timezone: "Europe/Rome" });
+    });
+
+    it("rescheduleAll re-arms every agent (e.g. after a time zone change)", () => {
+      const agent = makeAgent({
+        id: "re-agent",
+        triggers: { schedule: { enabled: true, expression: "0 * * * *", recurring: true } },
+      });
+      mockAgentStore.listAgents.mockReturnValue([agent]);
+      executor.scheduleAgent(agent);
+      const first = getLastCronInstance();
+
+      mockSchedule.timezone = "America/New_York";
+      executor.rescheduleAll();
+
+      expect(first.stop).toHaveBeenCalled();
+      expect(mockCronState.constructorCalls).toHaveLength(2);
+      expect(mockCronState.constructorCalls[1].args[1]).toEqual({ mode: "5-part", timezone: "America/New_York" });
+    });
+
+    it("a fired recurring schedule starts a schedule run", async () => {
+      const agent = makeAgent({
+        id: "fire-agent",
+        triggers: { schedule: { enabled: true, expression: "*/5 * * * *", recurring: true } },
+      });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      executor.scheduleAgent(agent);
+      const callback = mockCronState.constructorCalls[0].args[2] as () => void;
+
+      callback();
+      await vi.advanceTimersByTimeAsync(10);
+
+      const appended = mockExecutionStoreInstance.append.mock.calls[0][0] as AgentExecution;
+      expect(appended.triggerType).toBe("schedule");
+      expect(executor.getScheduleIssue("fire-agent")).toBeNull();
+    });
+
+    it("reports a scheduled run skipped because the previous run is still in progress", async () => {
+      const agent = makeAgent({
+        id: "skip-agent",
+        name: "Skip Agent",
+        triggers: { schedule: { enabled: true, expression: "*/5 * * * *", recurring: true } },
+      });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      executor.scheduleAgent(agent);
+      const callback = mockCronState.constructorCalls[0].args[2] as () => void;
+      await executor.executeAgent("skip-agent");
+
+      callback();
+
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+      expect(executor.getScheduleIssue("skip-agent")).toMatch(/Scheduled run at .* skipped: A run of agent "Skip Agent" is still in progress/);
+    });
+
+    it("a fired one-shot disables its schedule and runs", async () => {
+      const target = new Date(Date.now() + 60_000).toISOString();
+      const agent = makeAgent({
+        id: "once-agent",
+        triggers: { schedule: { enabled: true, expression: target, recurring: false } },
+      });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+      executor.scheduleAgent(agent);
+      const callback = mockCronState.constructorCalls[0].args[1] as () => void;
+
+      callback();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("once-agent", {
+        triggers: { schedule: { enabled: false, expression: target, recurring: false } },
+      });
+      expect(launcher.launch).toHaveBeenCalledOnce();
+      expect(executor.getNextRunTime("once-agent")).toBeNull();
+    });
+
+    it("reports a schedule croner cannot arm instead of throwing", () => {
+      executor.scheduleAgent(makeAgent({
+        id: "bad-agent",
+        triggers: { schedule: { enabled: true, expression: "not a date", recurring: false } },
+      }));
+      expect(executor.getScheduleIssue("bad-agent")).toMatch(/^Schedule not armed: Invalid one-time date/);
+      // stopAgent (e.g. schedule disabled) clears the report
+      executor.stopAgent("bad-agent");
+      expect(executor.getScheduleIssue("bad-agent")).toBeNull();
+    });
+  });
+
+  // =========================================================================
+  // Restart recovery
+  // =========================================================================
+  it("closes runs left open by a previous server process at construction", () => {
+    // Every CLI dies with the server, so those runs can never get a result.
+    expect(mockExecutionStoreInstance.finalizeInterrupted).toHaveBeenCalledWith(
+      "Interrupted: the server restarted before the run finished",
+    );
+  });
+
+  // =========================================================================
+  // Allowed tools → --tools (Claude only)
+  // =========================================================================
+  describe("allowedTools", () => {
+    it("passes allowedTools to Claude launches as the restricting tools option", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "tools-agent", allowedTools: ["Read", "Grep"] }));
+      await executor.executeAgent("tools-agent");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ tools: ["Read", "Grep"] }));
+    });
+
+    it("does not pass tools for Codex, which has no per-tool switch", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "codex-tools", backendType: "codex", allowedTools: ["Read"] }));
+      await executor.executeAgent("codex-tools");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ tools: undefined }));
+    });
+  });
+
+  // =========================================================================
+  // Temp working directories of cwd:"temp" agents
+  // =========================================================================
+  describe("temp cwd cleanup", () => {
+    let dir: string;
+
+    /** The next "temp" run gets this real directory as its mkdtemp result. */
+    const useRealTempDir = () => vi.mocked(mkdtempSync).mockReturnValueOnce(dir);
+
+    beforeEach(async () => {
+      const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+      dir = fs.mkdtempSync(join(tmpdir(), "companion-agent-cleanup-"));
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "temp-agent", cwd: "temp" }));
+    });
+
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("keeps the dir while the finished run's session is still around", async () => {
+      // The user may open the session and continue working in that cwd.
+      useRealTempDir();
+      await executor.executeAgent("temp-agent");
+      launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "connected", cwd: dir, createdAt: 1 });
+      launcher.listSessions.mockReturnValue([{ sessionId: "session-123", state: "connected", cwd: dir, createdAt: 1 }]);
+
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+
+      expect(existsSync(dir)).toBe(true);
+      expect(executor.getExecutions("temp-agent")[0].tempCwd).toBe(dir);
+    });
+
+    it("removes the dir once the session is archived after the run finished", async () => {
+      useRealTempDir();
+      await executor.executeAgent("temp-agent");
+      launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "connected", cwd: dir, createdAt: 1 });
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+      expect(existsSync(dir)).toBe(true);
+
+      launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "exited", cwd: dir, createdAt: 1, archived: true });
+      mockExecutionStoreInstance.all.mockReturnValue(executor.getExecutions("temp-agent"));
+      executor.handleSessionClosed("session-123");
+
+      expect(existsSync(dir)).toBe(false);
+    });
+
+    it("never removes the dir of a run still in progress, even if its session is archived", async () => {
+      useRealTempDir();
+      await executor.executeAgent("temp-agent");
+      launcher.getSession.mockReturnValue({ sessionId: "session-123", state: "exited", cwd: dir, createdAt: 1, archived: true });
+      mockExecutionStoreInstance.all.mockReturnValue(executor.getExecutions("temp-agent"));
+
+      executor.handleSessionClosed("session-123");
+      expect(existsSync(dir)).toBe(true);
+
+      // The archive killed the CLI: the run fails after the grace period, and
+      // only then is the dir released.
+      executor.handleSessionExited("session-123", null);
+      await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
+      expect(existsSync(dir)).toBe(false);
+    });
+
+    it("keeps the dir when another live session uses it", async () => {
+      useRealTempDir();
+      await executor.executeAgent("temp-agent");
+      launcher.getSession.mockReturnValue(undefined);
+      launcher.listSessions.mockReturnValue([{ sessionId: "other", state: "connected", cwd: dir, createdAt: 1 }]);
+
+      executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+
+      expect(existsSync(dir)).toBe(true);
+    });
+
+    it("removes the dir right away when the launch itself failed", async () => {
+      launcher.launch.mockImplementation(() => {
+        throw new Error("spawn failed");
+      });
+      useRealTempDir();
+      await executor.executeAgent("temp-agent");
+      expect(existsSync(dir)).toBe(false);
+    });
+
+    it("sweeps finished runs' dirs of sessions deleted while the server was down", () => {
+      mockExecutionStoreInstance.all.mockReturnValue([
+        { sessionId: "gone", agentId: "temp-agent", triggerType: "manual", startedAt: 1, completedAt: 2, success: true, tempCwd: dir },
+      ]);
+      launcher.getSession.mockReturnValue(undefined);
+
+      executor.startAll();
+
+      expect(existsSync(dir)).toBe(false);
+    });
+
+    it("recreates a removed temp dir when its session is unarchived", () => {
+      rmSync(dir, { recursive: true, force: true });
+      launcher.getSession.mockReturnValue({ sessionId: "s", state: "exited", cwd: dir, createdAt: 1 });
+
+      executor.handleSessionUnarchived("s");
+
+      expect(existsSync(dir)).toBe(true);
+    });
+
+    it("only ever treats companion-agent-* dirs directly under tmpdir as temp dirs", () => {
+      expect(isAgentTempDir(dir)).toBe(true);
+      expect(isAgentTempDir(join(dir, "nested"))).toBe(false);
+      expect(isAgentTempDir(join(tmpdir(), "other-dir"))).toBe(false);
+      expect(isAgentTempDir("/home/user/companion-agent-x")).toBe(false);
+      expect(isAgentTempDir(undefined)).toBe(false);
     });
   });
 });

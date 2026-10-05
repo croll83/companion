@@ -177,7 +177,12 @@ function createDeps(overrides?: Partial<SessionOrchestratorDeps>) {
   const sessionStore = createMockStore();
   const worktreeTracker = createMockTracker();
   const prPoller = { watch: vi.fn(), unwatch: vi.fn() };
-  const agentExecutor = { handleSessionExited: vi.fn() } as any;
+  const agentExecutor = {
+    handleSessionExited: vi.fn(),
+    handleSessionResult: vi.fn(),
+    handleSessionClosed: vi.fn(),
+    handleSessionUnarchived: vi.fn(),
+  } as any;
   return {
     launcher,
     wsBridge,
@@ -233,6 +238,15 @@ describe("SessionOrchestrator", () => {
       companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
 
       expect(deps.agentExecutor.handleSessionExited).toHaveBeenCalledWith("s1", 0);
+    });
+
+    it("turn results reach the agentExecutor (an agent run completes on its first result)", () => {
+      orchestrator.initialize();
+      const message = { type: "result", data: { is_error: false, subtype: "success" } } as any;
+
+      companionBus.emit("message:result", { sessionId: "s1", message });
+
+      expect(deps.agentExecutor.handleSessionResult).toHaveBeenCalledWith("s1", message);
     });
 
     it("session:exited notifies browsers via notifyCliDisconnected when not relaunching", () => {
@@ -927,6 +941,16 @@ describe("SessionOrchestrator", () => {
       expect(deps.sessionStore.setArchived).toHaveBeenCalledWith("s1", true);
     });
 
+    it("lets the agentExecutor release an agent run's temp dir after marking it archived", async () => {
+      // Order matters: the executor only deletes a temp cwd whose session is
+      // already archived (or gone).
+      deps.launcher.setArchived.mockImplementation(() => {
+        expect(deps.agentExecutor.handleSessionClosed).not.toHaveBeenCalled();
+      });
+      await orchestrator.archiveSession("s1");
+      expect(deps.agentExecutor.handleSessionClosed).toHaveBeenCalledWith("s1");
+    });
+
     it("performs Linear transition when linearTransition=backlog", async () => {
       // Set up linked issue
       vi.mocked(sessionLinearIssues.getLinearIssue).mockReturnValue({
@@ -1065,6 +1089,8 @@ describe("SessionOrchestrator", () => {
       expect(sessionLinearIssues.removeLinearIssue).toHaveBeenCalledWith("s1");
       expect(deps.launcher.removeSession).toHaveBeenCalledWith("s1");
       expect(deps.wsBridge.closeSession).toHaveBeenCalledWith("s1");
+      // ...and, once the session is gone, its agent temp dir may be released
+      expect(deps.agentExecutor.handleSessionClosed).toHaveBeenCalledWith("s1");
     });
 
     it("returns worktree cleanup info", async () => {
@@ -1114,6 +1140,8 @@ describe("SessionOrchestrator", () => {
       expect(result.ok).toBe(true);
       expect(deps.launcher.setArchived).toHaveBeenCalledWith("s1", false);
       expect(deps.sessionStore.setArchived).toHaveBeenCalledWith("s1", false);
+      // An agent run's temp cwd removed while archived is recreated
+      expect(deps.agentExecutor.handleSessionUnarchived).toHaveBeenCalledWith("s1");
     });
   });
 

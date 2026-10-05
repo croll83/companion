@@ -1194,7 +1194,7 @@ export class WsBridge {
   }
 
   /** Send a user message into a session programmatically (no browser required).
-   *  Used by the cron scheduler and agent executor to send prompts to autonomous sessions. */
+   *  Used by the agent executor, the Linear bridge and POST /sessions/:id/message. */
   injectUserMessage(sessionId: string, content: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) {

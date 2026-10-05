@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { CronJob } from "./cron-types.js";
+import type { LegacyCronJob as CronJob } from "./agent-cron-migrator.js";
 import type { AgentConfig } from "./agent-types.js";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────

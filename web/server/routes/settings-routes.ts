@@ -7,7 +7,12 @@ import { listConnections } from "../linear-connections.js";
 import { hasCodexAuth } from "../codex-auth-check.js";
 import { telegramBridgeManager } from "../telegram-bridge-manager.js";
 
-export function registerSettingsRoutes(api: Hono): void {
+export interface SettingsRouteHooks {
+  /** The global timeZone setting changed (agent schedules run in it). */
+  onTimeZoneChanged?: () => void;
+}
+
+export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}): void {
   api.get("/settings", (c) => {
     const settings = getSettings();
     const connections = listConnections();
@@ -145,6 +150,7 @@ export function registerSettingsRoutes(api: Hono): void {
       linearCache.clear();
     }
 
+    const previousTimeZone = getSettings().timeZone ?? "";
     const settings = updateSettings({
       anthropicApiKey:
         typeof body.anthropicApiKey === "string"
@@ -239,6 +245,8 @@ export function registerSettingsRoutes(api: Hono): void {
 
     // Token added/changed/cleared → spawn or stop the bridge child accordingly.
     if (body.telegramBotToken !== undefined) telegramBridgeManager.sync();
+    // Agent schedules are armed in the configured zone: re-arm them.
+    if ((settings.timeZone ?? "") !== previousTimeZone) hooks.onTimeZoneChanged?.();
 
     const connectionsAfterUpdate = listConnections();
     return c.json({

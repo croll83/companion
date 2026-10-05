@@ -187,10 +187,6 @@ export interface SdkSessionInfo {
   codexInternetAccess?: boolean;
   /** Sandbox mode selected for Codex sessions */
   codexSandbox?: "workspace-write" | "danger-full-access";
-  /** If this session was spawned by a cron job */
-  cronJobId?: string;
-  /** Human-readable name of the cron job that spawned this session */
-  cronJobName?: string;
   /** If session was created from an existing Claude thread/session. */
   resumeSessionAt?: string;
   /** Whether the resumed session used --fork-session. */
@@ -199,6 +195,11 @@ export interface SdkSessionInfo {
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
   agentName?: string;
+  /**
+   * Claude only: built-in tools the session is limited to (`--tools`).
+   * Persisted so every relaunch keeps the restriction.
+   */
+  tools?: string[];
   /**
    * Explicitly chosen env profile. Only the slug is persisted: the variables
    * are re-read from the profile at every spawn and relaunch.
@@ -234,6 +235,11 @@ export interface LaunchOptions {
   claudeBinary?: string;
   codexBinary?: string;
   allowedTools?: string[];
+  /**
+   * Claude only: restrict the built-in tool set (`--tools a,b,c`). Unlike
+   * allowedTools (pre-approval only) this really removes the other tools.
+   */
+  tools?: string[];
   /**
    * Request/agent env, applied on top of the resolved env profiles. Persisted
    * (0600, outside launcher.json) so relaunches after a restart keep it.
@@ -418,6 +424,9 @@ export class CliLauncher {
       info.codexSandbox = options.codexSandbox;
     }
 
+    if (backendType === "claude" && options.tools && options.tools.length > 0) {
+      info.tools = [...options.tools];
+    }
     if (options.envSlug) info.envSlug = options.envSlug;
     if (options.linearConnectionId) info.linearConnectionId = options.linearConnectionId;
     if (options.repoRoot) info.repoRoot = options.repoRoot;
@@ -678,6 +687,10 @@ export class CliLauncher {
       for (const tool of options.allowedTools) {
         args.push("--allowedTools", tool);
       }
+    }
+    // Read from the session record so relaunches keep the restriction.
+    if (info.tools && info.tools.length > 0) {
+      args.push("--tools", info.tools.join(","));
     }
     if (options.resumeSessionAt) {
       args.push("--resume-session-at", options.resumeSessionAt);

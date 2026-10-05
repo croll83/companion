@@ -25,7 +25,12 @@ export interface AgentConfig {
   backendType: "claude" | "codex";
   /** Model to use (e.g. "claude-sonnet-4-6") */
   model: string;
-  /** Permission mode — "bypassPermissions" for Claude auto mode */
+  /**
+   * Claude agents always run with bypassPermissions: an unattended run has
+   * nobody to answer approval prompts, so any other mode would just block.
+   * For Codex this picks the sandbox: "bypassPermissions" → danger-full-access,
+   * anything else → workspace-write (approvals are never asked either way).
+   */
   permissionMode: string;
   /** Working directory path, or "temp" for an auto-created temp dir */
   cwd: string;
@@ -33,7 +38,12 @@ export interface AgentConfig {
   envSlug?: string;
   /** Extra environment variables */
   env?: Record<string, string>;
-  /** Tool allowlist (empty = all tools) */
+  /**
+   * Claude only: the built-in tools the agent may use, passed as `--tools`
+   * (which really removes the others; `--allowedTools` only pre-approves and
+   * restricts nothing under bypassPermissions). Empty = all tools. MCP tools
+   * are not affected. Codex has no per-tool switch, so it ignores this.
+   */
   allowedTools?: string[];
   /** Codex-specific: internet access */
   codexInternetAccess?: boolean;
@@ -46,15 +56,6 @@ export interface AgentConfig {
   /** MCP server configs to set on the session after CLI connects */
   mcpServers?: Record<string, McpServerConfigAgent>;
 
-  // ── Skills ──
-  /** Skill slugs to attach (from ~/.claude/skills/) */
-  skills?: string[];
-
-  // ── Git ──
-  branch?: string;
-  createBranch?: boolean;
-  useWorktree?: boolean;
-
   // ── Triggers ──
   triggers?: {
     /** Webhook trigger config */
@@ -66,7 +67,11 @@ export interface AgentConfig {
     /** Cron/schedule trigger config */
     schedule?: {
       enabled: boolean;
-      /** Cron expression or ISO datetime */
+      /**
+       * 5-field cron expression (minute precision, no seconds field) or, for
+       * a one-shot, a local date-time ("YYYY-MM-DDTHH:mm"). Both run in the
+       * global timeZone setting ("" = the server's local zone).
+       */
       expression: string;
       /** true = recurring cron, false = one-shot */
       recurring: boolean;
@@ -111,8 +116,12 @@ export type AgentConfigExport = Omit<
   "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled"
 >;
 
+/**
+ * One run of an agent. A run is complete on the first turn result of its
+ * session (or when the CLI exits first); the session itself is kept.
+ */
 export interface AgentExecution {
-  /** The session ID created for this execution */
+  /** The session ID created for this execution ("" if the launch failed) */
   sessionId: string;
   /** The agent ID that triggered this */
   agentId: string;
@@ -122,8 +131,15 @@ export interface AgentExecution {
   startedAt: number;
   /** When the execution completed */
   completedAt?: number;
-  /** Whether the execution succeeded */
+  /** Whether the execution succeeded (the turn result was not an error) */
   success?: boolean;
   /** Error message if it failed */
   error?: string;
+  /** Result subtype reported by the CLI (e.g. "success", "error_max_turns") */
+  subtype?: string;
+  /**
+   * Temp working directory created for a cwd:"temp" agent. Deleted once the
+   * run is done and its session is archived or gone.
+   */
+  tempCwd?: string;
 }
