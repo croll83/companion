@@ -43,8 +43,8 @@ Messages flow browser <-> `/ws/browser/:id` <-> server <-> CLI process.
   `systemd-run --user --collect --unit=companion-restart-$(date +%s) bash -c 'sleep 3; systemctl --user restart the-companion; sleep 20; { systemctl --user is-active the-companion; curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3456/; } > /tmp/companion-restart.log 2>&1'`
 - Jobs started from a session also die on restart. If a job must survive, launch it with `systemd-run --user`.
 - Logs do not go to the journal. They go to `~/.companion/logs/companion.log` and `companion.error.log`, and `console.warn`/`console.error` output lands in the error log.
-  - The server's log rotation (over 2M lines across `logs/*.log`) can delete these two files while the service is still writing to them.
-  - If the files are missing, read `/proc/$(systemctl --user show -p MainPID --value the-companion)/fd/1` (and `fd/2`).
+  - Log rotation (`server/logger.ts`) deletes only its own `companion_<ISO>_<pid>.log` files (over 2M lines in total). It never deletes these two files. When one of them grows past `COMPANION_LOG_STDIO_MAX_MB` (default 100, 0 turns it off), rotation copies it to `<name>.1` and then truncates it in place. Look in the `.1` file for older lines.
+  - Servers older than this fix could delete the two files while still writing to them. If the files are missing, read `/proc/$(systemctl --user show -p MainPID --value the-companion)/fd/1` (and `fd/2`).
   - The per-boot `companion_<ISO>_<pid>.log` contains only `log.*` lines.
 
 ## Deploy without a release
