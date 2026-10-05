@@ -15,6 +15,12 @@ export interface CompanionEventMap {
   /** CLI/Codex process exited. */
   "session:exited": { sessionId: string; exitCode: number | null };
 
+  /**
+   * A Codex session could not start or resume its thread (e.g. a fork whose
+   * source rollout is gone). The process may still be running.
+   */
+  "session:init-failed": { sessionId: string; error: string };
+
   /** CLI WebSocket disconnected and a browser needs a relaunch. */
   "session:relaunch-needed": { sessionId: string };
 

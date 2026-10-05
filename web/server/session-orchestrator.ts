@@ -178,6 +178,10 @@ export class SessionOrchestrator {
     companionBus.on("session:exited", ({ sessionId, exitCode }) => {
       this.agentExecutor.handleSessionExited(sessionId, exitCode);
     });
+    // A Codex thread that could not start (e.g. a failed fork) fails its run.
+    companionBus.on("session:init-failed", ({ sessionId, error }) => {
+      this.agentExecutor.handleSessionInitFailed(sessionId, error);
+    });
     // An agent run is complete on its session's first turn result.
     companionBus.on("message:result", ({ sessionId, message }) => {
       this.agentExecutor.handleSessionResult(sessionId, message);

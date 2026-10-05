@@ -14,7 +14,7 @@ const EDITABLE_FIELDS = [
   "name", "description", "icon", "version",
   "backendType", "model", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
-  "prompt", "mcpServers",
+  "prompt", "contextMode", "sourceSessionId", "mcpServers",
   "triggers", "enabled",
 ] as const;
 
@@ -23,12 +23,29 @@ const TOOL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /**
  * Reject what would otherwise fail later and silently: a schedule croner
- * cannot arm (or a one-time date already past, when `rejectPast`), and
- * allowedTools entries `--tools` cannot take. Returns an error or null.
+ * cannot arm (or a one-time date already past, when `rejectPast`),
+ * allowedTools entries `--tools` cannot take, and a "fork" context without a
+ * usable source session (`forkSourceError`, checked against the agent as it
+ * will be saved). Returns an error or null.
  */
-function validateAgentFields(fields: Partial<AgentConfig>, opts: { rejectPast: boolean }): string | null {
+function validateAgentFields(
+  fields: Partial<AgentConfig>,
+  opts: { rejectPast: boolean; saved?: Partial<AgentConfig>; forkSourceError?: AgentExecutor["forkSourceError"] },
+): string | null {
   const scheduleError = validateSchedule(fields.triggers?.schedule, { rejectPast: opts.rejectPast });
   if (scheduleError) return scheduleError;
+  if (fields.contextMode !== undefined && fields.contextMode !== "brief" && fields.contextMode !== "fork") {
+    return 'contextMode must be "brief" or "fork"';
+  }
+  if (fields.sourceSessionId !== undefined && fields.sourceSessionId !== null && typeof fields.sourceSessionId !== "string") {
+    return "sourceSessionId must be a session id";
+  }
+  const saved = { ...opts.saved, ...fields };
+  if (saved.contextMode === "fork") {
+    if (!saved.sourceSessionId) return 'contextMode "fork" needs a sourceSessionId (the session to fork)';
+    const forkError = opts.forkSourceError?.(saved.sourceSessionId, saved.backendType ?? "claude");
+    if (forkError) return forkError;
+  }
   if (fields.allowedTools !== undefined) {
     if (!Array.isArray(fields.allowedTools)) return "allowedTools must be an array of tool names";
     const bad = fields.allowedTools.find((t) => typeof t !== "string" || !TOOL_NAME_PATTERN.test(t));
@@ -65,6 +82,8 @@ function buildCreateInput(
     allowedTools: body.allowedTools as string[] | undefined,
     codexInternetAccess: body.codexInternetAccess as boolean | undefined,
     prompt: (body.prompt as string | undefined) || "",
+    contextMode: body.contextMode as AgentConfig["contextMode"] | undefined,
+    sourceSessionId: body.sourceSessionId as string | undefined,
     mcpServers: body.mcpServers as AgentConfig["mcpServers"] | undefined,
     triggers: body.triggers as AgentConfig["triggers"] | undefined,
     enabled: overrides?.enabled ?? ((body.enabled as boolean | undefined) ?? true),
@@ -132,6 +151,10 @@ export function registerAgentRoutes(
   api: Hono,
   agentExecutor?: AgentExecutor,
 ): void {
+  const forkSourceError: AgentExecutor["forkSourceError"] | undefined = agentExecutor
+    ? (sourceSessionId, backendType) => agentExecutor.forkSourceError(sourceSessionId, backendType)
+    : undefined;
+
   /** The agent as the browser sees it: live run/schedule state, no secrets. */
   const present = (agent: AgentConfig) => sanitizeAgent({
     ...agent,
@@ -156,7 +179,7 @@ export function registerAgentRoutes(
     const body = await c.req.json().catch(() => ({}));
     try {
       const input = buildCreateInput(body);
-      const invalid = validateAgentFields(input, { rejectPast: true });
+      const invalid = validateAgentFields(input, { rejectPast: true, forkSourceError });
       if (invalid) return c.json({ error: invalid }, 400);
       const agent = agentStore.createAgent(input);
 
@@ -297,7 +320,11 @@ export function registerAgentRoutes(
     const body = await c.req.json().catch(() => ({}));
     try {
       const allowed = pickEditable(body);
-      const invalid = validateAgentFields(allowed, { rejectPast: true });
+      const invalid = validateAgentFields(allowed, {
+        rejectPast: true,
+        saved: agentStore.getAgent(id) ?? undefined,
+        forkSourceError,
+      });
       if (invalid) return c.json({ error: invalid }, 400);
       const agent = agentStore.updateAgent(id, allowed);
       if (!agent) return c.json({ error: "Agent not found" }, 404);

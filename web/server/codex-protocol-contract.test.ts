@@ -50,6 +50,7 @@ describe("Codex protocol compatibility (offline snapshot)", () => {
       "initialize",
       "thread/start",
       "thread/resume",
+      "thread/fork",
       "turn/start",
       "turn/interrupt",
       "account/rateLimits/read",
@@ -86,6 +87,20 @@ describe("Codex protocol compatibility (offline snapshot)", () => {
     for (const field of ["threadId", "turnId", "callId", "tool", "arguments"]) {
       expect(paramsType).toContain(`${field}:`);
     }
+  });
+
+  // Agent "fork" runs call thread/fork with these fields (codex-adapter
+  // forkThread) and read the new thread id from the response.
+  it("keeps ThreadForkParams shape expected by the adapter", () => {
+    const paramsType = readSnapshot("server/protocol/codex-upstream/v2/ThreadForkParams.ts.txt");
+    for (const field of ["threadId", "model?", "cwd?", "approvalPolicy?", "sandbox?", "developerInstructions?", "excludeTurns?"]) {
+      expect(paramsType).toContain(`${field}:`);
+    }
+  });
+
+  it("keeps ThreadForkResponse shape expected by the adapter", () => {
+    const responseType = readSnapshot("server/protocol/codex-upstream/v2/ThreadForkResponse.ts.txt");
+    expect(responseType).toContain("thread: Thread");
   });
 
   it("keeps DynamicToolCallResponse shape expected by the adapter", () => {

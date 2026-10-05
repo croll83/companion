@@ -97,6 +97,7 @@ function createMockExecutor() {
     getScheduleIssue: vi.fn(() => null as string | null),
     getExecutions: vi.fn(() => []),
     listAllExecutions: vi.fn(() => ({ executions: [] as Record<string, unknown>[], total: 0 })),
+    forkSourceError: vi.fn((): string | null => null),
   };
 }
 
@@ -1579,6 +1580,61 @@ describe("agent validation", () => {
     expect(past.status).toBe(201);
     const bad = await post("/api/agents/import", { name: "B", prompt: "p", triggers: schedule("* * *") });
     expect(bad.status).toBe(400);
+  });
+
+  // Context modes: a "fork" agent must name a session it can actually fork
+  // (same backend, transcript on disk) — checked on save so the user learns
+  // it in the editor rather than from a failed run later.
+  it("validates the context mode and the fork source on create", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent());
+
+    const badMode = await post("/api/agents", { name: "A", prompt: "p", contextMode: "clone" });
+    expect(badMode.status).toBe(400);
+    expect((await badMode.json()).error).toMatch(/contextMode must be "brief" or "fork"/);
+
+    const noSource = await post("/api/agents", { name: "A", prompt: "p", contextMode: "fork" });
+    expect(noSource.status).toBe(400);
+    expect((await noSource.json()).error).toMatch(/needs a sourceSessionId/);
+
+    const badSource = await post("/api/agents", { name: "A", prompt: "p", contextMode: "fork", sourceSessionId: 42 });
+    expect(badSource.status).toBe(400);
+
+    executor.forkSourceError.mockReturnValueOnce("Source session s1 is a Codex session; a Claude Code agent cannot fork it");
+    const wrongBackend = await post("/api/agents", { name: "A", prompt: "p", contextMode: "fork", sourceSessionId: "s1" });
+    expect(wrongBackend.status).toBe(400);
+    expect((await wrongBackend.json()).error).toMatch(/cannot fork it/);
+    expect(executor.forkSourceError).toHaveBeenCalledWith("s1", "claude");
+    expect(agentStore.createAgent).not.toHaveBeenCalled();
+
+    const ok = await post("/api/agents", { name: "A", prompt: "p", contextMode: "fork", sourceSessionId: "s1" });
+    expect(ok.status).toBe(201);
+    expect(vi.mocked(agentStore.createAgent).mock.calls[0][0]).toMatchObject({ contextMode: "fork", sourceSessionId: "s1" });
+  });
+
+  // An update is checked against the agent as it will be saved: switching
+  // the backend of a fork agent re-checks its source with the new backend.
+  it("checks the fork source of the saved agent on update", async () => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ contextMode: "fork", sourceSessionId: "s1" }));
+    executor.forkSourceError.mockReturnValueOnce("wrong backend");
+
+    const res = await app.request("/api/agents/test-agent", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backendType: "codex" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(executor.forkSourceError).toHaveBeenCalledWith("s1", "codex");
+    expect(agentStore.updateAgent).not.toHaveBeenCalled();
+  });
+
+  // Import does not require the source to exist on this machine (the agent
+  // starts disabled and a run reports the problem), but the shape is checked.
+  it("imports a fork agent without checking that its source exists here", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent({ enabled: false }));
+    const res = await post("/api/agents/import", { name: "A", prompt: "p", contextMode: "fork", sourceSessionId: "elsewhere" });
+    expect(res.status).toBe(201);
+    expect(executor.forkSourceError).not.toHaveBeenCalled();
   });
 
   it("ignores the removed skills/branch/createBranch/useWorktree fields on create and import", async () => {

@@ -182,6 +182,7 @@ function createDeps(overrides?: Partial<SessionOrchestratorDeps>) {
     handleSessionResult: vi.fn(),
     handleSessionClosed: vi.fn(),
     handleSessionUnarchived: vi.fn(),
+    handleSessionInitFailed: vi.fn(),
   } as any;
   return {
     launcher,
@@ -247,6 +248,16 @@ describe("SessionOrchestrator", () => {
       companionBus.emit("message:result", { sessionId: "s1", message });
 
       expect(deps.agentExecutor.handleSessionResult).toHaveBeenCalledWith("s1", message);
+    });
+
+    // A Codex thread that cannot start (e.g. a refused thread/fork) never
+    // exits on its own: the run must still be failed through this event.
+    it("Codex init failures reach the agentExecutor", () => {
+      orchestrator.initialize();
+
+      companionBus.emit("session:init-failed", { sessionId: "s1", error: "Could not fork" });
+
+      expect(deps.agentExecutor.handleSessionInitFailed).toHaveBeenCalledWith("s1", "Could not fork");
     });
 
     it("session:exited notifies browsers via notifyCliDisconnected when not relaunching", () => {

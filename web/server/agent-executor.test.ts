@@ -91,6 +91,11 @@ vi.mock("./agent-schedule.js", () => ({
   },
 }));
 
+// Fork-source resolution has its own tests (session-fork.test.ts, real
+// files); here each test decides what the source looks like.
+const mockResolveForkSource = vi.hoisted(() => vi.fn());
+vi.mock("./session-fork.js", () => ({ resolveForkSource: mockResolveForkSource }));
+
 // Mock mkdtempSync to avoid filesystem side effects in tests.
 // The agent-executor uses it for "temp" cwd.
 vi.mock("node:fs", async (importOriginal) => {
@@ -1580,6 +1585,88 @@ describe("AgentExecutor", () => {
       expect(isAgentTempDir(join(tmpdir(), "other-dir"))).toBe(false);
       expect(isAgentTempDir("/home/user/companion-agent-x")).toBe(false);
       expect(isAgentTempDir(undefined)).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // Context modes: "brief" (fresh session) and "fork" (copy of a session)
+  // =========================================================================
+  describe("context modes", () => {
+    const forkOk = {
+      ok: true,
+      cwd: "/work/source-repo",
+      source: { sessionId: "src-session", cliSessionId: "cli-src" },
+    };
+
+    // A fork run must start from the source conversation and in the
+    // source's folder, never in a fresh temp dir.
+    it("launches a fork run on a copy of the source session, in its folder", async () => {
+      mockResolveForkSource.mockReturnValue(forkOk);
+      mockAgentStore.getAgent.mockReturnValue(
+        makeAgent({ id: "forker", cwd: "temp", contextMode: "fork", sourceSessionId: "src-session" }),
+      );
+
+      await executor.executeAgent("forker");
+
+      expect(mockResolveForkSource).toHaveBeenCalledWith(launcher, "src-session", "claude");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({
+        cwd: "/work/source-repo",
+        forkSource: { sessionId: "src-session", cliSessionId: "cli-src" },
+      }));
+      const appended = mockExecutionStoreInstance.append.mock.calls[0][0] as AgentExecution;
+      expect(appended.tempCwd).toBeUndefined();
+    });
+
+    // A source without a resumable transcript fails the run at once with
+    // the reason, and no session is launched.
+    it("fails the run with a clear error when the source cannot be forked", async () => {
+      mockResolveForkSource.mockReturnValue({ ok: false, error: "Claude transcript cli-src is not on disk" });
+      const agent = makeAgent({ id: "forker", contextMode: "fork", sourceSessionId: "src-session" });
+      mockAgentStore.getAgent.mockReturnValue(agent);
+
+      const result = await executor.executeAgent("forker");
+
+      expect(result).toBeUndefined();
+      expect(launcher.launch).not.toHaveBeenCalled();
+      const failed = mockExecutionStoreInstance.append.mock.calls[0][0] as AgentExecution;
+      expect(failed).toMatchObject({
+        success: false,
+        error: "Cannot fork the source session: Claude transcript cli-src is not on disk",
+      });
+      expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("forker", expect.objectContaining({ consecutiveFailures: 1 }));
+    });
+
+    // "brief" (and the default) keep the old behaviour: no fork source.
+    it("starts brief runs fresh without consulting a source session", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "brief", contextMode: "brief", sourceSessionId: "src-session" }));
+      await executor.executeAgent("brief");
+      expect(mockResolveForkSource).not.toHaveBeenCalled();
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/tmp/test-repo", forkSource: undefined }));
+    });
+
+    // Codex reports a failed thread/fork as an init failure, not an exit:
+    // the run must still close as failed instead of staying "running".
+    it("fails an open run when its Codex session cannot start its thread", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "codex-forker", backendType: "codex" }));
+      await executor.executeAgent("codex-forker");
+      expect(executor.isRunInProgress("codex-forker")).toBe(true);
+
+      executor.handleSessionInitFailed("session-123", "Codex initialization failed: Could not fork the source conversation");
+      executor.handleSessionInitFailed("unknown-session", "ignored");
+
+      expect(executor.isRunInProgress("codex-forker")).toBe(false);
+      expect(mockExecutionStoreInstance.update).toHaveBeenCalledWith("session-123", expect.objectContaining({
+        success: false,
+        error: "Codex initialization failed: Could not fork the source conversation",
+      }));
+    });
+
+    // The API validates a fork agent on save through the same resolution.
+    it("reports why a source cannot be forked, or null", () => {
+      mockResolveForkSource.mockReturnValueOnce({ ok: false, error: "gone" }).mockReturnValueOnce(forkOk);
+      expect(executor.forkSourceError("src-session", "codex")).toBe("gone");
+      expect(executor.forkSourceError("src-session", "claude")).toBeNull();
+      expect(mockResolveForkSource).toHaveBeenCalledWith(launcher, "src-session", "codex");
     });
   });
 });

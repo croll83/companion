@@ -11,7 +11,7 @@ import {
   readlinkSync,
   symlinkSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
@@ -147,6 +147,25 @@ function buildCodexSpawn(
   };
 }
 
+/**
+ * Another session's conversation a new session starts from as a COPY
+ * (agent "fork" runs). Used only until the new session has its own
+ * cliSessionId: from then on relaunches resume the fork, never the source.
+ */
+export interface ForkSource {
+  /** Companion session id of the source (for logs and the UI). */
+  sessionId: string;
+  /** Claude transcript id / Codex thread id to copy. */
+  cliSessionId: string;
+  /**
+   * Codex only: the source thread's rollout file. Every Companion session
+   * has its own CODEX_HOME, where the source thread is unknown, so the file
+   * is copied into the new session's home before `thread/fork` (forking by
+   * `path` does not work: Codex still looks the thread up by id).
+   */
+  rolloutPath?: string;
+}
+
 export interface SdkSessionInfo {
   sessionId: string;
   pid?: number;
@@ -191,6 +210,8 @@ export interface SdkSessionInfo {
   resumeSessionAt?: string;
   /** Whether the resumed session used --fork-session. */
   forkSession?: boolean;
+  /** Start from a copy of another session's conversation (see ForkSource). */
+  forkSource?: ForkSource;
   /** If this session was spawned by an agent */
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
@@ -262,6 +283,8 @@ export interface LaunchOptions {
   resumeSessionAt?: string;
   /** Fork a new Claude session when resuming from prior context. */
   forkSession?: boolean;
+  /** Start from a copy of another session's conversation (Claude and Codex). */
+  forkSource?: ForkSource;
   /** Optional system prompt to inject into Codex sessions (e.g. Linear context). */
   systemPrompt?: string;
 }
@@ -427,6 +450,7 @@ export class CliLauncher {
     if (backendType === "claude" && options.tools && options.tools.length > 0) {
       info.tools = [...options.tools];
     }
+    if (options.forkSource) info.forkSource = { ...options.forkSource };
     if (options.envSlug) info.envSlug = options.envSlug;
     if (options.linearConnectionId) info.linearConnectionId = options.linearConnectionId;
     if (options.repoRoot) info.repoRoot = options.repoRoot;
@@ -692,11 +716,17 @@ export class CliLauncher {
     if (info.tools && info.tools.length > 0) {
       args.push("--tools", info.tools.join(","));
     }
+    // Fork: start from a COPY of another session's transcript, until this
+    // session has a transcript of its own (then --resume below takes over).
+    const forkFrom = !options.resumeSessionId && !info.cliSessionId ? info.forkSource?.cliSessionId : undefined;
     if (options.resumeSessionAt) {
       args.push("--resume-session-at", options.resumeSessionAt);
     }
-    if (options.forkSession) {
+    if (options.forkSession || forkFrom) {
       args.push("--fork-session");
+    }
+    if (forkFrom) {
+      args.push("--resume", forkFrom);
     }
 
     // When relaunching, pass --resume to restore the CLI's conversation context.
@@ -952,6 +982,34 @@ export class CliLauncher {
     }
   }
 
+  /**
+   * Codex fork (see ForkSource): while the session has no thread of its own,
+   * copy the source rollout into this session's CODEX_HOME at the same
+   * sessions/YYYY/MM/DD path, so `thread/fork` finds it by id. The source
+   * file is only read. Returns the thread id to fork, or undefined.
+   */
+  private prepareCodexFork(codexHome: string, info: SdkSessionInfo): string | undefined {
+    const fork = info.forkSource;
+    if (info.cliSessionId || !fork) return undefined;
+    if (fork.rolloutPath) {
+      const marker = `${sep}sessions${sep}`;
+      const at = fork.rolloutPath.lastIndexOf(marker);
+      const rel = at >= 0 ? fork.rolloutPath.slice(at + marker.length) : basename(fork.rolloutPath);
+      const dest = join(codexHome, "sessions", rel);
+      try {
+        if (!existsSync(dest)) {
+          mkdirSync(dirname(dest), { recursive: true });
+          copyFileSync(fork.rolloutPath, dest);
+        }
+      } catch (err) {
+        // thread/fork then fails with Codex's own "no rollout found" error,
+        // which fails the run with a clear message.
+        console.warn(`[cli-launcher] Could not copy the fork source rollout ${fork.rolloutPath}:`, err);
+      }
+    }
+    return fork.cliSessionId;
+  }
+
   private spawnCodex(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
     const useWs = isCodexWsTransportEnabled();
     if (useWs) {
@@ -1073,6 +1131,7 @@ export class CliLauncher {
       cwd: info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
+      forkFromThreadId: this.prepareCodexFork(codexHome, info),
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
@@ -1093,6 +1152,7 @@ export class CliLauncher {
     // Handle init errors
     adapter.onInitError((error) => {
       console.error(`[cli-launcher] Codex WS session ${sessionId} init failed: ${error}`);
+      companionBus.emit("session:init-failed", { sessionId, error });
       try { proxyProc.kill("SIGTERM"); } catch {}
       this.codexWsProxies.delete(sessionId);
       const session = this.sessions.get(sessionId);
@@ -1221,6 +1281,7 @@ export class CliLauncher {
       cwd: info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
+      forkFromThreadId: this.prepareCodexFork(codexHome, info),
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
@@ -1231,6 +1292,7 @@ export class CliLauncher {
     // instead of trying to resume one whose rollout may be missing.
     adapter.onInitError((error) => {
       console.error(`[cli-launcher] Codex session ${sessionId} init failed: ${error}`);
+      companionBus.emit("session:init-failed", { sessionId, error });
       const session = this.sessions.get(sessionId);
       if (session) {
         session.state = "exited";

@@ -51,6 +51,16 @@ export interface AgentConfig {
   // ── Prompt ──
   /** Prompt template. Use {{input}} as placeholder for trigger-provided input */
   prompt: string;
+  /**
+   * What each run starts from:
+   *  - "brief" (default): a fresh session; the prompt must be self-contained.
+   *  - "fork": a COPY of sourceSessionId's conversation (Claude
+   *    `--resume <id> --fork-session`, Codex `thread/fork`), run in that
+   *    session's folder. The source session is never modified.
+   */
+  contextMode?: "brief" | "fork";
+  /** Companion session id each "fork" run copies the conversation of. */
+  sourceSessionId?: string;
 
   // ── MCP Servers ──
   /** MCP server configs to set on the session after CLI connects */

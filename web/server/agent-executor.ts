@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { AgentConfig, AgentExecution } from "./agent-types.js";
-import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
+import type { CliLauncher, ForkSource, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { BrowserIncomingMessage, CLIResultMessage } from "./session-types.js";
 import * as agentStore from "./agent-store.js";
@@ -11,6 +11,7 @@ import * as envManager from "./env-manager.js";
 import * as sessionNames from "./session-names.js";
 import { ExecutionStore } from "./execution-store.js";
 import { nextScheduledRun, scheduleTimeZone, scheduleTimeZoneLabel } from "./agent-schedule.js";
+import { resolveForkSource } from "./session-fork.js";
 
 /** Max consecutive failures before auto-disabling an agent */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -296,9 +297,16 @@ export class AgentExecutor {
       }
       const envSlug = agent.envSlug && envManager.getEnv(agent.envSlug) ? agent.envSlug : undefined;
 
-      // Resolve working directory
+      // Context: "fork" copies the source session's conversation and runs in
+      // its folder; "brief" (default) starts fresh in the agent's folder.
+      let forkSource: ForkSource | undefined;
       let cwd = agent.cwd;
-      if (cwd === "temp" || !cwd) {
+      if (agent.contextMode === "fork") {
+        const fork = resolveForkSource(this.launcher, agent.sourceSessionId, agent.backendType);
+        if (!fork.ok) throw new Error(`Cannot fork the source session: ${fork.error}`);
+        forkSource = fork.source;
+        cwd = fork.cwd;
+      } else if (cwd === "temp" || !cwd) {
         cwd = mkdtempSync(join(tmpdir(), `${TEMP_CWD_PREFIX}${agent.id}-`));
         execution.tempCwd = cwd;
       }
@@ -326,6 +334,7 @@ export class AgentExecutor {
           ? (agent.permissionMode === "bypassPermissions" ? "danger-full-access" : "workspace-write")
           : undefined,
         systemPrompt: agent.backendType === "codex" ? opts.systemPrompt : undefined,
+        forkSource,
       });
 
       execution.sessionId = sessionInfo.sessionId;
@@ -474,6 +483,25 @@ export class AgentExecutor {
       });
     }, AgentExecutor.EXIT_GRACE_MS);
     this.exitTimers.set(sessionId, timer);
+  }
+
+  /**
+   * A Codex session could not start its thread (e.g. the fork source's
+   * rollout became unreadable): its run can never produce a result.
+   */
+  handleSessionInitFailed(sessionId: string, error: string): void {
+    const exec = this.activeRuns.get(sessionId);
+    if (!exec) return;
+    this.finishRun(exec, { success: false, error: error.slice(0, MAX_ERROR_LENGTH) });
+  }
+
+  /**
+   * Why an agent with contextMode "fork" could not run from this source
+   * right now, or null if it could (used to validate the agent on save).
+   */
+  forkSourceError(sourceSessionId: string | undefined, backendType: AgentConfig["backendType"]): string | null {
+    const fork = resolveForkSource(this.launcher, sourceSessionId, backendType);
+    return fork.ok ? null : fork.error;
   }
 
   /**
