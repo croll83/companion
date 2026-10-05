@@ -28,4 +28,12 @@ describe("paths", () => {
     expect(typeof COMPANION_HOME).toBe("string");
     expect(COMPANION_HOME.length).toBeGreaterThan(0);
   });
+
+  it("legacyStatePath points at ~/.companion only when COMPANION_HOME differs", async () => {
+    // Stores that once ignored COMPANION_HOME read their old files from there.
+    const { legacyStatePath, LEGACY_COMPANION_HOME } = await import("./paths.js");
+    expect(legacyStatePath("auth.json", "/srv/companion")).toBe(join(LEGACY_COMPANION_HOME, "auth.json"));
+    expect(legacyStatePath("auth.json", LEGACY_COMPANION_HOME)).toBeNull();
+    expect(legacyStatePath("executions", `${LEGACY_COMPANION_HOME}/`)).toBeNull();
+  });
 });

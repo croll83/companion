@@ -348,3 +348,30 @@ describe("linear-connections", () => {
     expect(listConnections()).toHaveLength(1);
   });
 });
+
+describe("legacy location (pre-COMPANION_HOME ~/.companion/linear-connections.json)", () => {
+  it("reads connections from the legacy file until the first write lands in the new one", () => {
+    // Older versions ignored COMPANION_HOME here. Their connections must not
+    // vanish; new writes go to the COMPANION_HOME location only.
+    const current = join(tempDir, "home", "linear-connections.json");
+    const legacy = join(tempDir, "legacy-connections.json");
+    writeFileSync(legacy, JSON.stringify([{ id: "c1", name: "Old", apiKey: "lin_api_old" }]));
+    _resetForTest(current, legacy);
+
+    expect(listConnections().map((c) => c.id)).toEqual(["c1"]);
+    createConnection({ name: "New", apiKey: "lin_api_new" });
+
+    const written = JSON.parse(readFileSync(current, "utf-8")) as LinearConnection[];
+    expect(written.map((c) => c.name)).toEqual(["Old", "New"]);
+    expect(JSON.parse(readFileSync(legacy, "utf-8"))).toHaveLength(1);
+  });
+
+  it("prefers the current file when both exist", () => {
+    const current = join(tempDir, "current.json");
+    const legacy = join(tempDir, "legacy.json");
+    writeFileSync(current, JSON.stringify([{ id: "new", name: "New", apiKey: "k1" }]));
+    writeFileSync(legacy, JSON.stringify([{ id: "old", name: "Old", apiKey: "k2" }]));
+    _resetForTest(current, legacy);
+    expect(listConnections().map((c) => c.id)).toEqual(["new"]);
+  });
+});

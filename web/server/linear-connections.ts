@@ -5,9 +5,9 @@ import {
   existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { getSettings } from "./settings-manager.js";
+import { COMPANION_HOME, legacyStatePath } from "./paths.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,19 +32,26 @@ export interface LinearConnection {
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
-const DEFAULT_PATH = join(homedir(), ".companion", "linear-connections.json");
+const DEFAULT_PATH = join(COMPANION_HOME, "linear-connections.json");
+// Versions before COMPANION_HOME was honoured here always used ~/.companion.
+// Read from there until the first write lands the file under COMPANION_HOME.
+const DEFAULT_LEGACY_PATH = legacyStatePath("linear-connections.json");
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 let connections: LinearConnection[] = [];
 let loaded = false;
 let filePath = DEFAULT_PATH;
+let legacyPath = DEFAULT_LEGACY_PATH;
 
 function ensureLoaded(): void {
   if (loaded) return;
   try {
-    if (existsSync(filePath)) {
-      const raw = JSON.parse(readFileSync(filePath, "utf-8"));
+    const source = existsSync(filePath)
+      ? filePath
+      : legacyPath && existsSync(legacyPath) ? legacyPath : null;
+    if (source) {
+      const raw = JSON.parse(readFileSync(source, "utf-8"));
       if (Array.isArray(raw)) {
         connections = raw.filter(
           (c: unknown): c is LinearConnection =>
@@ -223,9 +230,13 @@ export function resolveApiKey(
   return null;
 }
 
-/** Reset internal state and optionally set a custom file path (for testing). */
-export function _resetForTest(customPath?: string): void {
+/**
+ * Reset internal state and optionally set a custom file path (for testing).
+ * A custom path disables the legacy fallback unless one is given explicitly.
+ */
+export function _resetForTest(customPath?: string, customLegacyPath?: string): void {
   connections = [];
   loaded = false;
   filePath = customPath || DEFAULT_PATH;
+  legacyPath = customPath ? customLegacyPath ?? null : DEFAULT_LEGACY_PATH;
 }
