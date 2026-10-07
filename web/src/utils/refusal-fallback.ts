@@ -10,7 +10,6 @@
 export const REFUSAL_CHAIN = [
   "claude-fable-5-1",
   "claude-opus-5-5",
-  "claude-opus-5",
   "claude-opus-4-8",
 ] as const;
 
@@ -25,7 +24,6 @@ const CHAIN_ALIASES: Record<string, (typeof REFUSAL_CHAIN)[number]> = {
 const LABELS: Record<string, string> = {
   "claude-fable-5-1": "Fable 5.1",
   "claude-opus-5-5": "Opus 5.5",
-  "claude-opus-5": "Opus 5",
   "claude-opus-4-8": "Opus 4.8",
 };
 

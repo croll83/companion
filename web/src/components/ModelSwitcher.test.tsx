@@ -66,14 +66,20 @@ describe("ModelSwitcher", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
 
-    // Claude lineup: Fable 5.1, Opus 5.5, Opus 5, Opus 4.8, Opus 4.6, Sonnet 5.5, Sonnet 5, Haiku 4.5.
-    // Match exact labels because /Opus/ alone now matches multiple entries.
+    // Claude lineup: Fable 5.1, Opus 5.5, Opus 4.8, Opus 4.6, Sonnet 5.5, Haiku 5.5.
+    // Of the older families only Opus 4.8 and 4.6 stay; Opus 5, Sonnet 5 and
+    // Haiku 4.5 were superseded and must not be offered for new switches.
+    // Match exact labels because /Opus/ alone matches multiple entries.
+    expect(screen.getByRole("option", { name: /Fable 5\.1/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Opus 5\.5/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Opus 5(?!\.)/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Opus 4\.8/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Opus 4\.6/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Sonnet 5\.5/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Sonnet 5(?!\.)/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Haiku 4\.5/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Haiku 5\.5/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Opus 5(?!\.)/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Sonnet 5(?!\.)/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Haiku 4\.5/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("option").filter((o) => /Fable|Opus|Sonnet|Haiku/.test(o.textContent ?? ""))).toHaveLength(6);
   });
 
   it("marks the current model as selected", () => {
@@ -83,7 +89,7 @@ describe("ModelSwitcher", () => {
     const opusOption = screen.getByRole("option", { name: /Opus 4\.6/ });
     expect(opusOption).toHaveAttribute("aria-selected", "true");
 
-    const sonnetOption = screen.getByRole("option", { name: /Sonnet 5(?!\.)/ });
+    const sonnetOption = screen.getByRole("option", { name: /Sonnet 5\.5/ });
     expect(sonnetOption).toHaveAttribute("aria-selected", "false");
 
     // The newly added Opus 5.5 is not the active one in this fixture.
@@ -94,22 +100,22 @@ describe("ModelSwitcher", () => {
   it("sends set_model via WebSocket on selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5(?!\.)/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Haiku 5\.5/ }));
 
     expect(mockSendToSession).toHaveBeenCalledWith("s1", {
       type: "set_model",
-      model: "claude-sonnet-5",
+      model: "claude-haiku-5-5",
     });
   });
 
   it("optimistically updates the store after selection", () => {
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5(?!\.)/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet 5\.5/ }));
 
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     const updatedSessions = mockSetSdkSessions.mock.calls[0][0];
-    expect(updatedSessions[0].model).toBe("claude-sonnet-5");
+    expect(updatedSessions[0].model).toBe("claude-sonnet-5-5");
   });
 
   it("does not send when selecting the already-active model", () => {

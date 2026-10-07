@@ -2,10 +2,11 @@ import { describe, it, expect } from "vitest";
 import { nextRefusalFallback, normalizeModelId, REFUSAL_CHAIN } from "./refusal-fallback.js";
 
 describe("refusal fallback chain", () => {
-  it("walks Fable 5.1 → Opus 5.5 → Opus 5 → Opus 4.8, one step per refusal", () => {
+  it("walks Fable 5.1 → Opus 5.5 → Opus 4.8, one step per refusal", () => {
     expect(nextRefusalFallback("claude-fable-5-1")).toBe("claude-opus-5-5");
-    expect(nextRefusalFallback("claude-opus-5-5")).toBe("claude-opus-5");
-    expect(nextRefusalFallback("claude-opus-5")).toBe("claude-opus-4-8");
+    expect(nextRefusalFallback("claude-opus-5-5")).toBe("claude-opus-4-8");
+    // Opus 5 left the picker, so the chain no longer offers it as a step.
+    expect(REFUSAL_CHAIN).not.toContain("claude-opus-5");
   });
 
   it("stops when the last resort itself refuses", () => {
@@ -18,6 +19,9 @@ describe("refusal fallback chain", () => {
 
   it("sends a model outside the chain to the last resort, as before", () => {
     expect(nextRefusalFallback("claude-sonnet-5")).toBe("claude-opus-4-8");
+    // Sessions still running on the retired Opus 5 fall back to the last resort.
+    expect(nextRefusalFallback("claude-opus-5")).toBe("claude-opus-4-8");
+    expect(nextRefusalFallback("claude-haiku-5-5")).toBe("claude-opus-4-8");
     expect(nextRefusalFallback("claude-opus-4-6")).toBe("claude-opus-4-8");
     expect(nextRefusalFallback(undefined)).toBe("claude-opus-4-8");
   });
@@ -29,13 +33,15 @@ describe("refusal fallback chain", () => {
   });
 
   it("reads ids as responses report them, not as the picker writes them", () => {
-    expect(nextRefusalFallback("claude-opus-5-5[1m]")).toBe("claude-opus-5");
+    expect(nextRefusalFallback("claude-opus-5-5[1m]")).toBe("claude-opus-4-8");
+    expect(nextRefusalFallback("claude-fable-5-1[1m]")).toBe("claude-opus-5-5");
     expect(nextRefusalFallback("claude-opus-5-20260401")).toBe("claude-opus-4-8");
   });
 
   it("does not confuse Opus 5 with Opus 5.5", () => {
     // Prefix matching would read a 5.5 refusal as a 5 refusal and skip a step.
     expect(normalizeModelId("claude-opus-5-5")).toBe("claude-opus-5-5");
-    expect(nextRefusalFallback("claude-opus-5-5")).toBe("claude-opus-5");
+    expect(normalizeModelId("claude-opus-5-5[1m]")).toBe("claude-opus-5-5");
+    expect(normalizeModelId("claude-opus-5-20260401")).toBe("claude-opus-5");
   });
 });
