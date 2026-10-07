@@ -18,7 +18,7 @@ interface RefusalBannerProps {
 /**
  * Shown when a model returns `stop_reason: "refusal"` (an HTTP 200 with empty
  * content). Surfaces the category/explanation and offers the next model in the
- * refusal chain (Fable 5.1 → Opus 5.5 → Opus 5 → Opus 4.8), re-sending the last
+ * refusal chain (Fable 5.1 → Opus 5.5 → Opus 4.8), re-sending the last
  * user prompt there. If that one refuses too, a new banner offers the step
  * after it — see utils/refusal-fallback.ts.
  */

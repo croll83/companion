@@ -389,15 +389,15 @@ describe("HomePage", () => {
     fireEvent.click(modelButton);
 
     // Should see model options
-    const sonnetOption = screen.getByText("Sonnet 5");
+    const sonnetOption = screen.getByText("Sonnet 5.5");
     expect(sonnetOption).toBeInTheDocument();
 
     // Select Sonnet
     fireEvent.click(sonnetOption);
 
     // Verify dropdown closed and Sonnet is now shown
-    expect(screen.queryByText("Haiku 4.5")).not.toBeInTheDocument(); // dropdown closed
-    expect(screen.getByText("Sonnet 5")).toBeInTheDocument(); // now selected
+    expect(screen.queryByText("Haiku 5.5")).not.toBeInTheDocument(); // dropdown closed
+    expect(screen.getByText("Sonnet 5.5")).toBeInTheDocument(); // now selected
   });
 
   // ─── Mode dropdown interaction ──────────────────────────────────────────────
@@ -892,14 +892,14 @@ describe("HomePage", () => {
     // Open model dropdown — default is Opus 5.5 (DEFAULT_CLAUDE_MODEL).
     const modelButton = screen.getByText("Opus 5.5");
     fireEvent.click(modelButton);
-    expect(screen.getByText("Sonnet 5")).toBeInTheDocument();
+    expect(screen.getByText("Sonnet 5.5")).toBeInTheDocument();
 
     // Click outside (on the document body)
     fireEvent.pointerDown(document.body);
 
     // Dropdown should close
     await waitFor(() => {
-      expect(screen.queryByText("Haiku 4.5")).not.toBeInTheDocument();
+      expect(screen.queryByText("Haiku 5.5")).not.toBeInTheDocument();
     });
   });
 

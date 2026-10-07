@@ -30,6 +30,18 @@ describe("effort capability matrix", () => {
     }
   });
 
+  it("gives Haiku 5.5 all five levels, unlike Haiku 4.5", () => {
+    // Haiku 5.5 is the first Haiku that accepts --effort (low..max; verified
+    // against CLI 2.1.293). Haiku 4.5 must keep receiving no flag at all.
+    expect(getEffortLevels("claude-haiku-5-5")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(getEffortLevels("claude-haiku-5-5")).not.toContain("ultra");
+  });
+
+  it("keeps effort for retired picker models so running sessions keep their flag", () => {
+    // Opus 5 left the picker, but sessions already on it still need --effort.
+    expect(getEffortLevels("claude-opus-5")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
   it("gives Opus 4.6 max but NOT xhigh (matches CLI gating)", () => {
     expect(getEffortLevels("claude-opus-4-6")).toEqual(["low", "medium", "high", "max"]);
   });

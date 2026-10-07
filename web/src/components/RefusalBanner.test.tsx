@@ -94,9 +94,9 @@ describe("RefusalBanner", () => {
     expect(screen.getByRole("button")).toBeDisabled();
   });
 
-  it("walks the chain: a refusal on Opus 5.5 offers Opus 5", () => {
+  it("walks the chain: a refusal on Opus 5.5 offers Opus 4.8", () => {
     render(<RefusalBanner refusal={{ ...REFUSAL, model: "claude-opus-5-5" }} />);
-    expect(screen.getByRole("button", { name: /Retry with Opus 5(?!\.)/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry with Opus 4\.8/ })).toBeInTheDocument();
   });
 
   it("hides the retry button when the last resort itself refused", () => {

@@ -45,6 +45,7 @@ const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
   "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
   // Opus 4.6 supports `max` but not `xhigh` (matches CLI gating).
   "claude-opus-4-6": ["low", "medium", "high", "max"],
+  "claude-haiku-5-5": ["low", "medium", "high", "xhigh", "max"],
 };
 
 /** Ordered effort levels a model supports, or [] if it doesn't support effort. */
