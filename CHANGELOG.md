@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/croll83/companion/compare/the-companion-v1.3.0...the-companion-v1.4.0) (2026-10-07)
+
+
+### Features
+
+* **models:** add Haiku 5.5; drop Opus 5, Sonnet 5 and Haiku 4.5 from the picker ([4b62272](https://github.com/croll83/companion/commit/4b62272beb3f06f47982c22750e7c9e9dfe214a9))
+* **models:** add Haiku 5.5; drop Opus 5, Sonnet 5 and Haiku 4.5 from the picker ([53dc5d3](https://github.com/croll83/companion/commit/53dc5d3cd4a4afa766f612f81f55b7ac730e1034))
+
 ## [1.3.0](https://github.com/croll83/companion/compare/the-companion-v1.2.0...the-companion-v1.3.0) (2026-10-05)
 
 
