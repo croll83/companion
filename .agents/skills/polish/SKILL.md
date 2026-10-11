@@ -6,6 +6,7 @@ args:
   - name: target
     description: The feature or area to polish (optional)
     required: false
+disable-model-invocation: true
 ---
 
 **First**: Use the frontend-design skill for design principles and anti-patterns.
