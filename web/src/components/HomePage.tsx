@@ -105,9 +105,11 @@ export function HomePage() {
   // Where the session runs: its domain, and a new folder inside it (named
   // after the session) or an existing folder attached as is.
   const [domain, setDomain] = useState(() => localStorage.getItem("cc-domain") || "global");
-  const [folderMode, setFolderMode] = useState<FolderMode>(
-    () => (localStorage.getItem("cc-folder-mode") === "existing" ? "existing" : "new"),
-  );
+  // Always start on "New folder in this domain" on a fresh page load. The mode
+  // is deliberately not persisted: it is too easy to leave it on "Existing
+  // folder" and then accidentally start the next, unrelated session in the
+  // last repo. The domain itself is still remembered (cc-domain).
+  const [folderMode, setFolderMode] = useState<FolderMode>("new");
   // The new session's name is picked up front so the new folder can carry it.
   const [pendingName, setPendingName] = useState(
     () => generateUniqueSessionName(new Set(useStore.getState().sessionNames?.values() ?? [])),
@@ -866,7 +868,7 @@ export function HomePage() {
             domain={domain}
             onDomainChange={(slug) => { setDomain(slug); localStorage.setItem("cc-domain", slug); }}
             folderMode={folderMode}
-            onFolderModeChange={(mode) => { setFolderMode(mode); localStorage.setItem("cc-folder-mode", mode); }}
+            onFolderModeChange={setFolderMode}
             folderName={folderName}
             onFolderNameChange={setFolderName}
             cwd={cwd}
