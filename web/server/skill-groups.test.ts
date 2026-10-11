@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync,
+  realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,7 +27,7 @@ function skill(dir: string) {
 }
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), "skill-groups-"));
+  tmp = realpathSync(mkdtempSync(join(tmpdir(), "skill-groups-")));
   process.env.CLAUDE_CONFIG_DIR = join(tmp, "claude");
   // A user skill as a real folder, one as a link (like the pentest skills),
   // a dangling link, a folder without SKILL.md, and two synced skills.

@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -60,7 +61,7 @@ function addSkill(dir: string, name: string) {
 }
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), "domain-runtime-"));
+  tmp = realpathSync(mkdtempSync(join(tmpdir(), "domain-runtime-")));
   h.home = join(tmp, "companion");
   process.env.COMPANION_DOMAINS_ROOT = join(tmp, "home");
   process.env.CLAUDE_CONFIG_DIR = join(tmp, "claude");
