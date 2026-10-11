@@ -1603,15 +1603,9 @@ describe("memory folder and Claude in Chrome", () => {
     expect(browserMessageCb.mock.calls[0][0].session.memory_dir).toBeUndefined();
   });
 
-  // get_chrome_browsers / select_chrome_browser: the shapes the terminal's
-  // /chrome picker uses (CLI 2.1.293).
-  it("lists and selects Claude in Chrome browsers through control requests", async () => {
-    const listing = adapter.getChromeBrowsers();
-    const req = lastSent();
-    expect(req.request).toEqual({ subtype: "get_chrome_browsers" });
-    answer(req, { browsers: [{ device_id: "d1", name: "Linux", os_platform: "linux", current: false }] });
-    expect(await listing).toEqual([{ device_id: "d1", name: "Linux", os_platform: "linux", current: false }]);
-
+  // select_chrome_browser: the control request that makes a live session drive
+  // a given browser (verified over stdio; set_chrome_browser_hints is refused).
+  it("selects a Claude in Chrome browser through a control request", async () => {
     const select = adapter.selectChromeBrowser("d1");
     const sel = lastSent();
     expect(sel.request).toEqual({ subtype: "select_chrome_browser", device_id: "d1" });
@@ -1620,7 +1614,7 @@ describe("memory folder and Claude in Chrome", () => {
   });
 
   it("rejects when the CLI refuses or never answers", async () => {
-    const refused = adapter.getChromeBrowsers();
+    const refused = adapter.selectChromeBrowser("d1");
     answer(lastSent(), {}, "Claude in Chrome is not connected");
     await expect(refused).rejects.toThrow("Claude in Chrome is not connected");
 

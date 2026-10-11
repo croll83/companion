@@ -294,6 +294,8 @@ export interface SdkSessionInfo {
   pinnedMemoryDir?: string;
   /** Claude only: the last spawn had `--chrome` (its domain turns Claude in Chrome on). */
   chromeActive?: boolean;
+  /** Claude only, when chromeActive: the browser to drive ("local" or a deviceId). See chrome-browser.ts. */
+  chromeBrowserPref?: string;
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport. */
@@ -893,6 +895,7 @@ export class CliLauncher {
       }
     }
     info.chromeActive = domainSpawn?.chrome ? true : undefined;
+    info.chromeBrowserPref = domainSpawn?.chrome ? (domainSpawn.chromeBrowser || "local") : undefined;
     // One --settings JSON for everything set at launch.
     // Ultracode is a per-session setting the CLI never persists, and Companion
     // relaunches the CLI often (model/effort change, mid-turn recovery). Without

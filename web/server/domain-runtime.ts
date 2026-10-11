@@ -171,6 +171,8 @@ export interface ClaudeDomainSpawn {
   settings: Record<string, unknown>;
   /** The domain turns Claude in Chrome on (`--chrome` is in args). */
   chrome: boolean;
+  /** Which browser to drive when chrome is on: "local" or a deviceId (see chrome-browser.ts). */
+  chromeBrowser: string;
 }
 
 export function domainRuntimeDir(sessionId: string): string {
@@ -238,6 +240,7 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
 
   const chrome = r.domain.chrome === true;
   if (chrome) args.push("--chrome");
+  const chromeBrowser = r.domain.chromeBrowser || "local";
 
   const plugins = { ...(r.global.plugins ?? {}), ...(r.isGlobal ? {} : r.domain.plugins ?? {}) };
   const settings: Record<string, unknown> = { autoMemoryDirectory: r.memoryDir };
@@ -246,7 +249,7 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   const skillOverrides = claudeSkillOverrides(disabledSkillGroups(r, groups), groups);
   if (Object.keys(skillOverrides).length > 0) settings.skillOverrides = skillOverrides;
 
-  return { args, env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" }, settings, chrome };
+  return { args, env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" }, settings, chrome, chromeBrowser };
 }
 
 // ── Codex ───────────────────────────────────────────────────────────────────

@@ -381,8 +381,6 @@ export interface AppSettings {
   timeZone: string;
   /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
   companionMcpEnabled?: boolean;
-  /** Claude in Chrome: device id of the preferred browser ("" = this machine's). */
-  preferredChromeBrowser?: string;
 }
 
 export interface HostsCheckResult {
@@ -488,6 +486,8 @@ export interface DomainSummary {
   description?: string;
   mcpDisabled: string[];
   chrome: boolean;
+  /** Claude only, used when chrome is on: "local" (default) or a browser deviceId. */
+  chromeBrowser: string;
   plugins?: Record<string, boolean>;
   skillGroups?: Record<string, boolean>;
   path: string;
@@ -506,11 +506,15 @@ export interface DomainsResponse {
   domains: DomainSummary[];
 }
 
-export interface ChromeBrowserInfo {
-  device_id: string;
+/** A browser connected to Claude in Chrome (from `list_connected_browsers`). */
+export interface ConnectedBrowser {
+  deviceId: string;
   name: string;
-  os_platform?: string;
-  current: boolean;
+  osPlatform?: string;
+  /** True when the browser runs on Companion's own machine. */
+  isLocal: boolean;
+  /** The browser Chrome actions use right now. */
+  inUse: boolean;
 }
 
 export interface ArchiveInfo {
@@ -988,7 +992,7 @@ export const api = {
   createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),
   updateDomain: (
     slug: string,
-    changes: Partial<Pick<DomainSummary, "name" | "description" | "mcpDisabled" | "chrome" | "plugins" | "skillGroups">>,
+    changes: Partial<Pick<DomainSummary, "name" | "description" | "mcpDisabled" | "chrome" | "chromeBrowser" | "plugins" | "skillGroups">>,
   ) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
   deleteDomain: (slug: string) => del<{ ok: true; keptOnDisk: string }>(`/domains/${encodeURIComponent(slug)}`),
   readDomainFile: (slug: string, name: string) =>
@@ -998,8 +1002,9 @@ export const api = {
   writeDomainFile: (slug: string, name: string, content: string) =>
     put<{ ok: boolean; path: string }>(`/domains/${encodeURIComponent(slug)}/file`, { name, content }),
 
-  /** Claude in Chrome browsers, as a live Chrome-enabled Claude session sees them. */
-  listChromeBrowsers: () => get<{ browsers: ChromeBrowserInfo[]; sessionId?: string; error?: string }>("/chrome-browsers"),
+  /** Browsers connected to Claude in Chrome, listed by a short isolated Claude query. `force` bypasses the brief cache. */
+  listChromeBrowsers: (force?: boolean) =>
+    get<{ browsers: ConnectedBrowser[]; error?: string }>(`/chrome-browsers${force ? "?force=1" : ""}`),
 
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),
@@ -1090,7 +1095,6 @@ export const api = {
     telegramBotToken?: string;
     timeZone?: string;
     companionMcpEnabled?: boolean;
-    preferredChromeBrowser?: string;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

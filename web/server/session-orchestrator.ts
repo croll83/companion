@@ -28,6 +28,7 @@ import {
 import { domainMemoryDir, getDomain, GLOBAL_DOMAIN } from "./domain-store.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { applyChromePreference } from "./chrome-browser.js";
+import { listConnectedBrowsers } from "./chrome-browser-probe.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -370,9 +371,10 @@ export class SessionOrchestrator {
   private chromeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
-   * Make a Chrome-enabled Claude session use the preferred browser (Settings,
-   * else the one on this machine's OS), retrying while its Chrome server is
-   * still connecting. A new init restarts the attempts.
+   * Make a Chrome-enabled Claude session drive the browser its domain prefers
+   * ("local" = the browser on this machine, falling back to a remote one; or a
+   * specific deviceId), retrying while its Chrome server is still connecting. A
+   * new init restarts the attempts.
    */
   private scheduleChromePreference(sessionId: string, attempt = 0): void {
     if (attempt === 0) clearTimeout(this.chromeTimers.get(sessionId));
@@ -380,14 +382,15 @@ export class SessionOrchestrator {
     if (delay === undefined) return;
     const timer = setTimeout(async () => {
       this.chromeTimers.delete(sessionId);
-      if (!this.launcher.getSession(sessionId)?.chromeActive) return;
+      const session = this.launcher.getSession(sessionId);
+      if (!session?.chromeActive) return;
       const control = this.wsBridge.chromeControl(sessionId);
       const result = control
-        ? await applyChromePreference(control, getSettings().preferredChromeBrowser)
+        ? await applyChromePreference(control, session.chromeBrowserPref, () => listConnectedBrowsers())
         : { ok: false as const, error: "CLI not connected" };
       if (result.ok) {
         log.info("orchestrator", "Claude in Chrome browser", {
-          sessionId, browser: result.selected.name, deviceId: result.selected.device_id, changed: result.changed,
+          sessionId, deviceId: result.deviceId, pref: session.chromeBrowserPref,
         });
       } else if (attempt + 1 < CHROME_PICK_DELAYS_MS.length) {
         this.scheduleChromePreference(sessionId, attempt + 1);

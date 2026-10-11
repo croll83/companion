@@ -187,6 +187,16 @@ describe("updateDomain", () => {
     expect(getDomain("herd")?.description).toBeUndefined();
   });
 
+  // Which Chrome browser the domain's sessions drive: "local" by default, a
+  // trimmed deviceId otherwise, persisted across reads.
+  it("defaults chromeBrowser to \"local\" and stores a chosen deviceId", () => {
+    createDomain({ name: "Herd" });
+    expect(getDomain("herd")?.chromeBrowser).toBe("local");
+    expect(updateDomain("herd", { chromeBrowser: "  dev-mac  " })).toMatchObject({ ok: true, domain: { chromeBrowser: "dev-mac" } });
+    expect(getDomain("herd")?.chromeBrowser).toBe("dev-mac");
+    expect(updateDomain("herd", { chromeBrowser: "local" })).toMatchObject({ ok: true, domain: { chromeBrowser: "local" } });
+  });
+
   it("validates every field", () => {
     createDomain({ name: "Herd" });
     expect(updateDomain("nope", {})).toMatchObject({ ok: false, status: 404 });
@@ -194,6 +204,8 @@ describe("updateDomain", () => {
     expect(updateDomain("herd", { description: 3 })).toMatchObject({ ok: false, status: 400 });
     expect(updateDomain("herd", { mcpDisabled: "a" })).toMatchObject({ ok: false, status: 400 });
     expect(updateDomain("herd", { chrome: "yes" })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain("herd", { chromeBrowser: 7 })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain("herd", { chromeBrowser: "  " })).toMatchObject({ ok: false, status: 400 });
     expect(updateDomain("herd", { plugins: null })).toMatchObject({ ok: false, status: 400 });
     expect(updateDomain("herd", { skillGroups: 1 })).toMatchObject({ ok: false, status: 400 });
   });

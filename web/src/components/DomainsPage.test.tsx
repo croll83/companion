@@ -16,12 +16,13 @@ const mockApi = vi.hoisted(() => ({
   deleteDomain: vi.fn(),
   readDomainFile: vi.fn(),
   writeDomainFile: vi.fn(),
+  listChromeBrowsers: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
 import { DomainsPage } from "./DomainsPage.js";
 
-const base = { createdAt: 0, mcpDisabled: [], chrome: false, memoryNotes: 0, skills: [], mcpServers: [], skillGroupStates: {} };
+const base = { createdAt: 0, mcpDisabled: [], chrome: false, chromeBrowser: "local", memoryNotes: 0, skills: [], mcpServers: [], skillGroupStates: {} };
 const groups = [
   { id: "user", label: "Your skills", description: "In ~/.claude/skills", skills: ["foundry-poc"], codex: "linked" },
   { id: "claude-ai", label: "claude.ai skills", description: "Synced", skills: ["pdf", "docs"], codex: "unsupported" },
@@ -51,7 +52,20 @@ beforeEach(() => {
   mockApi.deleteDomain.mockResolvedValue({ ok: true });
   mockApi.readDomainFile.mockResolvedValue({ path: "/home/u/companion_domain_herd/CLAUDE.md", content: "# Herd", format: "markdown", readOnly: false });
   mockApi.writeDomainFile.mockResolvedValue({ ok: true });
+  mockApi.listChromeBrowsers.mockResolvedValue({
+    browsers: [
+      { deviceId: "dev-linux", name: "Chrome", osPlatform: "Linux", isLocal: true, inUse: true },
+      { deviceId: "dev-mac", name: "Safari-Chrome", osPlatform: "macOS", isLocal: false, inUse: false },
+    ],
+  });
 });
+
+/** A clone of the response where Herd has Claude in Chrome on. */
+function chromeOnResponse(chromeBrowser = "local") {
+  const data = response();
+  data.domains[1] = { ...data.domains[1], chrome: true, chromeBrowser };
+  return data;
+}
 
 const herdCard = () => screen.getByRole("article", { name: "Domain Herd" });
 
@@ -151,5 +165,50 @@ describe("DomainsPage", () => {
     await screen.findByRole("article", { name: "Domain Herd" });
     fireEvent.click(within(herdCard()).getByRole("switch", { name: "Claude in Chrome" }));
     expect(await screen.findByText("bad toggle")).toBeInTheDocument();
+  });
+
+  // With Chrome on, a per-domain browser selector lists the connected browsers
+  // (local/remote) and defaults to "Prefer local browser".
+  it("shows the per-domain browser selector when Chrome is on and selects a browser", async () => {
+    mockApi.listDomains.mockResolvedValue(chromeOnResponse());
+    render(<DomainsPage />);
+    await screen.findByRole("article", { name: "Domain Herd" });
+    const herd = within(herdCard());
+    const select = await herd.findByLabelText("Browser to drive");
+    expect(select).toHaveValue("local");
+    // Each connected browser is labelled name + platform + local/remote.
+    expect(await herd.findByRole("option", { name: "Chrome (Linux) · local" })).toBeInTheDocument();
+    expect(herd.getByRole("option", { name: "Safari-Chrome (macOS) · remote" })).toBeInTheDocument();
+    await waitFor(() => expect(mockApi.listChromeBrowsers).toHaveBeenCalled());
+    // Picking the Mac saves its deviceId (the VPS case: drive the remote Mac).
+    fireEvent.change(select, { target: { value: "dev-mac" } });
+    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { chromeBrowser: "dev-mac" }));
+  });
+
+  it("keeps the selector usable when the browser list cannot be fetched", async () => {
+    mockApi.listDomains.mockResolvedValue(chromeOnResponse());
+    mockApi.listChromeBrowsers.mockResolvedValue({ browsers: [], error: "Chrome is off" });
+    render(<DomainsPage />);
+    await screen.findByRole("article", { name: "Domain Herd" });
+    const herd = within(herdCard());
+    expect(await herd.findByRole("status")).toHaveTextContent("Chrome is off");
+    // Prefer-local still available, plus a manual deviceId field.
+    const select = herd.getByLabelText("Browser to drive");
+    expect(select).toHaveValue("local");
+    fireEvent.change(select, { target: { value: "__manual__" } });
+    const manual = herd.getByLabelText("Browser deviceId");
+    fireEvent.change(manual, { target: { value: "  typed-device  " } });
+    fireEvent.keyDown(manual, { key: "Enter" });
+    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { chromeBrowser: "typed-device" }));
+  });
+
+  // A saved deviceId that is not in the fetched list shows up as an editable
+  // manual value so the choice is never silently lost.
+  it("surfaces a saved deviceId that is not in the list as a manual value", async () => {
+    mockApi.listDomains.mockResolvedValue(chromeOnResponse("offline-device"));
+    render(<DomainsPage />);
+    await screen.findByRole("article", { name: "Domain Herd" });
+    const herd = within(herdCard());
+    expect(await herd.findByLabelText("Browser deviceId")).toHaveValue("offline-device");
   });
 });

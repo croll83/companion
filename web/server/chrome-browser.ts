@@ -1,93 +1,114 @@
 /**
- * Claude in Chrome: picking the browser a session drives when several are
- * connected to the account (here a Linux browser on this machine and a Mac).
+ * Claude in Chrome: picking the browser a session drives.
  *
- * The CLI's `set_chrome_browser_hints` control request would be the natural
- * fit, but CLI 2.1.293 refuses it outside a remote-hosted session ("only
- * accepted in a remote-hosted session"), and Companion drives the CLI over
- * stdio. What does work locally is what the terminal's /chrome picker does:
- *  - `get_chrome_browsers` → `{ browsers: [{ device_id, name, os_platform?, current }] }`
- *  - `select_chrome_browser { device_id }` → `{ name? }`
- * Both fail while the session's Claude in Chrome server is not connected yet,
- * so the caller retries for a while after the CLI starts.
+ * Several browsers can be connected to one Claude account at once — e.g. a
+ * Linux browser on the same machine as Companion (isLocal:true) and the user's
+ * Mac reached through the account relay (isLocal:false). When Companion runs on
+ * a VPS, every connected browser is remote.
+ *
+ * The connected browsers are listed by the Claude in Chrome MCP tool
+ * `list_connected_browsers` (see chrome-browser-probe.ts, which runs it in a
+ * short isolated Claude query). `set_chrome_browser_hints` is refused over
+ * stdio ("only accepted in a remote-hosted session"), so to make a live
+ * session drive a given browser we use the `select_chrome_browser` control
+ * request after the session's Chrome server has connected (it fails until
+ * then, so the caller retries for a while).
  */
 
-export interface ChromeBrowser {
-  device_id: string;
+export interface ConnectedBrowser {
+  deviceId: string;
   name: string;
-  os_platform?: string;
-  /** The browser Chrome actions use now. */
-  current: boolean;
+  osPlatform?: string;
+  /** True when the browser runs on the same machine as Companion. */
+  isLocal: boolean;
+  /** The browser Chrome actions use right now. */
+  inUse: boolean;
 }
 
-/** Whether a browser's reported OS is the OS Companion runs on. */
-export function isSamePlatform(osPlatform: string | undefined, platform: string = process.platform): boolean {
-  const os = (osPlatform ?? "").toLowerCase();
-  if (!os) return false;
-  if (platform === "linux") return os.includes("linux");
-  if (platform === "darwin") return os.includes("mac") || os.includes("darwin");
-  if (platform === "win32") return os.includes("win");
-  return os.includes(platform);
+export interface ConnectedBrowserList {
+  browsers: ConnectedBrowser[];
+  /** Set when the list could not be fetched (no browser connected, probe failed, …). */
+  error?: string;
+}
+
+/** The special value meaning "the browser on Companion's machine" (see DomainInfo.chromeBrowser). */
+export const LOCAL_BROWSER = "local";
+
+/** Parse a `list_connected_browsers` result, dropping malformed entries. */
+export function parseConnectedBrowsers(raw: unknown): ConnectedBrowser[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { browsers?: unknown } | null)?.browsers)
+      ? (raw as { browsers: unknown[] }).browsers
+      : null;
+  if (!list) return [];
+  return list
+    .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
+    .map((b) => {
+      const deviceId = typeof b.deviceId === "string" ? b.deviceId : typeof b.device_id === "string" ? b.device_id : "";
+      return {
+        deviceId,
+        name: typeof b.name === "string" && b.name.trim() ? b.name : deviceId,
+        ...(typeof b.osPlatform === "string" ? { osPlatform: b.osPlatform } : typeof b.os_platform === "string" ? { osPlatform: b.os_platform } : {}),
+        isLocal: b.isLocal === true || b.is_local === true,
+        inUse: b.inUse === true || b.in_use === true,
+      };
+    })
+    .filter((b) => b.deviceId);
 }
 
 /**
- * The browser to use: the one chosen in Settings when it is connected, else
- * the one on this machine's OS (the current one if several), else none.
+ * The browser to drive for the "local" preference: the one on Companion's
+ * machine, else the first remote one (so a VPS session drives the user's
+ * remote browser), else none.
  */
-export function pickChromeBrowser(
-  browsers: ChromeBrowser[],
-  preferred: string | undefined,
-  platform: string = process.platform,
-): ChromeBrowser | null {
-  if (preferred) {
-    const chosen = browsers.find((b) => b.device_id === preferred);
-    if (chosen) return chosen;
-  }
-  const local = browsers.filter((b) => isSamePlatform(b.os_platform, platform));
-  return local.find((b) => b.current) ?? local[0] ?? null;
+export function pickLocalBrowser(browsers: ConnectedBrowser[]): ConnectedBrowser | null {
+  return browsers.find((b) => b.isLocal) ?? browsers[0] ?? null;
 }
 
-/** Parse a get_chrome_browsers response, dropping malformed entries. */
-export function parseChromeBrowsers(response: unknown): ChromeBrowser[] {
-  const list = (response as { browsers?: unknown } | null)?.browsers;
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((b): b is Record<string, unknown> => !!b && typeof b === "object" && typeof (b as { device_id?: unknown }).device_id === "string")
-    .map((b) => ({
-      device_id: b.device_id as string,
-      name: typeof b.name === "string" ? b.name : (b.device_id as string),
-      ...(typeof b.os_platform === "string" ? { os_platform: b.os_platform } : {}),
-      current: b.current === true,
-    }));
+/**
+ * The deviceId to select for a domain's `chromeBrowser` preference:
+ *  - "local" (or empty): pickLocalBrowser over the connected list,
+ *  - a specific deviceId: that id (no list needed; selecting it fails later if
+ *    it is not actually connected).
+ * Returns null when "local" is wanted but nothing is connected.
+ */
+export function resolveChromeTarget(pref: string | undefined, browsers: ConnectedBrowser[]): string | null {
+  if (pref && pref !== LOCAL_BROWSER) return pref;
+  return pickLocalBrowser(browsers)?.deviceId ?? null;
 }
 
 export type ChromePreferenceResult =
-  | { ok: true; selected: ChromeBrowser; changed: boolean }
+  | { ok: true; deviceId: string }
   | { ok: false; error: string };
 
 /** Talks to one live Claude CLI (see ClaudeAdapter). */
 export interface ChromeControl {
-  getChromeBrowsers(): Promise<ChromeBrowser[]>;
   selectChromeBrowser(deviceId: string): Promise<void>;
 }
 
-/** Make the session use the preferred browser (no request when it already does). */
-export async function applyChromePreference(control: ChromeControl, preferred: string | undefined): Promise<ChromePreferenceResult> {
-  let browsers: ChromeBrowser[];
+/**
+ * Make a live session drive the browser its domain prefers. For a specific
+ * deviceId no list is needed; for "local" the connected browsers are fetched
+ * (cached) to find the local one, falling back to a remote one.
+ */
+export async function applyChromePreference(
+  control: ChromeControl,
+  pref: string | undefined,
+  fetchBrowsers: () => Promise<ConnectedBrowserList>,
+): Promise<ChromePreferenceResult> {
+  let target: string | null;
+  if (pref && pref !== LOCAL_BROWSER) {
+    target = pref;
+  } else {
+    const list = await fetchBrowsers();
+    target = resolveChromeTarget(LOCAL_BROWSER, list.browsers);
+    if (!target) return { ok: false, error: list.error || "No browser connected to Claude in Chrome" };
+  }
   try {
-    browsers = await control.getChromeBrowsers();
+    await control.selectChromeBrowser(target);
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  const pick = pickChromeBrowser(browsers, preferred);
-  if (!pick) {
-    return { ok: false, error: browsers.length === 0 ? "No browser connected to Claude in Chrome" : "No connected browser runs on this machine's OS" };
-  }
-  if (pick.current) return { ok: true, selected: pick, changed: false };
-  try {
-    await control.selectChromeBrowser(pick.device_id);
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-  return { ok: true, selected: { ...pick, current: true }, changed: true };
+  return { ok: true, deviceId: target };
 }

@@ -36,6 +36,7 @@ import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
 import { isMcpRouteAllowed, isMcpToken, mcpCallerRefusal, verifyMcpToken } from "./companion-mcp-auth.js";
+import { listConnectedBrowsers } from "./chrome-browser-probe.js";
 import QRCode from "qrcode";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
@@ -460,21 +461,14 @@ export function createRoutes(
     return c.json(result);
   });
 
-  // Claude in Chrome browsers connected to the account, as seen by a live
-  // Chrome-enabled Claude session (for the "Preferred Chrome browser" setting).
+  // Claude in Chrome browsers connected to the account (for the per-domain
+  // browser selector on the Domains page). Listed by a short isolated Claude
+  // query that calls `list_connected_browsers`; cached briefly. `force`
+  // bypasses the cache.
   api.get("/chrome-browsers", async (c) => {
-    const candidates = launcher.listSessions().filter((s) => s.chromeActive && s.state !== "exited");
-    let lastError = "No running Claude session has Claude in Chrome on (turn Chrome on for a domain and open a session in it)";
-    for (const s of candidates) {
-      const control = wsBridge.chromeControl(s.sessionId);
-      if (!control) continue;
-      try {
-        return c.json({ browsers: await control.getChromeBrowsers(), sessionId: s.sessionId });
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-      }
-    }
-    return c.json({ browsers: [], error: lastError });
+    const force = c.req.query("force") === "1" || c.req.query("force") === "true";
+    const result = await listConnectedBrowsers(force ? { force: true } : undefined);
+    return c.json(result);
   });
 
   // Move a (non-legacy) session to another domain; its CLI restarts on the same conversation.

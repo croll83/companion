@@ -91,6 +91,10 @@ vi.mock("./auto-namer.js", () => ({
   generateSessionTitle: vi.fn(async () => "Test Title"),
 }));
 
+// Connected browsers come from an isolated Claude query; mocked here.
+const chromeProbe = vi.hoisted(() => ({ listConnectedBrowsers: vi.fn() }));
+vi.mock("./chrome-browser-probe.js", () => chromeProbe);
+
 // ── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionOrchestrator } from "./session-orchestrator.js";
@@ -1762,25 +1766,45 @@ describe("SessionOrchestrator domains", () => {
   });
 
   // Claude in Chrome on: after init the preferred browser is selected,
-  // retrying while the CLI's Chrome server is still connecting.
+  // retrying while the CLI's Chrome server is still connecting (select fails
+  // until then). "local" resolves to the browser on this machine.
   it("selects the Chrome browser after init, retrying until the Chrome server answers", async () => {
     vi.useFakeTimers();
     orchestrator.initialize();
-    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", chromeActive: true });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", chromeActive: true, chromeBrowserPref: "local" });
+    chromeProbe.listConnectedBrowsers.mockResolvedValue({
+      browsers: [{ deviceId: "d1", name: "Here", isLocal: true, inUse: false }],
+    });
     const control = {
-      getChromeBrowsers: vi.fn()
+      selectChromeBrowser: vi.fn()
         .mockRejectedValueOnce(new Error("not connected"))
-        .mockResolvedValue([{ device_id: "d1", name: "Here", os_platform: process.platform === "darwin" ? "macOS" : process.platform, current: false }]),
-      selectChromeBrowser: vi.fn(async () => {}),
+        .mockResolvedValue(undefined),
     };
     deps.wsBridge.chromeControl = vi.fn(() => control);
 
     companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "c1" });
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(control.getChromeBrowsers).toHaveBeenCalledTimes(1);
-    expect(control.selectChromeBrowser).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(5_000);
+    // First attempt resolved "local" → d1 and tried to select it (it failed).
+    expect(control.selectChromeBrowser).toHaveBeenCalledTimes(1);
     expect(control.selectChromeBrowser).toHaveBeenCalledWith("d1");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(control.selectChromeBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  // A specific deviceId (e.g. the user's Mac for a VPS session) is selected
+  // directly, without listing the connected browsers.
+  it("selects a specific deviceId without listing browsers", async () => {
+    vi.useFakeTimers();
+    orchestrator.initialize();
+    chromeProbe.listConnectedBrowsers.mockClear();
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", chromeActive: true, chromeBrowserPref: "mac-remote-id" });
+    const control = { selectChromeBrowser: vi.fn(async () => {}) };
+    deps.wsBridge.chromeControl = vi.fn(() => control);
+
+    companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "c1" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(chromeProbe.listConnectedBrowsers).not.toHaveBeenCalled();
+    expect(control.selectChromeBrowser).toHaveBeenCalledWith("mac-remote-id");
   });
 
   it("does not touch Chrome for sessions without it, and gives up after the last retry", async () => {

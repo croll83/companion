@@ -1252,12 +1252,6 @@ describe("SettingsPage – extended behaviour", () => {
     expect(screen.getByRole("switch", { name: /Companion MCP tools for sessions/ })).toHaveAttribute("aria-checked", "true");
   });
 
-  // "Preferred Chrome browser" shows the saved device id (automatic = "").
-  it("shows the preferred Chrome browser setting with the saved value", async () => {
-    await renderLoaded({ preferredChromeBrowser: "dev-linux-1234" });
-    expect(screen.getByLabelText("Preferred Chrome browser")).toHaveValue("dev-linux-1234");
-  });
-
   // Clicking a category scrolls its section into view and highlights the nav item.
   it("scrolls to a section and marks it active when a nav item is clicked", async () => {
     const scrollIntoView = vi.fn();

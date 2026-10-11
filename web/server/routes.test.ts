@@ -221,6 +221,11 @@ vi.mock("./usage-limits.js", () => ({
   getUsageLimits: mockGetUsageLimits,
 }));
 
+const mockListConnectedBrowsers = vi.hoisted(() => vi.fn());
+vi.mock("./chrome-browser-probe.js", () => ({
+  listConnectedBrowsers: mockListConnectedBrowsers,
+}));
+
 vi.mock("./update-checker.js", () => ({
   getUpdateState: vi.fn(() => ({ ...mockUpdateCheckerState })),
   checkForUpdate: mockCheckForUpdate,
@@ -1423,7 +1428,6 @@ describe("GET /api/settings", () => {
       telegramBotTokenConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
-      preferredChromeBrowser: "",
     });
   });
 
@@ -1482,7 +1486,6 @@ describe("GET /api/settings", () => {
       telegramBotTokenConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
-      preferredChromeBrowser: "",
     });
   });
 
@@ -1614,7 +1617,6 @@ describe("PUT /api/settings", () => {
       telegramBotTokenConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
-      preferredChromeBrowser: "",
     });
   });
 
@@ -4375,26 +4377,18 @@ describe("session folder and domain routes", () => {
     expect((await app.request("/api/sessions/s1/domain", { method: "POST" })).status).toBe(409);
   });
 
-  // The Settings field lists the browsers through any live Chrome-enabled
-  // Claude session; without one it says how to get one.
-  it("lists Claude in Chrome browsers through a live Chrome session", async () => {
-    launcher.listSessions.mockReturnValue([
-      { sessionId: "off", state: "connected" },
-      { sessionId: "dead", state: "exited", chromeActive: true },
-      { sessionId: "busy", state: "connected", chromeActive: true },
-      { sessionId: "live", state: "connected", chromeActive: true },
-    ]);
-    const browsers = [{ device_id: "d1", name: "Linux", os_platform: "linux", current: true }];
-    bridge.chromeControl = vi.fn((id: string) => {
-      if (id === "busy") return { getChromeBrowsers: vi.fn(async () => { throw new Error("not connected"); }) };
-      if (id === "live") return { getChromeBrowsers: vi.fn(async () => browsers) };
-      return null;
-    });
-    expect(await (await app.request("/api/chrome-browsers")).json()).toEqual({ browsers, sessionId: "live" });
+  // The Domains page lists the connected browsers via an isolated Claude query
+  // (chrome-browser-probe); `force` bypasses the brief cache.
+  it("lists Claude in Chrome browsers from the probe, passing force through", async () => {
+    const browsers = [{ deviceId: "d1", name: "Linux", osPlatform: "Linux", isLocal: true, inUse: true }];
+    mockListConnectedBrowsers.mockResolvedValue({ browsers });
+    expect(await (await app.request("/api/chrome-browsers")).json()).toEqual({ browsers });
+    expect(mockListConnectedBrowsers).toHaveBeenLastCalledWith(undefined);
 
-    launcher.listSessions.mockReturnValue([{ sessionId: "busy", state: "connected", chromeActive: true }]);
-    expect(await (await app.request("/api/chrome-browsers")).json()).toEqual({ browsers: [], error: "not connected" });
-    launcher.listSessions.mockReturnValue([]);
-    expect((await (await app.request("/api/chrome-browsers")).json()).error).toMatch(/No running Claude session/);
+    await app.request("/api/chrome-browsers?force=1");
+    expect(mockListConnectedBrowsers).toHaveBeenLastCalledWith({ force: true });
+
+    mockListConnectedBrowsers.mockResolvedValue({ browsers: [], error: "Chrome off" });
+    expect(await (await app.request("/api/chrome-browsers")).json()).toEqual({ browsers: [], error: "Chrome off" });
   });
 });

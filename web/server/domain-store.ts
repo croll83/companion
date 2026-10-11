@@ -38,6 +38,13 @@ export interface DomainInfo {
   mcpDisabled: string[];
   /** Claude only: sessions of this domain start with `--chrome`. */
   chrome: boolean;
+  /**
+   * Claude only, used when `chrome` is on: which browser the session drives.
+   * "local" (default) = the browser on Companion's own machine (isLocal),
+   * falling back to a remote one so a VPS session can drive the user's Mac;
+   * otherwise a specific browser deviceId. See chrome-browser.ts.
+   */
+  chromeBrowser: string;
   /** Claude only: marketplace plugins to force on/off (settings `enabledPlugins`). */
   plugins?: Record<string, boolean>;
   /** Skill groups (skill-groups.ts) turned on/off for this domain; absent = GLOBAL's choice, else on. */
@@ -102,6 +109,7 @@ function normalize(raw: Partial<DomainInfo> & { slug: string }): DomainInfo {
     ...(typeof raw.description === "string" && raw.description.trim() ? { description: raw.description.trim() } : {}),
     mcpDisabled: Array.isArray(raw.mcpDisabled) ? raw.mcpDisabled.filter((s): s is string => typeof s === "string") : [],
     chrome: raw.chrome === true,
+    chromeBrowser: typeof raw.chromeBrowser === "string" && raw.chromeBrowser.trim() ? raw.chromeBrowser.trim() : "local",
     ...(raw.plugins && typeof raw.plugins === "object" ? { plugins: sanitizePlugins(raw.plugins) } : {}),
     ...(raw.skillGroups && typeof raw.skillGroups === "object" ? { skillGroups: sanitizePlugins(raw.skillGroups) } : {}),
   };
@@ -247,6 +255,7 @@ export interface DomainPatch {
   description?: unknown;
   mcpDisabled?: unknown;
   chrome?: unknown;
+  chromeBrowser?: unknown;
   plugins?: unknown;
   skillGroups?: unknown;
 }
@@ -275,6 +284,12 @@ export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
   if (patch.chrome !== undefined) {
     if (typeof patch.chrome !== "boolean") return { ok: false, status: 400, error: "chrome must be a boolean" };
     next.chrome = patch.chrome;
+  }
+  if (patch.chromeBrowser !== undefined) {
+    if (typeof patch.chromeBrowser !== "string" || !patch.chromeBrowser.trim()) {
+      return { ok: false, status: 400, error: "chromeBrowser must be \"local\" or a browser deviceId" };
+    }
+    next.chromeBrowser = patch.chromeBrowser.trim();
   }
   if (patch.plugins !== undefined) {
     if (!patch.plugins || typeof patch.plugins !== "object") return { ok: false, status: 400, error: "plugins must be an object" };

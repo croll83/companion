@@ -5357,6 +5357,6 @@ describe("session folder and Chrome control", () => {
     bridge.handleCLIOpen(makeCliSocket("s1"), "s1");
     const control = bridge.chromeControl("s1");
     expect(control).not.toBeNull();
-    expect(typeof control!.getChromeBrowsers).toBe("function");
+    expect(typeof control!.selectChromeBrowser).toBe("function");
   });
 });

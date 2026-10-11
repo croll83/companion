@@ -47,7 +47,6 @@ import type { RecorderManager } from "./recorder.js";
 import { parseNDJSON, isDuplicateCLIMessage } from "./ws-bridge-cli-ingest.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
-import { parseChromeBrowsers, type ChromeBrowser } from "./chrome-browser.js";
 
 // --- Constants ----------------------------------------------------------------
 
@@ -1153,11 +1152,6 @@ export class ClaudeAdapter implements IBackendAdapter {
         reject: (error) => { clearTimeout(timer); reject(new Error(error)); },
       });
     });
-  }
-
-  /** Claude in Chrome: the browsers connected to the session (see chrome-browser.ts). */
-  async getChromeBrowsers(): Promise<ChromeBrowser[]> {
-    return parseChromeBrowsers(await this.requestControl({ subtype: "get_chrome_browsers" }));
   }
 
   /** Claude in Chrome: make the session drive this browser. */
