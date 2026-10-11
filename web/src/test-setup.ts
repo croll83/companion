@@ -1,10 +1,11 @@
-// Domains (server/domain-store.ts): a test must never create
+// Domains (server/domain-store.ts): a server test must never create
 // ~/companion_domain_* folders in the real home. Tests that need a root set
-// their own; everything else lands in a throwaway temp dir.
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-if (!process.env.COMPANION_DOMAINS_ROOT) {
+// their own; everything else lands in a throwaway temp dir. (Server tests
+// only: jsdom tests cannot load node: modules and never touch the disk.)
+if (typeof window === "undefined" && !process.env.COMPANION_DOMAINS_ROOT) {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
   process.env.COMPANION_DOMAINS_ROOT = mkdtempSync(join(tmpdir(), "companion-test-domains-"));
 }
 

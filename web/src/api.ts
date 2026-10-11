@@ -206,6 +206,11 @@ export interface CreateSessionOpts {
   backend?: "claude" | "codex";
   resumeSessionAt?: string;
   forkSession?: boolean;
+  /** Domain slug (default GLOBAL). */
+  domain?: string;
+  /** "new": create `folderName` inside the domain folder; "existing": attach `cwd` as is. */
+  folderMode?: "new" | "existing";
+  folderName?: string;
   linearConnectionId?: string;
   linearIssue?: {
     identifier: string;
@@ -376,6 +381,8 @@ export interface AppSettings {
   timeZone: string;
   /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
   companionMcpEnabled?: boolean;
+  /** Claude in Chrome: device id of the preferred browser ("" = this machine's). */
+  preferredChromeBrowser?: string;
 }
 
 export interface HostsCheckResult {
@@ -452,8 +459,58 @@ export interface SessionFolderPreview {
   backend: string;
   /** A turn or background job is running and the restart would interrupt it. */
   interruptsWork: boolean;
-  /** Claude only: auto-memory is scoped to the folder. */
-  memory?: { from: { dir: string; notes: number }; to: { dir: string; notes: number } };
+  /** The memory the session keeps using after the move (none for legacy Codex sessions). */
+  memory?: { dir: string; notes: number };
+}
+
+export interface DomainMcpServerView {
+  name: string;
+  source: "global" | "domain";
+  enabled: boolean;
+  /** Turned off in GLOBAL, hence everywhere. */
+  disabledGlobally?: boolean;
+  type: string;
+}
+
+export interface SkillGroupInfo {
+  id: "user" | "claude-ai" | "design";
+  label: string;
+  description: string;
+  skills: string[];
+  /** How Codex sessions get the group: linked, turned off in config.toml, or Claude-only. */
+  codex: "linked" | "toggled" | "unsupported";
+}
+
+export interface DomainSummary {
+  slug: string;
+  name: string;
+  createdAt: number;
+  description?: string;
+  mcpDisabled: string[];
+  chrome: boolean;
+  plugins?: Record<string, boolean>;
+  skillGroups?: Record<string, boolean>;
+  path: string;
+  sessionCount: number;
+  totalSessions: number;
+  memoryNotes: number;
+  skills: string[];
+  mcpServers: DomainMcpServerView[];
+  mcpError?: string;
+  skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+}
+
+export interface DomainsResponse {
+  root: string;
+  skillGroups: SkillGroupInfo[];
+  domains: DomainSummary[];
+}
+
+export interface ChromeBrowserInfo {
+  device_id: string;
+  name: string;
+  os_platform?: string;
+  current: boolean;
 }
 
 export interface ArchiveInfo {
@@ -590,6 +647,8 @@ export interface AgentInfo {
   permissionMode: string;
   cwd: string;
   envSlug?: string;
+  /** Domain the runs work in (absent = GLOBAL). */
+  domain?: string;
   env?: Record<string, string>;
   /** Claude only: built-in tools the agent is limited to (empty = all). */
   allowedTools?: string[];
@@ -708,6 +767,8 @@ export interface ClaudeConfigSkill {
   path: string;
   /** "synced" = synced from claude.ai (read-only), "link" = symlinked skill dir */
   source?: "synced" | "link";
+  /** Manual-only skill (`disable-model-invocation: true`): run with /name, never by the model. */
+  manualOnly?: boolean;
 }
 
 /** Mirrors ClaudeConfigListing in server/claude-config.ts */
@@ -918,6 +979,28 @@ export const api = {
   changeSessionFolder: (sessionId: string, cwd: string) =>
     post<SessionFolderPreview>(`/sessions/${encodeURIComponent(sessionId)}/folder`, { cwd }),
 
+  /** Move a (non-legacy) session to another domain; its CLI restarts on the same conversation. */
+  changeSessionDomain: (sessionId: string, domain: string) =>
+    post<{ ok: true; from: string; to: string; interruptsWork: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/domain`, { domain }),
+
+  // Domains
+  listDomains: () => get<DomainsResponse>("/domains"),
+  createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),
+  updateDomain: (
+    slug: string,
+    changes: Partial<Pick<DomainSummary, "name" | "description" | "mcpDisabled" | "chrome" | "plugins" | "skillGroups">>,
+  ) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
+  deleteDomain: (slug: string) => del<{ ok: true; keptOnDisk: string }>(`/domains/${encodeURIComponent(slug)}`),
+  readDomainFile: (slug: string, name: string) =>
+    get<{ path: string; content: string; format: ConfigFileFormat; readOnly: boolean }>(
+      `/domains/${encodeURIComponent(slug)}/file?name=${encodeURIComponent(name)}`,
+    ),
+  writeDomainFile: (slug: string, name: string, content: string) =>
+    put<{ ok: boolean; path: string }>(`/domains/${encodeURIComponent(slug)}/file`, { name, content }),
+
+  /** Claude in Chrome browsers, as a live Chrome-enabled Claude session sees them. */
+  listChromeBrowsers: () => get<{ browsers: ChromeBrowserInfo[]; sessionId?: string; error?: string }>("/chrome-browsers"),
+
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),
 
@@ -1007,6 +1090,7 @@ export const api = {
     telegramBotToken?: string;
     timeZone?: string;
     companionMcpEnabled?: boolean;
+    preferredChromeBrowser?: string;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

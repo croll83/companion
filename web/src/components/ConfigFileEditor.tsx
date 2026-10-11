@@ -13,16 +13,23 @@ import { api, type ConfigFileFormat } from "../api.js";
  * invalid document is never written and the user's text stays in the editor.
  * The server decides `readOnly` (claude.ai-synced skills, config.toml without a
  * TOML parser).
+ *
+ * With `domain` instead of `sessionId` it edits a file of that domain (the
+ * Domains page): `path` is then the file name (CLAUDE.md or mcp.json) and the
+ * /domains/:slug/file routes are used.
  */
 export function ConfigFileEditor({
   sessionId,
+  domain,
   path,
   label,
   description,
   onClose,
   onSaved,
 }: {
-  sessionId: string;
+  sessionId?: string;
+  /** Edit a domain's file instead of a session's config file. */
+  domain?: string;
   path: string;
   label: string;
   /** Short line under the title, e.g. "User instructions for Claude Code (all projects)" */
@@ -46,7 +53,8 @@ export function ConfigFileEditor({
     let cancelled = false;
     setLoading(true);
     setLoadFailed(false);
-    api.readConfigFile(sessionId, path).then((res) => {
+    const read = domain ? api.readDomainFile(domain, path) : api.readConfigFile(sessionId ?? "", path);
+    read.then((res) => {
       if (cancelled) return;
       setContent(res.content);
       setFormat(res.format ?? "markdown");
@@ -59,7 +67,7 @@ export function ConfigFileEditor({
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [sessionId, path]);
+  }, [sessionId, domain, path]);
 
   const handleSave = async () => {
     if (format === "json") {
@@ -73,7 +81,8 @@ export function ConfigFileEditor({
     setSaving(true);
     setError(null);
     try {
-      await api.writeConfigFile(sessionId, path, content);
+      if (domain) await api.writeDomainFile(domain, path, content);
+      else await api.writeConfigFile(sessionId ?? "", path, content);
       setDirty(false);
       onSaved?.();
     } catch (e: unknown) {

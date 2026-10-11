@@ -9,6 +9,7 @@ export type Route =
   | { page: "integration-linear-oauth" }
   | { page: "prompts" }
   | { page: "environments" }
+  | { page: "domains" }
   | { page: "agents" }
   | { page: "agent-detail"; agentId: string }
   | { page: "runs" }
@@ -38,6 +39,7 @@ export function parseHash(hash: string): Route {
   if (hash === "#/integrations/linear-oauth") return { page: "integration-linear-oauth" };
   if (hash === "#/prompts") return { page: "prompts" };
   if (hash === "#/environments") return { page: "environments" };
+  if (hash === "#/domains") return { page: "domains" };
   // #/scheduled (the removed "Scheduled Runs" page) opens #/agents, where
   // schedules now live as agent triggers.
   if (hash === "#/scheduled") return { page: "agents" };
