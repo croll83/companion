@@ -76,7 +76,7 @@ export function ProjectGroup({
         >
           <path d="M6 4l4 4-4 4" />
         </svg>
-        <span className="text-[11px] font-semibold text-cc-fg/60 truncate uppercase tracking-wide">
+        <span className="text-[11px] font-semibold text-cc-fg/60 truncate uppercase tracking-wide" title={group.title ?? group.key}>
           {group.label}
         </span>
 

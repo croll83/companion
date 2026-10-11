@@ -23,6 +23,7 @@ const mockApi = {
   renameSession: vi.fn().mockResolvedValue({}),
   getArchiveInfo: vi.fn().mockResolvedValue({ hasLinkedIssue: false, issueNotDone: false }),
   getTelegramStatus: vi.fn().mockResolvedValue({ tokenConfigured: false, running: false, boundSessionIds: [] }),
+  listDomains: vi.fn().mockResolvedValue({ root: "/home", skillGroups: [], domains: [] }),
 };
 
 vi.mock("../api.js", () => ({
@@ -34,6 +35,7 @@ vi.mock("../api.js", () => ({
     renameSession: (...args: unknown[]) => mockApi.renameSession(...args),
     getArchiveInfo: (...args: unknown[]) => mockApi.getArchiveInfo(...args),
     getTelegramStatus: (...args: unknown[]) => mockApi.getTelegramStatus(...args),
+    listDomains: (...args: unknown[]) => mockApi.listDomains(...args),
   },
 }));
 
@@ -1790,5 +1792,54 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByText("Delete all"));
 
     expect(screen.getByText(/3 archived sessions/)).toBeInTheDocument();
+  });
+});
+
+// ─── Domains ──────────────────────────────────────────────────────────────────
+
+describe("Sidebar domains", () => {
+  // Sessions are grouped by domain (GLOBAL first, legacy sessions included),
+  // then by their own folder: the stable `folder`, not the runtime cwd.
+  it("groups sessions by domain, then by the session's own folder", async () => {
+    mockApi.listDomains.mockResolvedValueOnce({
+      root: "/home",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/companion_domain_global" },
+        { slug: "herd", name: "Herd", path: "/home/companion_domain_herd" },
+      ],
+    });
+    mockState = createMockState({
+      sessions: new Map([["s1", makeSession("s1", { cwd: "/somewhere/after/cd" })], ["s2", makeSession("s2")]]),
+      sdkSessions: [
+        makeSdkSession("s1", { cwd: "/somewhere/after/cd", folder: "/home/companion_domain_herd/task-one", domain: "herd" }),
+        makeSdkSession("s2", { cwd: "/home/user/legacy", legacyMemory: true, domain: "global" }),
+      ],
+    });
+    render(<Sidebar />);
+    expect(await screen.findByRole("region", { name: "Domain Herd" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Domain GLOBAL" })).toBeInTheDocument();
+    // Inside its domain, a folder is named by its path relative to the domain folder.
+    expect(screen.getByText("task-one")).toBeInTheDocument();
+    expect(screen.getByText("legacy")).toBeInTheDocument();
+    expect(screen.queryByText("cd")).toBeNull();
+  });
+
+  it("collapses a domain through the shared collapse state", async () => {
+    mockState = createMockState({
+      sessions: new Map([["s1", makeSession("s1")]]),
+      sdkSessions: [makeSdkSession("s1", { domain: "global" })],
+    });
+    render(<Sidebar />);
+    const header = await screen.findByRole("button", { name: /GLOBAL/ });
+    fireEvent.click(header);
+    expect(mockState.toggleProjectCollapse).toHaveBeenCalledWith("domain:global");
+  });
+
+  it("links to the Domains page from the navigation", () => {
+    mockState = createMockState();
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("Domains"));
+    expect(window.location.hash).toBe("#/domains");
   });
 });
