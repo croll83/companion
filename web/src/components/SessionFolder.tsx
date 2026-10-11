@@ -13,21 +13,29 @@ const DONE_MS = 5_000;
 
 function memoryLine(preview: SessionFolderPreview): string | null {
   if (!preview.memory) return null;
-  const { from, to } = preview.memory;
-  const describe = (notes: number) => (notes === 0 ? "no notes yet" : `${notes} note${notes === 1 ? "" : "s"}`);
-  return `Claude's memory is per folder: it switches from ${describe(from.notes)} to ${describe(to.notes)}.`;
+  const { dir, notes } = preview.memory;
+  const count = notes === 0 ? "no notes yet" : `${notes} note${notes === 1 ? "" : "s"}`;
+  return `The memory does not change: the session keeps ${dir} (${count}).`;
 }
 
 /**
  * "Change folder": move the focused session to another working folder and
  * restart its CLI there on the same conversation, so the context is kept.
- * Project instructions, skills and settings then come from the new folder —
- * and for Claude so does its auto-memory, which the review step spells out.
+ * Project instructions, skills and settings then come from the new folder;
+ * the memory does not: a domain session keeps its domain's memory, and a
+ * session from before domains keeps the memory of the folder it was in
+ * (pinned by the server). The review step names the memory kept.
  * Works for Claude Code and Codex sessions; worktree sessions are refused by
  * the server.
  */
 export function SessionFolder({ sessionId }: { sessionId: string }) {
-  const currentCwd = useStore((s) => s.sessions.get(sessionId)?.cwd ?? "");
+  // The session's own folder (stable), not the CLI's drifting working dir.
+  const sdkFolder = useStore((s) => {
+    const sdk = s.sdkSessions.find((x) => x.sessionId === sessionId);
+    return sdk?.folder || sdk?.cwd || "";
+  });
+  const bridgeCwd = useStore((s) => s.sessions.get(sessionId)?.cwd ?? "");
+  const currentCwd = sdkFolder || bridgeCwd;
   const [step, setStep] = useState<Step>({ kind: "idle" });
   const [pickerOpen, setPickerOpen] = useState(false);
 
