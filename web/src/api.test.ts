@@ -621,6 +621,14 @@ describe("relaunchSession", () => {
     expect(url).toBe("/api/sessions/sess-42/relaunch");
     expect(opts.method).toBe("POST");
   });
+
+  it("adds force=1 for a forced reload (the TaskPanel Reload button)", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+
+    await api.relaunchSession("sess-42", { force: true });
+
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/sessions/sess-42/relaunch?force=1");
+  });
 });
 
 // ===========================================================================

@@ -894,8 +894,10 @@ export const api = {
   deleteSession: (sessionId: string) =>
     del(`/sessions/${encodeURIComponent(sessionId)}`),
 
-  relaunchSession: (sessionId: string) =>
-    post(`/sessions/${encodeURIComponent(sessionId)}/relaunch`),
+  relaunchSession: (sessionId: string, opts?: { force?: boolean }) =>
+    post<{ ok: boolean; alreadyRunning?: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/relaunch${opts?.force ? "?force=1" : ""}`,
+    ),
 
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),
