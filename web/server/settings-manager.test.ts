@@ -62,6 +62,7 @@ describe("settings-manager", () => {
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
+      preferredChromeBrowser: "",
       updatedAt: 0,
     });
   });
@@ -120,6 +121,7 @@ describe("settings-manager", () => {
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
+      preferredChromeBrowser: "",
       updatedAt: 123,
     });
   });
@@ -202,6 +204,7 @@ describe("settings-manager", () => {
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
+      preferredChromeBrowser: "",
       updatedAt: 0,
     });
   });
@@ -394,5 +397,18 @@ describe("settings-manager", () => {
     writeFileSync(settingsPath, JSON.stringify({ companionMcpEnabled: "no" }), "utf-8");
     _resetForTest(settingsPath);
     expect(getSettings().companionMcpEnabled).toBe(true);
+  });
+
+  // "Preferred Chrome browser": "" means automatic (this machine's OS); a
+  // chosen device id persists, and a non-string on disk falls back to automatic.
+  it("persists the preferred Claude in Chrome browser", () => {
+    expect(getSettings().preferredChromeBrowser).toBe("");
+    expect(updateSettings({ preferredChromeBrowser: "dev-1" }).preferredChromeBrowser).toBe("dev-1");
+    _resetForTest(settingsPath);
+    expect(getSettings().preferredChromeBrowser).toBe("dev-1");
+
+    writeFileSync(settingsPath, JSON.stringify({ preferredChromeBrowser: 7 }), "utf-8");
+    _resetForTest(settingsPath);
+    expect(getSettings().preferredChromeBrowser).toBe("");
   });
 });

@@ -10,6 +10,7 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
+import type { ChromeControl } from "./chrome-browser.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
 import type {
@@ -246,6 +247,16 @@ export class WsBridge {
       },
     });
     this.persistSession(session);
+  }
+
+  /**
+   * Claude in Chrome controls of a session's live Claude CLI, or null (Codex,
+   * no CLI attached). See chrome-browser.ts.
+   */
+  chromeControl(sessionId: string): ChromeControl | null {
+    const adapter = this.sessions.get(sessionId)?.backendAdapter;
+    if (!(adapter instanceof ClaudeAdapter) || !adapter.isConnected()) return null;
+    return adapter;
   }
 
   private refreshGitInfo(

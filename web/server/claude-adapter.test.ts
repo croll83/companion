@@ -1568,3 +1568,70 @@ describe("ClaudeAdapter stdio attach-input self-heal", () => {
     vi.useRealTimers();
   });
 });
+
+// ─── Domains: memory folder and Claude in Chrome ─────────────────────────────
+
+describe("memory folder and Claude in Chrome", () => {
+  let ws: ReturnType<typeof createMockSocket>;
+
+  beforeEach(() => {
+    ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+  });
+
+  function lastSent(): any {
+    const calls = ws.send.mock.calls;
+    return JSON.parse((calls[calls.length - 1][0] as string).trim());
+  }
+
+  function answer(request: any, response: Record<string, unknown> = {}, error?: string) {
+    adapter.handleRawMessage(`${JSON.stringify({
+      type: "control_response",
+      response: error
+        ? { subtype: "error", request_id: request.request_id, error }
+        : { subtype: "success", request_id: request.request_id, response },
+    })}\n`);
+  }
+
+  // The auto-memory folder the CLI reports at init is what "Change folder"
+  // pins for a legacy session, so it travels with the session state.
+  it("reports the CLI's auto-memory folder in session_init", () => {
+    adapter.handleRawMessage(makeInitMsg({ memory_paths: { auto: "/home/u/.claude/projects/-w/memory/" } }));
+    expect(browserMessageCb.mock.calls[0][0].session.memory_dir).toBe("/home/u/.claude/projects/-w/memory");
+    browserMessageCb.mockClear();
+    adapter.handleRawMessage(makeInitMsg());
+    expect(browserMessageCb.mock.calls[0][0].session.memory_dir).toBeUndefined();
+  });
+
+  // get_chrome_browsers / select_chrome_browser: the shapes the terminal's
+  // /chrome picker uses (CLI 2.1.293).
+  it("lists and selects Claude in Chrome browsers through control requests", async () => {
+    const listing = adapter.getChromeBrowsers();
+    const req = lastSent();
+    expect(req.request).toEqual({ subtype: "get_chrome_browsers" });
+    answer(req, { browsers: [{ device_id: "d1", name: "Linux", os_platform: "linux", current: false }] });
+    expect(await listing).toEqual([{ device_id: "d1", name: "Linux", os_platform: "linux", current: false }]);
+
+    const select = adapter.selectChromeBrowser("d1");
+    const sel = lastSent();
+    expect(sel.request).toEqual({ subtype: "select_chrome_browser", device_id: "d1" });
+    answer(sel, { name: "Linux" });
+    await expect(select).resolves.toBeUndefined();
+  });
+
+  it("rejects when the CLI refuses or never answers", async () => {
+    const refused = adapter.getChromeBrowsers();
+    answer(lastSent(), {}, "Claude in Chrome is not connected");
+    await expect(refused).rejects.toThrow("Claude in Chrome is not connected");
+
+    vi.useFakeTimers();
+    try {
+      const silent = adapter.selectChromeBrowser("d1");
+      const expectation = expect(silent).rejects.toThrow(/no answer/);
+      await vi.advanceTimersByTimeAsync(10_001);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

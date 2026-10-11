@@ -15,6 +15,7 @@ import * as sessionLinearIssues from "./session-linear-issues.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
+import { registerDomainRoutes } from "./routes/domain-routes.js";
 import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
@@ -256,12 +257,13 @@ export function createRoutes(
       const bridge = bridgeMap.get(s.sessionId);
       return {
         ...s,
-        // The session's folder is the one it was started in (or moved to with
-        // "Change folder"): it decides CLAUDE.md, skills and settings, and the
-        // sidebar groups by it. The CLI's own working directory drifts as it
-        // runs commands (`cd`), so it is reported separately.
-        cwd: s.cwd,
-        runtimeCwd: bridge?.cwd || s.cwd,
+        // Bridge state is the source of truth for runtime cwd updates.
+        cwd: bridge?.cwd || s.cwd,
+        // The session's own folder: the one it was started in (or moved to
+        // with "Change folder"). It decides CLAUDE.md, skills and settings,
+        // and the sidebar groups by it; the runtime cwd above drifts as the
+        // CLI runs commands (`cd`).
+        folder: s.cwd,
         name: names[s.sessionId] ?? s.name,
         gitBranch: bridge?.git_branch || "",
         gitAhead: bridge?.git_ahead || 0,
@@ -454,6 +456,31 @@ export function createRoutes(
   api.post("/sessions/:id/folder", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const result = await orchestrator.changeSessionFolder(c.req.param("id"), (body as { cwd?: unknown }).cwd);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
+  });
+
+  // Claude in Chrome browsers connected to the account, as seen by a live
+  // Chrome-enabled Claude session (for the "Preferred Chrome browser" setting).
+  api.get("/chrome-browsers", async (c) => {
+    const candidates = launcher.listSessions().filter((s) => s.chromeActive && s.state !== "exited");
+    let lastError = "No running Claude session has Claude in Chrome on (turn Chrome on for a domain and open a session in it)";
+    for (const s of candidates) {
+      const control = wsBridge.chromeControl(s.sessionId);
+      if (!control) continue;
+      try {
+        return c.json({ browsers: await control.getChromeBrowsers(), sessionId: s.sessionId });
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    return c.json({ browsers: [], error: lastError });
+  });
+
+  // Move a (non-legacy) session to another domain; its CLI restarts on the same conversation.
+  api.post("/sessions/:id/domain", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const result = await orchestrator.changeSessionDomain(c.req.param("id"), (body as { domain?: unknown }).domain);
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json(result);
   });
@@ -859,6 +886,7 @@ export function createRoutes(
 
   registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
   registerEnvRoutes(api);
+  registerDomainRoutes(api, launcher);
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api, {

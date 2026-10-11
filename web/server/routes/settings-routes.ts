@@ -40,6 +40,7 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
       companionMcpEnabled: settings.companionMcpEnabled !== false,
+      preferredChromeBrowser: settings.preferredChromeBrowser ?? "",
     });
   });
 
@@ -122,6 +123,9 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
     if (body.companionMcpEnabled !== undefined && typeof body.companionMcpEnabled !== "boolean") {
       return c.json({ error: "companionMcpEnabled must be a boolean" }, 400);
     }
+    if (body.preferredChromeBrowser !== undefined && typeof body.preferredChromeBrowser !== "string") {
+      return c.json({ error: "preferredChromeBrowser must be a string" }, 400);
+    }
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
@@ -146,7 +150,8 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       || body.cliBridgeMode !== undefined
       || body.telegramBotToken !== undefined
       || body.timeZone !== undefined
-      || body.companionMcpEnabled !== undefined;
+      || body.companionMcpEnabled !== undefined
+      || body.preferredChromeBrowser !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -250,6 +255,10 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
         typeof body.companionMcpEnabled === "boolean"
           ? body.companionMcpEnabled
           : undefined,
+      preferredChromeBrowser:
+        typeof body.preferredChromeBrowser === "string"
+          ? body.preferredChromeBrowser.trim()
+          : undefined,
     });
 
     // Token added/changed/cleared → spawn or stop the bridge child accordingly.
@@ -282,6 +291,7 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
       timeZone: settings.timeZone ?? "",
       companionMcpEnabled: settings.companionMcpEnabled !== false,
+      preferredChromeBrowser: settings.preferredChromeBrowser ?? "",
     });
   });
 

@@ -142,3 +142,20 @@ describe("PUT /settings companionMcpEnabled", () => {
     expect(getSettings().companionMcpEnabled).toBe(false);
   });
 });
+
+describe("PUT /settings preferredChromeBrowser", () => {
+  // "Preferred Chrome browser" (device id, "" = automatic): trimmed, persisted,
+  // read back, and only a string is accepted.
+  it("round-trips the device id and validates it", async () => {
+    expect((await (await app.request("/settings")).json()).preferredChromeBrowser).toBe("");
+
+    const set = await putSettings({ preferredChromeBrowser: "  dev-linux  " });
+    expect(set.status).toBe(200);
+    expect((await set.json()).preferredChromeBrowser).toBe("dev-linux");
+    expect(getSettings().preferredChromeBrowser).toBe("dev-linux");
+
+    const bad = await putSettings({ preferredChromeBrowser: 3 });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toBe("preferredChromeBrowser must be a string");
+  });
+});
