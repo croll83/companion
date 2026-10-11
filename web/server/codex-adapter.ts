@@ -202,6 +202,11 @@ export interface CodexAdapterOptions {
   killProcess?: () => Promise<void> | void;
   /** Optional system prompt injected into thread/start as instructions (e.g. Linear context). */
   systemPrompt?: string;
+  /**
+   * Folders a "workspace-write" sandbox may write to besides the session's
+   * folder (its domain's memory, so a sandboxed session can save notes).
+   */
+  extraWritableRoots?: string[];
 }
 
 // ─── Stdio JSON-RPC Transport ────────────────────────────────────────────────
@@ -3141,7 +3146,7 @@ export class CodexAdapter implements IBackendAdapter {
       const cwd = this.getExecutionCwd();
       return {
         type: "workspaceWrite",
-        writableRoots: cwd ? [cwd] : [],
+        writableRoots: [...new Set([...(cwd ? [cwd] : []), ...(this.options.extraWritableRoots ?? [])])],
         networkAccess: this.options.networkAccess === true,
         excludeTmpdirEnvVar: false,
         excludeSlashTmp: false,

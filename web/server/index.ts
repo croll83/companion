@@ -16,6 +16,7 @@ import { serveStatic } from "hono/bun";
 import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
 import { CliLauncher } from "./cli-launcher.js";
+import { ensureGlobalDomain } from "./domain-store.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
@@ -93,6 +94,12 @@ launcher.setCompanionMcp({
   tokenFor: mcpTokenFor,
   claudeConfigDir: join(sessionStore.directory, "mcp-config"),
 });
+// The GLOBAL domain (shared by every session) must exist before any spawn.
+try {
+  ensureGlobalDomain();
+} catch (err) {
+  console.error("[server] Could not create the GLOBAL domain:", err);
+}
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
 

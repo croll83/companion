@@ -748,6 +748,12 @@ describe("CodexAdapter", () => {
       expected: { type: "workspaceWrite", writableRoots: ["/work/repo"], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
     },
     { options: { sandbox: "workspace-write" as const }, expected: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } },
+    // A sandboxed domain session may also write its domain's memory folder
+    // (so it can save notes shared with the domain's Claude sessions).
+    {
+      options: { sandbox: "workspace-write" as const, cwd: "/work/repo", extraWritableRoots: ["/home/u/companion_domain_herd/memory", "/work/repo"] },
+      expected: { type: "workspaceWrite", writableRoots: ["/work/repo", "/home/u/companion_domain_herd/memory"], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+    },
     { options: { sandbox: "danger-full-access" as const, networkAccess: false }, expected: { type: "dangerFullAccess" } },
     { options: {}, expected: { type: "dangerFullAccess" } },
   ])("sends the session's sandbox as turn/start sandboxPolicy ($options.sandbox)", async ({ options, expected }) => {

@@ -6,7 +6,12 @@ import {
   COMPANION_MCP_SCRIPT,
   buildCompanionMcpEntry,
   bunExecutable,
+  SKILL_TOGGLE_MARKER,
+  companionTable,
   removeClaudeMcpConfig,
+  rewriteCodexMcpServers,
+  tomlInlineTable,
+  tomlKey,
   upsertCodexMcpServer,
   writeClaudeMcpConfig,
 } from "./companion-mcp-config.js";
@@ -184,5 +189,55 @@ describe("Codex config.toml upsert", () => {
     const path = join(dir, "config.toml");
     upsertCodexMcpServer(path, { ...entry, command: 'C:\\bun "x"' });
     expect(readFileSync(path, "utf-8")).toContain('command = "C:\\\\bun \\"x\\""');
+  });
+});
+
+describe("Codex config.toml: domain servers and skill toggles", () => {
+  const userConfig = [
+    'model = "gpt-5.5"',
+    "",
+    "[mcp_servers.github]",
+    'command = "gh-mcp"',
+    "",
+    "[[skills.config]]",
+    'name = "users-own"',
+    "enabled = false",
+    "",
+  ].join("\n");
+  const marker = (name: string) => `# Managed by Companion: MCP server of domain herd. ${name}`;
+  const server = (name: string) => [marker(name), `[mcp_servers.${name}]`, `command = "${name}-cmd"`];
+  const toggle = (name: string) => [`${SKILL_TOGGLE_MARKER} (design).`, "[[skills.config]]", `name = "${name}"`, "enabled = false"];
+
+  // Several managed tables in a row (the companion server, domain servers,
+  // skill toggles) are rewritten in one pass and never pile up, while the
+  // user's own servers and [[skills.config]] entries stay untouched.
+  it("rewrites every managed table, consecutive ones included, and keeps the user's", () => {
+    const path = join(dir, "config.toml");
+    writeFileSync(path, userConfig);
+    const tables = [companionTable(entry), server("ping"), server("pong"), toggle("adapt"), toggle("audit")];
+    rewriteCodexMcpServers(path, ["companion", "ping", "pong"], tables);
+    rewriteCodexMcpServers(path, ["companion", "ping", "pong"], tables);
+    const text = readFileSync(path, "utf-8");
+    expect(text.startsWith(userConfig.trimEnd())).toBe(true);
+    expect(text.match(/\[mcp_servers\.ping\]/g)).toHaveLength(1);
+    expect(text.match(/\[\[skills\.config\]\]/g)).toHaveLength(3);
+    expect(text.match(/Managed by Companion/g)).toHaveLength(5);
+
+    // Turning everything off leaves exactly the user's file.
+    rewriteCodexMcpServers(path, ["companion", "ping", "pong"], []);
+    expect(readFileSync(path, "utf-8")).toBe(`${userConfig.trimEnd()}\n`);
+  });
+
+  it("does not create a file just to write nothing", () => {
+    const path = join(dir, "none.toml");
+    rewriteCodexMcpServers(path, ["x"], []);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("formats TOML keys and inline tables", () => {
+    expect(tomlKey("ok_name-1")).toBe("ok_name-1");
+    expect(tomlKey("a.b")).toBe('"a.b"');
+    expect(tomlInlineTable({})).toBe("{}");
+    expect(tomlInlineTable({ A: "1", "x-y.z": "2" })).toBe('{ A = "1", "x-y.z" = "2" }');
   });
 });

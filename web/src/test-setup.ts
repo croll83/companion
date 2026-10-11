@@ -1,3 +1,13 @@
+// Domains (server/domain-store.ts): a test must never create
+// ~/companion_domain_* folders in the real home. Tests that need a root set
+// their own; everything else lands in a throwaway temp dir.
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+if (!process.env.COMPANION_DOMAINS_ROOT) {
+  process.env.COMPANION_DOMAINS_ROOT = mkdtempSync(join(tmpdir(), "companion-test-domains-"));
+}
+
 // Setup file for jsdom-based tests
 // Polyfills that must be available before any module import
 
