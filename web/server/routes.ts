@@ -256,8 +256,12 @@ export function createRoutes(
       const bridge = bridgeMap.get(s.sessionId);
       return {
         ...s,
-        // Bridge state is the source of truth for runtime cwd updates.
-        cwd: bridge?.cwd || s.cwd,
+        // The session's folder is the one it was started in (or moved to with
+        // "Change folder"): it decides CLAUDE.md, skills and settings, and the
+        // sidebar groups by it. The CLI's own working directory drifts as it
+        // runs commands (`cd`), so it is reported separately.
+        cwd: s.cwd,
+        runtimeCwd: bridge?.cwd || s.cwd,
         name: names[s.sessionId] ?? s.name,
         gitBranch: bridge?.git_branch || "",
         gitAhead: bridge?.git_ahead || 0,
@@ -438,6 +442,20 @@ export function createRoutes(
     const result = await orchestrator.killSession(id);
     if (!result.ok) return c.json({ error: "Session not found or already exited" }, 404);
     return c.json({ ok: true });
+  });
+
+  // Preview / apply moving a session to another working folder.
+  api.get("/sessions/:id/folder", (c) => {
+    const result = orchestrator.previewSessionFolder(c.req.param("id"), c.req.query("cwd"));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
+  });
+
+  api.post("/sessions/:id/folder", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const result = await orchestrator.changeSessionFolder(c.req.param("id"), (body as { cwd?: unknown }).cwd);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
   });
 
   api.post("/sessions/:id/relaunch", async (c) => {

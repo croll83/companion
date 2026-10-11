@@ -1572,6 +1572,20 @@ export class CliLauncher {
     return true;
   }
 
+  /**
+   * Move a session to another working folder. The next (re)launch starts the
+   * CLI there; the conversation is resumed by id, so the context is kept.
+   * The worktree repo root no longer applies to the new folder.
+   */
+  setCwd(sessionId: string, cwd: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.cwd = cwd;
+    delete info.repoRoot;
+    this.persistState();
+    return true;
+  }
+
   setEffort(sessionId: string, effort: string): boolean {
     const info = this.sessions.get(sessionId);
     if (!info) return false;

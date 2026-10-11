@@ -30,12 +30,16 @@ export interface ProjectGroup {
 }
 
 /**
- * Extracts a project key from a cwd path.
- * Uses repoRoot when available (normalizes to the parent repo).
+ * Extracts a project key from a session's folder.
+ *
+ * Sessions are grouped by their own folder, never by a parent or the git
+ * repo root: a session in ~/dev goes under "dev", one in ~/dev/herd under
+ * "herd", one in ~/dev/herd/feature-1 under "feature-1". The folder is what
+ * Claude Code scopes CLAUDE.md, skills and settings to, so the grouping
+ * matches what each session actually loads.
  */
-export function extractProjectKey(cwd: string, repoRoot?: string): string {
-  const basePath = repoRoot || cwd;
-  return basePath.replace(/\/+$/, "") || "/";
+export function extractProjectKey(cwd: string): string {
+  return cwd.replace(/\/+$/, "") || "/";
 }
 
 /**
@@ -58,7 +62,7 @@ export function groupSessionsByProject(
   const groups = new Map<string, ProjectGroup>();
 
   for (const session of sessions) {
-    const key = extractProjectKey(session.cwd, session.repoRoot || undefined);
+    const key = extractProjectKey(session.cwd);
     const label = extractProjectLabel(key);
 
     if (!groups.has(key)) {

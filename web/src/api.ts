@@ -445,6 +445,17 @@ export interface TelegramBinding {
   enabled: boolean;
 }
 
+export interface SessionFolderPreview {
+  ok: true;
+  from: string;
+  to: string;
+  backend: string;
+  /** A turn or background job is running and the restart would interrupt it. */
+  interruptsWork: boolean;
+  /** Claude only: auto-memory is scoped to the folder. */
+  memory?: { from: { dir: string; notes: number }; to: { dir: string; notes: number } };
+}
+
 export interface ArchiveInfo {
   hasLinkedIssue: boolean;
   issueNotDone: boolean;
@@ -898,6 +909,14 @@ export const api = {
     post<{ ok: boolean; alreadyRunning?: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/relaunch${opts?.force ? "?force=1" : ""}`,
     ),
+
+  /** What moving a session to `cwd` would do (no change made). */
+  previewSessionFolder: (sessionId: string, cwd: string) =>
+    get<SessionFolderPreview>(`/sessions/${encodeURIComponent(sessionId)}/folder?cwd=${encodeURIComponent(cwd)}`),
+
+  /** Move a session to `cwd` and restart its CLI there on the same conversation. */
+  changeSessionFolder: (sessionId: string, cwd: string) =>
+    post<SessionFolderPreview>(`/sessions/${encodeURIComponent(sessionId)}/folder`, { cwd }),
 
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),

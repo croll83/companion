@@ -405,7 +405,8 @@ export function Sidebar() {
     return {
       id,
       model: bridgeState?.model || sdkInfo?.model || "",
-      cwd: bridgeState?.cwd || sdkInfo?.cwd || "",
+      // The session's folder (stable), not the CLI's drifting working dir.
+      cwd: sdkInfo?.cwd || bridgeState?.cwd || "",
       gitBranch: bridgeState?.git_branch || sdkInfo?.gitBranch || "",
       gitAhead: bridgeState?.git_ahead || sdkInfo?.gitAhead || 0,
       gitBehind: bridgeState?.git_behind || sdkInfo?.gitBehind || 0,

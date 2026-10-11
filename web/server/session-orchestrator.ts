@@ -18,6 +18,7 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { isSessionWorking } from "./session-work.js";
+import { claudeMemoryFor, validateTargetFolder, type FolderMemory } from "./session-folder.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -568,6 +569,50 @@ export class SessionOrchestrator {
     return this.launcher.relaunch(sessionId);
   }
 
+  // ── Change folder ──────────────────────────────────────────────────────────
+
+  /**
+   * What moving a session to `rawCwd` would do, without doing it: the folders,
+   * whether a running turn would be interrupted, and for Claude the auto-memory
+   * the session would read before and after (it is scoped to the folder).
+   */
+  previewSessionFolder(sessionId: string, rawCwd: unknown): SessionFolderPreview {
+    const info = this.launcher.getSession(sessionId);
+    if (!info) return { ok: false, status: 404, error: "Session not found" };
+    if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
+    if (this.worktreeTracker.getBySession(sessionId)) {
+      return { ok: false, status: 409, error: "Worktree sessions cannot change folder" };
+    }
+    const target = validateTargetFolder(rawCwd);
+    if (!target.ok) return { ok: false, status: 400, error: target.error };
+    if (target.cwd === info.cwd) return { ok: false, status: 400, error: "The session is already in this folder" };
+
+    const live = this.wsBridge.getSession(sessionId);
+    const backend = info.backendType ?? "claude";
+    return {
+      ok: true,
+      from: info.cwd,
+      to: target.cwd,
+      backend,
+      interruptsWork: !!live && this.wsBridge.isCliConnected(sessionId) && isSessionWorking(live),
+      ...(backend === "claude" ? { memory: { from: claudeMemoryFor(info.cwd), to: claudeMemoryFor(target.cwd) } } : {}),
+    };
+  }
+
+  /** Move a session to another folder and restart its CLI there on the same conversation. */
+  async changeSessionFolder(sessionId: string, rawCwd: unknown): Promise<SessionFolderPreview> {
+    const preview = this.previewSessionFolder(sessionId, rawCwd);
+    if (!preview.ok) return preview;
+    log.info("orchestrator", "Moving session to another folder", { sessionId, from: preview.from, to: preview.to });
+    this.launcher.setCwd(sessionId, preview.to);
+    this.wsBridge.setSessionCwd(sessionId, preview.to);
+    const relaunch = await this.relaunchSession(sessionId, { force: true });
+    if (!relaunch.ok) {
+      return { ok: false, status: 503, error: relaunch.error || "Moved, but the CLI failed to restart" };
+    }
+    return preview;
+  }
+
   // ── Archive ────────────────────────────────────────────────────────────────
 
   async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {
@@ -827,3 +872,16 @@ export class SessionOrchestrator {
     return { cleaned: result.removed, path: mapping.worktreePath };
   }
 }
+
+export type SessionFolderPreview =
+  | {
+      ok: true;
+      from: string;
+      to: string;
+      backend: string;
+      /** A turn or background job is running and the restart would interrupt it. */
+      interruptsWork: boolean;
+      /** Claude only: auto-memory is per folder, so the session switches memory. */
+      memory?: { from: FolderMemory; to: FolderMemory };
+    }
+  | { ok: false; status: 400 | 404 | 409 | 503; error: string };
