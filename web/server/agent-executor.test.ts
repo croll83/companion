@@ -1463,6 +1463,21 @@ describe("AgentExecutor", () => {
   });
 
   // =========================================================================
+  // Domain: agent runs share their domain's memory, skills and MCP servers
+  // =========================================================================
+  describe("domain", () => {
+    it("launches runs in the agent's domain, GLOBAL by default", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "herd-agent", domain: "herd" }));
+      await executor.executeAgent("herd-agent");
+      expect(launcher.launch).toHaveBeenLastCalledWith(expect.objectContaining({ domain: "herd" }));
+
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "plain-agent" }));
+      await executor.executeAgent("plain-agent");
+      expect(launcher.launch).toHaveBeenLastCalledWith(expect.objectContaining({ domain: "global" }));
+    });
+  });
+
+  // =========================================================================
   // Allowed tools → --tools (Claude only)
   // =========================================================================
   describe("allowedTools", () => {

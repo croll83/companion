@@ -13,6 +13,7 @@ import { ExecutionStore } from "./execution-store.js";
 import { nextScheduledRun, scheduleTimeZone, scheduleTimeZoneLabel } from "./agent-schedule.js";
 import { resolveForkSource } from "./session-fork.js";
 import { isPathWithin } from "./path-scope.js";
+import { GLOBAL_DOMAIN } from "./domain-store.js";
 
 /** Max consecutive failures before auto-disabling an agent */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -389,6 +390,8 @@ export class AgentExecutor {
           : undefined,
         systemPrompt: agent.backendType === "codex" ? opts.systemPrompt : undefined,
         forkSource,
+        // Scheduled and on-demand runs share their domain's memory and tools.
+        domain: agent.domain || GLOBAL_DOMAIN,
       });
 
       execution.sessionId = sessionInfo.sessionId;
