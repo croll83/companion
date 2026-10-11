@@ -40,6 +40,8 @@ export interface SkillEntry {
   path: string;
   /** "synced" = claude.ai-synced skill (read-only), "link" = symlinked skill dir */
   source?: "synced" | "link";
+  /** `disable-model-invocation: true`: only the user runs it (/name), the model never does. */
+  manualOnly?: boolean;
 }
 
 export interface ClaudeConfigListing {
@@ -173,11 +175,12 @@ export async function collectWalkUp(walkDirs: string[], rels: string[]): Promise
 
 /** Parse `name` and `description` from YAML frontmatter (folded `>`/`|`
  *  descriptions are joined into one line). */
-export function parseFrontmatter(content: string): { name?: string; description?: string } {
+export function parseFrontmatter(content: string): { name?: string; description?: string; manualOnly?: boolean } {
   const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fm) return {};
   const lines = fm[1].split(/\r?\n/);
-  const out: { name?: string; description?: string } = {};
+  const out: { name?: string; description?: string; manualOnly?: boolean } = {};
+  if (lines.some((l) => /^disable-model-invocation:\s*["']?true["']?\s*$/.test(l))) out.manualOnly = true;
   const unquote = (s: string) => s.trim().replace(/^["']|["']$/g, "");
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^(name|description):\s*(.*)$/);
@@ -250,6 +253,7 @@ async function readSkill(dir: string, slug: string, source?: SkillEntry["source"
     description: fm.description || "",
     path: found.path,
     ...(source ? { source } : {}),
+    ...(fm.manualOnly ? { manualOnly: true } : {}),
   };
 }
 

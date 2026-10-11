@@ -28,6 +28,7 @@ vi.mock("../api.js", () => ({
   api: {
     listSkills: (...args: unknown[]) => mockApi.listSkills(...args),
     listEnvs: (...args: unknown[]) => mockApi.listEnvs(...args),
+    listDomains: () => Promise.resolve({ root: "", skillGroups: [], domains: [{ slug: "global", name: "GLOBAL" }, { slug: "herd", name: "Herd" }] }),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
   },
 }));
@@ -533,5 +534,24 @@ describe("AgentEditor — context mode", () => {
     const { axe } = await import("vitest-axe");
     const { container } = renderEditor({ name: "Forker", prompt: "Continue", contextMode: "fork", sourceSessionId: "aaaaaaaa-1111" });
     expect(await axe(container, axeRules)).toHaveNoViolations();
+  });
+});
+
+describe("AgentEditor — domain", () => {
+  // Runs share the chosen domain's memory, skills and MCP servers; the
+  // select lists the domains and defaults to GLOBAL.
+  it("lists the domains and sets the agent's domain", async () => {
+    const { getForm } = renderEditor();
+    const select = screen.getByLabelText("Agent domain");
+    expect(select).toHaveValue("global");
+    await screen.findByRole("option", { name: "Herd" });
+    fireEvent.change(select, { target: { value: "herd" } });
+    expect(getForm().domain).toBe("herd");
+  });
+
+  it("keeps a domain that is not in the list", async () => {
+    renderEditor({ domain: "gone" });
+    await screen.findByRole("option", { name: "Herd" });
+    expect(screen.getByLabelText("Agent domain")).toHaveValue("gone");
   });
 });

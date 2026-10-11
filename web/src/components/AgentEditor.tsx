@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { api, type McpServerConfigAgent, type CompanionEnv, type LinearOAuthConnectionSummary } from "../api.js";
+import { api, type McpServerConfigAgent, type CompanionEnv, type LinearOAuthConnectionSummary, type DomainSummary } from "../api.js";
 import { useStore } from "../store.js";
 import { getModelsForBackend, getDefaultModel, getDefaultAgentMode } from "../utils/backends.js";
 import { AgentPermissionPill } from "./AgentPermissionPill.js";
@@ -29,6 +29,8 @@ export interface AgentFormData {
   contextMode: "brief" | "fork";
   sourceSessionId: string;
   envSlug: string;
+  // Domain the runs work in (memory, skills, MCP shared with its sessions)
+  domain?: string;
   // Environment variables (key-value pairs)
   env: { key: string; value: string }[];
   // Codex internet access
@@ -59,6 +61,7 @@ export const EMPTY_FORM: AgentFormData = {
   contextMode: "brief",
   sourceSessionId: "",
   envSlug: "",
+  domain: "global",
   env: [],
   codexInternetAccess: false,
   mcpServers: {},
@@ -138,9 +141,11 @@ export function AgentEditor({
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const envDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Fetch env profiles on mount
+  // Fetch env profiles and domains on mount
+  const [domains, setDomains] = useState<Pick<DomainSummary, "slug" | "name">[]>([]);
   useEffect(() => {
     api.listEnvs().then(setEnvProfiles).catch(() => {});
+    api.listDomains().then((res) => setDomains(res.domains)).catch(() => {});
   }, []);
 
   // Fetch Linear OAuth connections when Linear trigger is enabled
@@ -532,6 +537,23 @@ export function AgentEditor({
                 </div>
               )}
             </div>
+
+            {/* Domain: runs share its memory, skills, MCP servers and instructions */}
+            <label className={`${pillDefault} gap-1.5`} title="Runs share the domain's memory, skills, MCP servers and instructions">
+              <span className="opacity-70">Domain</span>
+              <select
+                aria-label="Agent domain"
+                value={form.domain || "global"}
+                onChange={(e) => updateField("domain", e.target.value)}
+                className="bg-transparent text-xs focus:outline-none cursor-pointer"
+              >
+                {domains.length === 0 && <option value="global">GLOBAL</option>}
+                {domains.length > 0 && !domains.some((d) => d.slug === (form.domain || "global")) && (
+                  <option value={form.domain}>{form.domain}</option>
+                )}
+                {domains.map((d) => <option key={d.slug} value={d.slug}>{d.name}</option>)}
+              </select>
+            </label>
 
             {/* Internet pill — codex only */}
             {form.backendType === "codex" && (

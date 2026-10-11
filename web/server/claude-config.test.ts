@@ -86,6 +86,12 @@ describe("parseFrontmatter", () => {
   it("returns an empty object without frontmatter", () => {
     expect(parseFrontmatter("# just markdown")).toEqual({});
   });
+
+  // Manual-only skills (disable-model-invocation: true) get an "M" badge.
+  it("flags manual-only skills", () => {
+    expect(parseFrontmatter("---\nname: x\ndisable-model-invocation: true\n---\n")).toEqual({ name: "x", manualOnly: true });
+    expect(parseFrontmatter("---\nname: x\ndisable-model-invocation: false\n---\n")).toEqual({ name: "x" });
+  });
 });
 
 describe("discoverClaudeConfig", () => {

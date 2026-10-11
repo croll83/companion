@@ -50,6 +50,7 @@ vi.mock("../api.js", () => ({
     regenerateAgentWebhookSecret: (...args: unknown[]) => mockApi.regenerateAgentWebhookSecret(...args),
     listSkills: (...args: unknown[]) => mockApi.listSkills(...args),
     listEnvs: (...args: unknown[]) => mockApi.listEnvs(...args),
+    listDomains: () => Promise.resolve({ root: "", skillGroups: [], domains: [{ slug: "global", name: "GLOBAL" }, { slug: "herd", name: "Herd" }] }),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
   },
 }));
