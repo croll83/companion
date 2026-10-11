@@ -18,7 +18,7 @@ import { navigateToSession } from "../utils/routing.js";
 import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, toModelOptions, getEffortLevels, modelSupportsEffort, DEFAULT_EFFORT, type ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
-import { FolderPicker } from "./FolderPicker.js";
+import { DomainFolderPicker, folderSlug, type FolderMode } from "./home/DomainFolderPicker.js";
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
@@ -102,6 +102,19 @@ export function HomePage() {
   ));
   const [effort, setEffort] = useState<string>(DEFAULT_EFFORT);
   const [cwd, setCwd] = useState(() => getRecentDirs()[0] || "");
+  // Where the session runs: its domain, and a new folder inside it (named
+  // after the session) or an existing folder attached as is.
+  const [domain, setDomain] = useState(() => localStorage.getItem("cc-domain") || "global");
+  const [folderMode, setFolderMode] = useState<FolderMode>(
+    () => (localStorage.getItem("cc-folder-mode") === "existing" ? "existing" : "new"),
+  );
+  // The new session's name is picked up front so the new folder can carry it.
+  const [pendingName, setPendingName] = useState(
+    () => generateUniqueSessionName(new Set(useStore.getState().sessionNames?.values() ?? [])),
+  );
+  const [folderName, setFolderName] = useState(() => folderSlug(pendingName));
+  // Git (branch picker, worktrees, pull) only applies to an existing folder.
+  const gitCwd = folderMode === "existing" ? cwd : "";
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -128,7 +141,6 @@ export function HomePage() {
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showEffortDropdown, setShowEffortDropdown] = useState(false);
-  const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showBranchingControls, setShowBranchingControls] = useState(false);
   const [resumeSessionAt, setResumeSessionAt] = useState("");
   const [forkSession, setForkSession] = useState(true);
@@ -265,13 +277,13 @@ export function HomePage() {
     }
   }, [model, effort]);
 
-  // Detect git repo when cwd changes
+  // Detect git repo when the (existing) folder changes
   useEffect(() => {
-    if (!cwd) {
+    if (!gitCwd) {
       setGitRepoInfo(null);
       return;
     }
-    api.getRepoInfo(cwd).then((info) => {
+    api.getRepoInfo(gitCwd).then((info) => {
       setGitRepoInfo(info);
       setSelectedBranch(info.currentBranch);
       setIsNewBranch(false);
@@ -280,12 +292,11 @@ export function HomePage() {
       setSelectedBranch("");
       setIsNewBranch(false);
     });
-  }, [cwd]);
+  }, [gitCwd]);
 
   const selectedModel = MODELS.find((m) => m.value === model) || MODELS[0];
   const selectedMode = MODES.find((m) => m.value === mode) || MODES[0];
   const logoSrc = backend === "codex" ? "/logo-codex.svg" : "/logo.svg";
-  const dirLabel = cwd ? cwd.split("/").pop() || cwd : "Select folder";
   const trimmedResumeSessionAt = useMemo(() => resumeSessionAt.trim(), [resumeSessionAt]);
   const branchFromSessionEnabled = backend === "claude"
     && showBranchingControls
@@ -539,7 +550,9 @@ export function HomePage() {
       const effectiveForkSession = effectiveResumeSessionAt
         ? (launchOverride?.forkSession ?? (branchFromSessionEnabled ? forkSession : undefined))
         : undefined;
-      const effectiveCwd = launchOverride?.cwd || cwd;
+      // A resumed/forked session runs in its candidate's folder (existing).
+      const effectiveMode: FolderMode = launchOverride?.cwd ? "existing" : folderMode;
+      const effectiveCwd = launchOverride?.cwd || (effectiveMode === "existing" ? cwd : "");
       const effectiveBranch = launchOverride?.branch !== undefined
         ? (launchOverride.branch.trim() || undefined)
         : (selectedBranch.trim() || undefined);
@@ -557,6 +570,9 @@ export function HomePage() {
           effort: modelSupportsEffort(model) ? effort : undefined,
           permissionMode: mode,
           cwd: effectiveCwd || undefined,
+          domain,
+          folderMode: effectiveMode,
+          folderName: effectiveMode === "new" ? folderName : undefined,
           envSlug: selectedEnv || undefined,
           branch: effectiveBranch,
           createBranch: effectiveCreateBranch ? true : undefined,
@@ -600,10 +616,14 @@ export function HomePage() {
         },
       ]);
 
-      // Assign a random session name
+      // The name picked up front (the new folder carries it); the next
+      // session gets a fresh one.
       const existingNames = new Set(useStore.getState().sessionNames.values());
-      const sessionName = generateUniqueSessionName(existingNames);
+      const sessionName = existingNames.has(pendingName) ? generateUniqueSessionName(existingNames) : pendingName;
       useStore.getState().setSessionName(sessionId, sessionName);
+      const nextName = generateUniqueSessionName(new Set([...existingNames, sessionName]));
+      setPendingName(nextName);
+      setFolderName(folderSlug(nextName));
 
       // Save cwd to recent dirs
       if (effectiveCwd) addRecentDir(effectiveCwd);
@@ -841,6 +861,18 @@ export function HomePage() {
             style={{ minHeight: "80px", maxHeight: "200px" }}
           />
 
+          {/* ── Domain and folder ── */}
+          <DomainFolderPicker
+            domain={domain}
+            onDomainChange={(slug) => { setDomain(slug); localStorage.setItem("cc-domain", slug); }}
+            folderMode={folderMode}
+            onFolderModeChange={(mode) => { setFolderMode(mode); localStorage.setItem("cc-folder-mode", mode); }}
+            folderName={folderName}
+            onFolderNameChange={setFolderName}
+            cwd={cwd}
+            onCwdChange={setCwd}
+          />
+
           {/* ── Toolbar: all controls in one bar ── */}
           <div className="flex items-center gap-1 px-2.5 sm:px-3 py-2 flex-wrap">
             {/* Model selector */}
@@ -944,29 +976,9 @@ export function HomePage() {
             {/* Separator dot */}
             <span className="w-0.5 h-0.5 rounded-full bg-cc-muted/30 mx-0.5 hidden sm:block" />
 
-            {/* Folder selector */}
-            <div>
-              <button
-                onClick={() => setShowFolderPicker(true)}
-                className="flex items-center gap-1 px-2 py-1 text-[11px] sm:text-xs text-cc-muted hover:text-cc-fg rounded-lg hover:bg-cc-hover transition-colors cursor-pointer"
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 opacity-50">
-                  <path d="M1 3.5A1.5 1.5 0 012.5 2h3.379a1.5 1.5 0 011.06.44l.622.621a.5.5 0 00.353.146H13.5A1.5 1.5 0 0115 4.707V12.5a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z" />
-                </svg>
-                <span className="max-w-[80px] sm:max-w-[140px] truncate font-mono-code">{dirLabel}</span>
-              </button>
-              {showFolderPicker && (
-                <FolderPicker
-                  initialPath={cwd || ""}
-                  onSelect={(path) => { setCwd(path); }}
-                  onClose={() => setShowFolderPicker(false)}
-                />
-              )}
-            </div>
-
             {/* Branch picker */}
             <BranchPicker
-              cwd={cwd}
+              cwd={gitCwd}
               gitRepoInfo={gitRepoInfo}
               selectedBranch={selectedBranch}
               isNewBranch={isNewBranch}
@@ -1370,7 +1382,7 @@ export function HomePage() {
             )}
 
             <LinearSection
-              cwd={cwd}
+              cwd={gitCwd}
               gitRepoInfo={gitRepoInfo}
               linearConfigured={linearConfigured}
               selectedLinearIssue={selectedLinearIssue}

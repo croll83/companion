@@ -26,6 +26,8 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     transitionLinearIssue: vi.fn(),
     listPrompts: vi.fn(),
     listLinearConnections: vi.fn(),
+    listDomains: vi.fn(),
+    createDomain: vi.fn(),
   },
   createSessionStreamMock: vi.fn(),
   mockStoreState: {
@@ -102,7 +104,19 @@ describe("HomePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
+    // Most tests below exercise an existing (git) folder, which since
+    // domains is the "Existing folder" mode; the default "New folder in this
+    // domain" mode has its own tests further down.
+    window.localStorage.setItem("cc-folder-mode", "existing");
     mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.listDomains.mockResolvedValue({
+      root: "/home/ubuntu",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/ubuntu/companion_domain_global" },
+        { slug: "herd", name: "Herd", path: "/home/ubuntu/companion_domain_herd" },
+      ],
+    });
 
     mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
     mockApi.listEnvs.mockResolvedValue([]);
@@ -1462,6 +1476,74 @@ describe("HomePage", () => {
       expect(screen.getByText(/sets where your code lives/)).toBeInTheDocument();
       // But the Claude-only sentence should be absent
       expect(screen.queryByText(/branch from session/i)).not.toBeInTheDocument();
+    });
+  });
+});
+
+
+describe("HomePage domains", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
+    mockApi.listEnvs.mockResolvedValue([]);
+    mockApi.getBackends.mockResolvedValue([{ id: "claude", name: "Claude", available: true }]);
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: false });
+    mockApi.getRepoInfo.mockResolvedValue({ repoRoot: "/repo", repoName: "repo", currentBranch: "main", defaultBranch: "main", isWorktree: false });
+    mockApi.listBranches.mockResolvedValue([]);
+    mockApi.listSessions.mockResolvedValue([]);
+    mockApi.discoverClaudeSessions.mockResolvedValue({ sessions: [] });
+    mockApi.listPrompts.mockResolvedValue([]);
+    mockApi.listDomains.mockResolvedValue({
+      root: "/home/ubuntu",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/ubuntu/companion_domain_global" },
+        { slug: "herd", name: "Herd", path: "/home/ubuntu/companion_domain_herd" },
+      ],
+    });
+    createSessionStreamMock.mockResolvedValue({ sessionId: "dom-session", state: "starting", cwd: "/home/ubuntu/companion_domain_herd/x" });
+  });
+
+  // Default: GLOBAL, new folder named after the session; the git controls
+  // (branch picker) do not apply to a folder that does not exist yet.
+  it("creates the session in a new folder of the chosen domain by default", async () => {
+    const storeMock = buildStoreMock();
+    mockStoreGetState.mockReturnValue(storeMock);
+    render(<HomePage />);
+    const select = await screen.findByLabelText("Domain");
+    await screen.findByRole("option", { name: "Herd" });
+    fireEvent.change(select, { target: { value: "herd" } });
+    expect(window.localStorage.getItem("cc-domain")).toBe("herd");
+    fireEvent.change(screen.getByLabelText("New folder name"), { target: { value: "My Task" } });
+    expect(screen.getByText("/home/ubuntu/companion_domain_herd/my-task")).toBeInTheDocument();
+    expect(mockApi.getRepoInfo).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "Go" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => {
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ domain: "herd", folderMode: "new", folderName: "My Task", cwd: undefined }),
+        expect.any(Function),
+      );
+    });
+    // The session gets the name the folder was prefilled with.
+    await waitFor(() => expect(storeMock.setSessionName).toHaveBeenCalledWith("dom-session", expect.any(String)));
+  });
+
+  it("attaches an existing folder in Existing folder mode", async () => {
+    render(<HomePage />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Existing folder" }));
+    expect(window.localStorage.getItem("cc-folder-mode")).toBe("existing");
+    await waitFor(() => expect(mockApi.getRepoInfo).toHaveBeenCalledWith("/repo"));
+    fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "Go" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => {
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ domain: "global", folderMode: "existing", cwd: "/repo", folderName: undefined }),
+        expect.any(Function),
+      );
     });
   });
 });
