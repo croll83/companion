@@ -196,6 +196,7 @@ function createDeps(overrides?: Partial<SessionOrchestratorDeps>) {
     handleSessionClosed: vi.fn(),
     handleSessionUnarchived: vi.fn(),
     handleSessionInitFailed: vi.fn(),
+    setRunArchiver: vi.fn(),
   } as any;
   return {
     launcher,

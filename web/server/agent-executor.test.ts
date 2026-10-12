@@ -1782,3 +1782,120 @@ describe("runAnswerText", () => {
     expect(runAnswerText([{ type: "assistant", parent_tool_use_id: null, message: {} } as never, result()])).toBeNull();
   });
 });
+
+// ─── Finished run sessions are archived (sidebar hygiene) ──────────────────
+// Every agent run spawns a session; without this they pile up in the sidebar.
+// A successful run's session is archived once a grace period has passed,
+// unless the user stepped in. Failed runs stay visible on purpose.
+describe("AgentExecutor — archiving finished run sessions", () => {
+  const GRACE = 15 * 60_000;
+  const DONE_AT = 1_000_000;
+  let launcher: ReturnType<typeof makeMockLauncher>;
+  let wsBridge: ReturnType<typeof makeMockWsBridge> & { getSession: ReturnType<typeof vi.fn> };
+  let executor: AgentExecutor;
+  let archive: ReturnType<typeof vi.fn<(sessionId: string) => Promise<unknown>>>;
+
+  function run(overrides: Record<string, unknown> = {}) {
+    return { sessionId: "run-1", agentId: "agent-1", triggerType: "schedule", startedAt: DONE_AT - 1000, completedAt: DONE_AT, success: true, ...overrides };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.COMPANION_AGENT_RUN_ARCHIVE_MINUTES;
+    launcher = makeMockLauncher();
+    wsBridge = { ...makeMockWsBridge(), getSession: vi.fn().mockReturnValue({ lastFocusTs: 0, messageHistory: [] }) };
+    executor = new AgentExecutor(launcher as never, wsBridge as never);
+    archive = vi.fn<(sessionId: string) => Promise<unknown>>().mockResolvedValue({ ok: true });
+    executor.setRunArchiver(archive);
+    mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "agent-1" }));
+    launcher.getSession.mockReturnValue({ sessionId: "run-1", state: "exited", cwd: "/tmp", createdAt: 0 });
+    mockExecutionStoreInstance.own.mockReturnValue([run()]);
+  });
+
+  afterEach(() => {
+    executor.destroy();
+    delete process.env.COMPANION_AGENT_RUN_ARCHIVE_MINUTES;
+  });
+
+  it("archives a successful run's session once the grace period has passed", async () => {
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE + 1)).toEqual(["run-1"]);
+    expect(archive).toHaveBeenCalledWith("run-1");
+  });
+
+  it("leaves it visible during the grace period", async () => {
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE - 1)).toEqual([]);
+    expect(archive).not.toHaveBeenCalled();
+  });
+
+  it("never archives a failed or unfinished run (problems stay visible)", async () => {
+    mockExecutionStoreInstance.own.mockReturnValue([run({ success: false }), run({ sessionId: "run-2", completedAt: undefined })]);
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+  });
+
+  it("respects an agent that keeps its run sessions", async () => {
+    mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "agent-1", keepRunSessions: true }));
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+  });
+
+  it("skips sessions already archived or gone", async () => {
+    launcher.getSession.mockReturnValueOnce({ sessionId: "run-1", state: "exited", cwd: "/tmp", createdAt: 0, archived: true });
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+    launcher.getSession.mockReturnValueOnce(undefined);
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+  });
+
+  it("keeps a session the user focused after the run ended", async () => {
+    wsBridge.getSession.mockReturnValue({ lastFocusTs: DONE_AT + 5, messageHistory: [] });
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+  });
+
+  it("keeps a session the user wrote to after the run ended", async () => {
+    wsBridge.getSession.mockReturnValue({
+      lastFocusTs: 0,
+      messageHistory: [{ type: "user_message", content: "and now?", timestamp: DONE_AT + 5 }],
+    });
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+  });
+
+  it("ignores user messages from before the run ended (the run's own prompt)", async () => {
+    wsBridge.getSession.mockReturnValue({
+      lastFocusTs: DONE_AT - 10,
+      messageHistory: [{ type: "user_message", content: "[agent:x] go", timestamp: DONE_AT - 500 }],
+    });
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE + 1)).toEqual(["run-1"]);
+  });
+
+  it("does nothing when turned off (0 minutes) or with no archiver wired", async () => {
+    process.env.COMPANION_AGENT_RUN_ARCHIVE_MINUTES = "0";
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+    delete process.env.COMPANION_AGENT_RUN_ARCHIVE_MINUTES;
+    const bare = new AgentExecutor(launcher as never, wsBridge as never);
+    expect(await bare.sweepFinishedRuns(DONE_AT + GRACE * 10)).toEqual([]);
+    bare.destroy();
+  });
+
+  it("honours a custom grace period", async () => {
+    process.env.COMPANION_AGENT_RUN_ARCHIVE_MINUTES = "1";
+    expect(await executor.sweepFinishedRuns(DONE_AT + 60_001)).toEqual(["run-1"]);
+  });
+
+  it("logs and carries on when archiving one session fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockExecutionStoreInstance.own.mockReturnValue([run(), run({ sessionId: "run-2" })]);
+    archive.mockRejectedValueOnce(new Error("busy"));
+    launcher.getSession.mockImplementation((id: string) => ({ sessionId: id, state: "exited", cwd: "/tmp", createdAt: 0 }));
+    expect(await executor.sweepFinishedRuns(DONE_AT + GRACE + 1)).toEqual(["run-2"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("run-1"), expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it("sweeps periodically once started", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(DONE_AT + GRACE + 1);
+    mockAgentStore.listAgents.mockReturnValue([]);
+    executor.startAll();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(archive).toHaveBeenCalledWith("run-1");
+    vi.useRealTimers();
+  });
+});

@@ -26,6 +26,20 @@ const TEMP_CWD_PREFIX = "companion-agent-";
 /** Longest error text kept on a run record. */
 const MAX_ERROR_LENGTH = 2000;
 
+/**
+ * A successful run's session is archived this long after the run finished,
+ * unless the user stepped in (focused it or wrote to it). Failed runs stay
+ * visible so problems get noticed. COMPANION_AGENT_RUN_ARCHIVE_MINUTES, 0 = off.
+ */
+function runArchiveGraceMs(): number {
+  const raw = process.env.COMPANION_AGENT_RUN_ARCHIVE_MINUTES;
+  const minutes = raw === undefined || raw.trim() === "" ? 15 : Number(raw);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : 0;
+}
+
+/** How often finished runs are checked for archiving (survives restarts, unlike per-run timers). */
+const RUN_ARCHIVE_SWEEP_MS = 5 * 60_000;
+
 export interface ExecuteAgentOptions {
   /**
    * Skip both the enabled and the overlap checks. Used by the Linear trigger,
@@ -131,6 +145,8 @@ export class AgentExecutor {
   private timers = new Map<string, Cron>();
   private launcher: CliLauncher;
   private wsBridge: WsBridge;
+  private runArchiver?: (sessionId: string) => Promise<unknown>;
+  private sweepTimer?: ReturnType<typeof setInterval>;
   /** In-memory execution history (last N per agent) */
   private executions = new Map<string, AgentExecution[]>();
   private static readonly MAX_EXECUTIONS_PER_AGENT = 50;
@@ -157,7 +173,58 @@ export class AgentExecutor {
   }
 
   /** Start all enabled agents with schedule triggers from disk. Called once at server startup. */
+  /** How a finished run's session gets archived (wired by the orchestrator). */
+  setRunArchiver(archive: (sessionId: string) => Promise<unknown>): void {
+    this.runArchiver = archive;
+  }
+
+  /**
+   * Archive the sessions of successful runs that finished more than the grace
+   * period ago, so agent runs don't pile up in the sidebar. Skipped when the
+   * agent keeps its run sessions, when the run failed, or when the user stepped
+   * into the session after the run ended (focused it or sent a message).
+   * Returns the archived session ids.
+   */
+  async sweepFinishedRuns(now = Date.now()): Promise<string[]> {
+    const grace = runArchiveGraceMs();
+    if (!grace || !this.runArchiver) return [];
+    const archived: string[] = [];
+    for (const exec of this.executionStore.own()) {
+      const sid = exec.sessionId;
+      if (!sid || !exec.completedAt || !exec.success) continue;
+      if (now - exec.completedAt < grace || this.activeRuns.has(sid)) continue;
+      if (agentStore.getAgent(exec.agentId)?.keepRunSessions) continue;
+      const info = this.launcher.getSession(sid);
+      if (!info || info.archived) continue;
+      if (this.userSteppedIn(sid, exec.completedAt)) continue;
+      try {
+        await this.runArchiver(sid);
+        archived.push(sid);
+      } catch (err) {
+        console.warn(`[agent-executor] Could not archive finished run session ${sid}:`, err);
+      }
+    }
+    if (archived.length > 0) {
+      console.log(`[agent-executor] Archived ${archived.length} finished agent run session(s)`);
+    }
+    return archived;
+  }
+
+  /** Focus or a user message after the run ended means the user is using the session. */
+  private userSteppedIn(sessionId: string, since: number): boolean {
+    const live = this.wsBridge.getSession(sessionId);
+    if (!live) return false;
+    if ((live.lastFocusTs ?? 0) > since) return true;
+    return live.messageHistory.some(
+      (m) => m.type === "user_message" && typeof m.timestamp === "number" && m.timestamp > since,
+    );
+  }
+
   startAll(): void {
+    if (!this.sweepTimer) {
+      this.sweepTimer = setInterval(() => { void this.sweepFinishedRuns(); }, RUN_ARCHIVE_SWEEP_MS);
+      this.sweepTimer.unref?.();
+    }
     const agents = agentStore.listAgents();
     let started = 0;
     for (const agent of agents) {
@@ -686,6 +753,8 @@ export class AgentExecutor {
 
   /** Stop all timers (for graceful shutdown). */
   destroy(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
     for (const timer of this.timers.values()) {
       timer.stop();
     }

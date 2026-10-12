@@ -64,6 +64,8 @@ export interface AgentConfig {
    *    session's folder. The source session is never modified.
    */
   contextMode?: "brief" | "fork";
+  /** Keep each run's session visible after a successful run (default: archived after a grace period). */
+  keepRunSessions?: boolean;
   /** Companion session id each "fork" run copies the conversation of. */
   sourceSessionId?: string;
 

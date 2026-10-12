@@ -98,6 +98,16 @@ beforeEach(() => {
 describe("AgentEditor", () => {
   // ── Basic rendering ─────────────────────────────────────────────────────────
 
+  it("toggles 'Keep run sessions visible' (off by default: finished runs get archived)", () => {
+    // The checkbox maps to keepRunSessions; off means a successful run's
+    // session is archived after a grace period, keeping the sidebar clean.
+    const { getForm } = renderEditor();
+    const box = screen.getByRole("checkbox", { name: /Keep run sessions visible/ });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    expect(getForm().keepRunSessions).toBe(true);
+  });
+
   it("renders with default empty form and shows New Agent header", () => {
     // When editingId is null, the header should say "New Agent" and
     // the Create button should be present.

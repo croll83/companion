@@ -169,6 +169,8 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    // Successful agent runs archive their own session after a grace period.
+    this.agentExecutor.setRunArchiver((sessionId) => this.archiveSession(sessionId));
     this.wakeupScheduler = deps.wakeupScheduler;
   }
 

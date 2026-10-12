@@ -661,6 +661,8 @@ export interface AgentInfo {
   /** "brief" (default): fresh session. "fork": each run copies sourceSessionId's conversation. */
   contextMode?: "brief" | "fork";
   sourceSessionId?: string;
+  /** Keep each run's session visible (default: archived ~15 min after a successful run). */
+  keepRunSessions?: boolean;
   mcpServers?: Record<string, McpServerConfigAgent>;
   triggers?: {
     webhook?: {

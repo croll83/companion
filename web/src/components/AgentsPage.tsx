@@ -143,6 +143,7 @@ export function AgentsPage({ route }: Props) {
         ? Object.entries(agent.env).map(([key, value]) => ({ key, value }))
         : [],
       codexInternetAccess: agent.codexInternetAccess ?? false,
+      keepRunSessions: agent.keepRunSessions ?? false,
       mcpServers: agent.mcpServers || {},
       allowedTools: agent.allowedTools || [],
       webhookEnabled: agent.triggers?.webhook?.enabled ?? false,
@@ -254,6 +255,7 @@ export function AgentsPage({ route }: Props) {
         domain: form.domain || "global",
         env: Object.keys(envRecord).length > 0 ? envRecord : undefined,
         codexInternetAccess: form.backendType === "codex" ? form.codexInternetAccess : undefined,
+        keepRunSessions: form.keepRunSessions,
         mcpServers: Object.keys(form.mcpServers).length > 0 ? form.mcpServers : undefined,
         // Claude only (--tools); Codex has no per-tool restriction.
         allowedTools: form.backendType === "claude" && form.allowedTools.length > 0 ? form.allowedTools : undefined,

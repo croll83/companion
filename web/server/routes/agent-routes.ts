@@ -46,7 +46,7 @@ const EDITABLE_FIELDS = [
   "backendType", "model", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
   "prompt", "contextMode", "sourceSessionId", "mcpServers",
-  "triggers", "enabled", "domain",
+  "triggers", "enabled", "domain", "keepRunSessions",
 ] as const;
 
 /** A built-in Claude tool name, as `--tools` accepts it (no permission patterns). */

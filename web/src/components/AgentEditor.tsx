@@ -35,6 +35,7 @@ export interface AgentFormData {
   env: { key: string; value: string }[];
   // Codex internet access
   codexInternetAccess: boolean;
+  keepRunSessions: boolean;
   // MCP Servers
   mcpServers: Record<string, McpServerConfigAgent>;
   // Claude only: built-in tools the agent is limited to (empty = all)
@@ -64,6 +65,7 @@ export const EMPTY_FORM: AgentFormData = {
   domain: "global",
   env: [],
   codexInternetAccess: false,
+  keepRunSessions: false,
   mcpServers: {},
   allowedTools: [],
   webhookEnabled: false,
@@ -575,6 +577,21 @@ export function AgentEditor({
               ? "Claude agents run unattended with full permissions (no approval prompts). Limit them with Allowed tools under Advanced."
               : "Codex never asks for approvals in agent runs. Full Auto runs without a sandbox (danger-full-access); Supervised runs in the workspace-write sandbox."}
           </p>
+
+          <label className="flex items-start gap-2 text-xs text-cc-fg -mt-1">
+            <input
+              type="checkbox"
+              checked={form.keepRunSessions}
+              onChange={(e) => updateField("keepRunSessions", e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Keep run sessions visible
+              <span className="block text-[10px] text-cc-muted">
+                Off: a successful run's session is archived about 15 minutes after it finishes, unless you open or write to it. Failed runs always stay visible. Archived runs remain in Runs.
+              </span>
+            </span>
+          </label>
 
           {showFolderPicker && (
             <FolderPicker
