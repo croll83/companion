@@ -414,6 +414,14 @@ export class ClaudeAdapter implements IBackendAdapter {
       case "mcp_reconnect":
         return this.handleOutgoingMcpReconnect(msg.serverName);
 
+      case "mcp_authenticate":
+        void this.handleOutgoingMcpAuthenticate(msg.serverName);
+        return true;
+
+      case "mcp_oauth_callback":
+        void this.handleOutgoingMcpOAuthCallback(msg.serverName, msg.callbackUrl);
+        return true;
+
       case "mcp_set_servers":
         return this.handleOutgoingMcpSetServers(msg.servers);
 
@@ -662,6 +670,64 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Refresh MCP status after a delay to pick up the reconnection
     setTimeout(() => this.handleOutgoingMcpGetStatus(), 1000);
     return true;
+  }
+
+  /** How often, and for how long, a started OAuth login is watched for completion. */
+  static MCP_AUTH_POLL_MS = 3_000;
+  static MCP_AUTH_POLL_LIMIT_MS = 5 * 60_000;
+
+  /**
+   * Start an MCP server's OAuth login (`mcp_authenticate`, verified on CLI
+   * 2.1.293) and send the sign-in URL to the browser. With the browser on
+   * this machine the CLI's localhost listener gets the redirect and connects
+   * the server by itself: the status is polled until it is connected.
+   */
+  private async handleOutgoingMcpAuthenticate(serverName: string): Promise<void> {
+    try {
+      const res = await this.requestControl({ subtype: "mcp_authenticate", serverName }, 30_000) as { authUrl?: string } | undefined;
+      if (!res?.authUrl) {
+        this.browserMessageCb?.({ type: "mcp_auth", serverName, done: true });
+        return;
+      }
+      this.browserMessageCb?.({ type: "mcp_auth", serverName, authUrl: res.authUrl });
+      this.watchMcpLogin(serverName, Date.now() + ClaudeAdapter.MCP_AUTH_POLL_LIMIT_MS);
+    } catch (err) {
+      this.browserMessageCb?.({ type: "mcp_auth", serverName, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private watchMcpLogin(serverName: string, until: number): void {
+    setTimeout(async () => {
+      if (!this.isConnected() || Date.now() > until) return;
+      try {
+        const res = await this.requestControl({ subtype: "mcp_status" }) as { mcpServers?: McpServerDetail[] } | undefined;
+        const servers = res?.mcpServers ?? [];
+        if (servers.find((s) => s.name === serverName)?.status === "connected") {
+          this.browserMessageCb?.({ type: "mcp_status", servers });
+          this.browserMessageCb?.({ type: "mcp_auth", serverName, done: true });
+          return;
+        }
+      } catch {
+        /* keep watching */
+      }
+      this.watchMcpLogin(serverName, until);
+    }, ClaudeAdapter.MCP_AUTH_POLL_MS);
+  }
+
+  /**
+   * The redirect URL pasted by the user (browser on another machine): the CLI
+   * finishes the login with it, then the server is reconnected in place.
+   */
+  private async handleOutgoingMcpOAuthCallback(serverName: string, callbackUrl: string): Promise<void> {
+    try {
+      await this.requestControl({ subtype: "mcp_oauth_callback_url", serverName, callbackUrl }, 30_000);
+      // The token is saved, but the running session only uses it after a reconnect.
+      await this.requestControl({ subtype: "mcp_reconnect", serverName }, 30_000);
+      this.handleOutgoingMcpGetStatus();
+      this.browserMessageCb?.({ type: "mcp_auth", serverName, done: true });
+    } catch (err) {
+      this.browserMessageCb?.({ type: "mcp_auth", serverName, error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   private handleOutgoingMcpSetServers(servers: Record<string, unknown>): boolean {

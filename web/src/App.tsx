@@ -247,7 +247,7 @@ export default function App() {
 
           {isDomainsPage && (
             <div className="absolute inset-0">
-              <Suspense fallback={<LazyFallback />}><DomainsPage /></Suspense>
+              <Suspense fallback={<LazyFallback />}><DomainsPage slug={route.page === "domains" ? route.slug : undefined} tab={route.page === "domains" ? route.tab : undefined} /></Suspense>
             </div>
           )}
 

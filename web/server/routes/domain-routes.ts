@@ -15,11 +15,41 @@ import {
   listDomainSkills,
   listDomains,
   readDomainMcp,
+  setDomainMcpServer,
+  createDomainSkill,
+  removeDomainSkill,
   updateDomain,
   type DomainInfo,
 } from "../domain-store.js";
-import { domainMcpView, resolveDomain, type DomainMcpServerView } from "../domain-runtime.js";
-import { isSkillGroupOn, listSkillGroups, type SkillGroup } from "../skill-groups.js";
+import { domainMcpView, mcpTargetOf, mcpTypeOf, resolveDomain, type DomainMcpServerView } from "../domain-runtime.js";
+import { isSkillGroupOn, isSkillOn, listSkillGroups, skillDescription, skillKey, type SkillGroup } from "../skill-groups.js";
+import { isPluginOn, listInstalledPlugins, type InstalledPlugin } from "../claude-plugins.js";
+import { cachedAccountMcpServers, isAccountMcpStale, refreshAccountMcpServers, type AccountMcpList } from "../account-mcp.js";
+
+/** An installed plugin as the Domains page lists it (server env and headers left out). */
+export interface PluginView {
+  id: string;
+  name: string;
+  marketplace: string;
+  version?: string;
+  description?: string;
+  skills: string[];
+  mcpServers: { name: string; type: string; target: string }[];
+  enabledByUser: boolean;
+}
+
+function pluginView(p: InstalledPlugin): PluginView {
+  return {
+    id: p.id,
+    name: p.name,
+    marketplace: p.marketplace,
+    ...(p.version ? { version: p.version } : {}),
+    ...(p.description ? { description: p.description } : {}),
+    skills: p.skills,
+    mcpServers: Object.entries(p.mcpServers).map(([name, d]) => ({ name, type: mcpTypeOf(d), target: mcpTargetOf(d) })),
+    enabledByUser: p.enabledByUser,
+  };
+}
 
 /** The sessions the Domains page counts (only their domain matters). */
 export interface DomainSessionSource {
@@ -34,10 +64,19 @@ export interface DomainSummary extends DomainInfo {
   totalSessions: number;
   memoryNotes: number;
   skills: string[];
+  /** The domain's own skills with their descriptions. */
+  ownSkills: { name: string; description: string }[];
   mcpServers: DomainMcpServerView[];
   mcpError?: string;
-  /** Effective state of each skill group, and whether it is this domain's own choice. */
-  skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+  /**
+   * Each skill group: on as a whole, whether that is the domain's own choice,
+   * and how many of its skills are on (some on, some off = "mixed").
+   */
+  skillGroupStates: Record<string, { on: boolean; own: boolean; onCount: number }>;
+  /** Each single skill (keyed "<group>:<name>"): on or off, and whether the domain chose it itself. */
+  skillStates: Record<string, { on: boolean; own: boolean }>;
+  /** Effective state of each installed plugin, and whether it is this domain's own choice. */
+  pluginStates: Record<string, { on: boolean; own: boolean }>;
 }
 
 /** Files of a domain editable from the Domains page, with their format. */
@@ -46,17 +85,36 @@ const DOMAIN_FILES: Record<string, "markdown" | "json"> = {
   "mcp.json": "json",
 };
 
-function summarize(domain: DomainInfo, global: DomainInfo, sessions: DomainSessionSource, groups: SkillGroup[]): DomainSummary {
+function summarize(
+  domain: DomainInfo,
+  global: DomainInfo,
+  sessions: DomainSessionSource,
+  groups: SkillGroup[],
+  plugins: InstalledPlugin[] = listInstalledPlugins(),
+): DomainSummary {
   const inDomain = sessions.listSessions().filter((s) => (s.domain ?? GLOBAL_DOMAIN) === domain.slug);
   const r = resolveDomain(domain.slug);
   const mcp = readDomainMcp(domain.slug);
   const own = domain.slug === GLOBAL_DOMAIN ? undefined : domain;
   const skillGroupStates: DomainSummary["skillGroupStates"] = {};
+  const skillStates: DomainSummary["skillStates"] = {};
   for (const g of groups) {
+    let onCount = 0;
+    for (const name of g.skills) {
+      const key = skillKey(g.id, name);
+      const on = isSkillOn(g.id, name, own, global);
+      if (on) onCount++;
+      skillStates[key] = { on, own: domain.skillChoices?.[key] !== undefined };
+    }
     skillGroupStates[g.id] = {
       on: isSkillGroupOn(g.id, own, global),
       own: domain.skillGroups?.[g.id] !== undefined,
+      onCount,
     };
+  }
+  const pluginStates: DomainSummary["pluginStates"] = {};
+  for (const p of plugins) {
+    pluginStates[p.id] = { on: isPluginOn(p, own, global), own: domain.plugins?.[p.id] !== undefined };
   }
   return {
     ...domain,
@@ -65,9 +123,15 @@ function summarize(domain: DomainInfo, global: DomainInfo, sessions: DomainSessi
     totalSessions: inDomain.length,
     memoryNotes: countMemoryNotes(domainMemoryDir(domain.slug)),
     skills: listDomainSkills(domain.slug),
+    ownSkills: listDomainSkills(domain.slug).map((name) => ({
+      name,
+      description: skillDescription(join(domainDir(domain.slug), "skills", name, "SKILL.md")),
+    })),
     mcpServers: domainMcpView(r),
     ...(mcp.error ? { mcpError: mcp.error } : {}),
     skillGroupStates,
+    skillStates,
+    pluginStates,
   };
 }
 
@@ -86,15 +150,70 @@ function validateDomainFile(name: string, content: string): string | null {
   }
 }
 
-export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource): void {
+export interface DomainRouteDeps {
+  /** Re-read the account's MCP servers (`claude mcp list`); injected in tests. */
+  refreshAccountMcp?: () => Promise<AccountMcpList>;
+}
+
+export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, deps: DomainRouteDeps = {}): void {
+  const refreshAccountMcp = deps.refreshAccountMcp ?? (() => refreshAccountMcpServers());
+
   api.get("/domains", (c) => {
     const global = ensureGlobalDomain();
     const groups = listSkillGroups();
+    const plugins = listInstalledPlugins();
+    // The account's servers come from a cache; a stale one is refreshed in
+    // the background (the page asks again when told it is stale).
+    const account = cachedAccountMcpServers();
+    const stale = isAccountMcpStale(account);
+    if (stale) void refreshAccountMcp().catch(() => {});
     return c.json({
       root: domainsRoot(),
       skillGroups: groups,
-      domains: listDomains().map((d) => summarize(d, global, sessions, groups)),
+      plugins: plugins.map(pluginView),
+      accountMcp: { at: account.at, stale, ...(account.error ? { error: account.error } : {}) },
+      domains: listDomains().map((d) => summarize(d, global, sessions, groups, plugins)),
     });
+  });
+
+  // Re-read the MCP servers of the user's Claude config and claude.ai account (~10 s).
+  api.post("/account-mcp-servers/refresh", async (c) => {
+    const list = await refreshAccountMcp();
+    return c.json({ at: list.at, servers: list.servers.length, ...(list.error ? { error: list.error } : {}) });
+  });
+
+  // A skill of the domain's own (<domain>/skills/<name>/SKILL.md): create, or remove (kept in .removed-skills).
+  api.post("/domains/:slug/skills", async (c) => {
+    const slug = c.req.param("slug");
+    const body = (await c.req.json().catch(() => ({}))) as { name?: unknown; description?: unknown };
+    const result = createDomainSkill(slug, body.name, body.description);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(summarize(slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!, ensureGlobalDomain(), sessions, listSkillGroups()), 201);
+  });
+
+  api.delete("/domains/:slug/skills/:name", (c) => {
+    const slug = c.req.param("slug");
+    const result = removeDomainSkill(slug, c.req.param("name"));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(summarize(slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!, ensureGlobalDomain(), sessions, listSkillGroups()));
+  });
+
+  // One MCP server of the domain's mcp.json: add or replace (URL or command), or remove.
+  api.put("/domains/:slug/mcp/:name", async (c) => {
+    const slug = c.req.param("slug");
+    const body = (await c.req.json().catch(() => ({}))) as { url?: unknown; command?: unknown; args?: unknown };
+    const result = setDomainMcpServer(slug, c.req.param("name"), body);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    const domain = slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!;
+    return c.json(summarize(domain, ensureGlobalDomain(), sessions, listSkillGroups()));
+  });
+
+  api.delete("/domains/:slug/mcp/:name", (c) => {
+    const slug = c.req.param("slug");
+    const result = setDomainMcpServer(slug, c.req.param("name"), null);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    const domain = slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!;
+    return c.json(summarize(domain, ensureGlobalDomain(), sessions, listSkillGroups()));
   });
 
   api.post("/domains", async (c) => {

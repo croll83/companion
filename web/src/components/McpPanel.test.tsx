@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 /**
- * Tests for the McpSection component (McpPanel.tsx).
+ * Tests for the McpSection component (McpPanel.tsx): the MCP servers of one
+ * session as its CLI sees them right now.
  *
- * McpSection displays MCP (Model Context Protocol) servers for a given session,
- * including server status, toggle/reconnect controls, and an add-server form.
- * It auto-fetches MCP status when the CLI is connected.
+ * A one-line summary ("3 connected · 1 need sign-in") that opens by itself
+ * when a server failed or waits for a sign-in; rows with live status,
+ * reconnect, details (config, error, tools), sign-in, and "turn off for this
+ * session (until reload)". What every session of the domain gets is managed
+ * on the Domains page ("Manage in domain"); the per-session "add server" form
+ * was removed on purpose (Marco, 2026-10-13). It auto-fetches the status
+ * when the CLI is connected.
  */
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
@@ -14,13 +19,14 @@ import type { McpServerDetail } from "../types.js";
 const mockSendMcpGetStatus = vi.fn();
 const mockSendMcpToggle = vi.fn();
 const mockSendMcpReconnect = vi.fn();
-const mockSendMcpSetServers = vi.fn();
+const mockSendMcpAuthenticate = vi.fn();
 
 vi.mock("../ws.js", () => ({
   sendMcpGetStatus: (...args: unknown[]) => mockSendMcpGetStatus(...args),
   sendMcpToggle: (...args: unknown[]) => mockSendMcpToggle(...args),
   sendMcpReconnect: (...args: unknown[]) => mockSendMcpReconnect(...args),
-  sendMcpSetServers: (...args: unknown[]) => mockSendMcpSetServers(...args),
+  sendMcpAuthenticate: (...args: unknown[]) => mockSendMcpAuthenticate(...args),
+  sendMcpOAuthCallback: vi.fn(),
 }));
 
 // ---- Mock Store ----
@@ -28,6 +34,9 @@ interface MockStoreState {
   mcpServers: Map<string, McpServerDetail[]>;
   cliConnected: Map<string, boolean>;
   sessions: Map<string, { mcp_servers?: { name: string; status: string }[] }>;
+  sdkSessions: { sessionId: string; domain?: string; legacyMemory?: boolean }[];
+  mcpAuth: Map<string, Record<string, { pending?: boolean; authUrl?: string; error?: string }>>;
+  setMcpAuth?: (...args: unknown[]) => void;
 }
 
 let mockState: MockStoreState;
@@ -37,6 +46,9 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     mcpServers: new Map(),
     cliConnected: new Map([["s1", true]]),
     sessions: new Map([["s1", { mcp_servers: [] }]]),
+    sdkSessions: [{ sessionId: "s1", domain: "herd" }],
+    mcpAuth: new Map(),
+    setMcpAuth: vi.fn(),
     ...overrides,
   };
 }
@@ -55,7 +67,6 @@ beforeEach(() => {
   resetStore();
 });
 
-// ---- Helper: create a McpServerDetail with sensible defaults ----
 function makeServer(overrides: Partial<McpServerDetail> = {}): McpServerDetail {
   return {
     name: "test-server",
@@ -67,416 +78,179 @@ function makeServer(overrides: Partial<McpServerDetail> = {}): McpServerDetail {
   };
 }
 
-describe("McpSection", () => {
-  it("renders 'MCP Servers' heading", () => {
-    // The section header should always be visible regardless of server state
+function withServers(servers: McpServerDetail[], extra: Partial<MockStoreState> = {}) {
+  resetStore({ mcpServers: new Map([["s1", servers]]), ...extra });
+}
+
+/** Open the server list (closed by default while everything is fine). */
+const expand = () => fireEvent.click(screen.getByRole("button", { name: /MCP Servers/ }));
+
+describe("McpSection summary", () => {
+  it("renders the heading and a summary of the servers, closed when all is fine", () => {
+    withServers([makeServer({ name: "a" }), makeServer({ name: "b" }), makeServer({ name: "c", status: "disabled" })]);
     render(<McpSection sessionId="s1" />);
-    expect(screen.getByText("MCP Servers")).toBeInTheDocument();
+    const header = screen.getByRole("button", { name: /MCP Servers/ });
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("2 connected · 1 off")).toBeInTheDocument();
+    expect(screen.queryByText("a")).toBeNull();
+    expand();
+    expect(screen.getByText("a")).toBeInTheDocument();
   });
 
-  it("shows empty state when no servers are configured", () => {
-    // When no MCP servers exist and the form is not open, show the empty message
-    render(<McpSection sessionId="s1" />);
-    expect(screen.getByText(/No MCP servers configured/)).toBeInTheDocument();
+  it("passes axe accessibility scan, open", async () => {
+    const { axe } = await import("vitest-axe");
+    withServers([makeServer({ name: "a", status: "failed", error: "boom" }), makeServer({ name: "b", status: "needs-auth" })]);
+    const { container } = render(<McpSection sessionId="s1" />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("shows 'Add one' link in empty state when CLI is connected", () => {
-    // The empty state should offer a clickable link to add a server
-    render(<McpSection sessionId="s1" />);
-    expect(screen.getByText("Add one")).toBeInTheDocument();
+  it("opens by itself when a server failed or needs a sign-in, and stays closed once closed", () => {
+    withServers([makeServer({ name: "ok" }), makeServer({ name: "bad", status: "failed" }), makeServer({ name: "auth", status: "needs-auth" })]);
+    const { rerender } = render(<McpSection sessionId="s1" />);
+    expect(screen.getByRole("button", { name: /MCP Servers/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("1 connected · 1 need sign-in · 1 failed")).toBeInTheDocument();
+    expand();
+    rerender(<McpSection sessionId="s1" />);
+    expect(screen.getByRole("button", { name: /MCP Servers/ })).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("does not show 'Add one' link in empty state when CLI is disconnected", () => {
-    // When disconnected, the add-one shortcut should not appear
-    resetStore({ cliConnected: new Map([["s1", false]]) });
+  it("links to the domain's MCP view, but not for a legacy session", () => {
+    withServers([makeServer()]);
+    const { unmount } = render(<McpSection sessionId="s1" />);
+    expect(screen.getByRole("link", { name: "Manage in domain ›" })).toHaveAttribute("href", "#/domains/herd/mcp");
+    unmount();
+    withServers([makeServer()], { sdkSessions: [{ sessionId: "s1", legacyMemory: true }] });
     render(<McpSection sessionId="s1" />);
-    expect(screen.getByText(/No MCP servers configured/)).toBeInTheDocument();
-    expect(screen.queryByText("Add one")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Manage in domain ›" })).toBeNull();
   });
 
-  it("renders server rows with correct status badges", () => {
-    // Each server should display its name and a status label derived from STATUS_STYLES
-    const servers = [
-      makeServer({ name: "alpha", status: "connected" }),
-      makeServer({ name: "beta", status: "failed" }),
-      makeServer({ name: "gamma", status: "disabled" }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
+  it("links GLOBAL for a session without a domain slug", () => {
+    withServers([makeServer()], { sdkSessions: [{ sessionId: "s1" }] });
     render(<McpSection sessionId="s1" />);
-
-    expect(screen.getByText("alpha")).toBeInTheDocument();
-    expect(screen.getByText("beta")).toBeInTheDocument();
-    expect(screen.getByText("gamma")).toBeInTheDocument();
-    expect(screen.getByText("Connected")).toBeInTheDocument();
-    expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Manage in domain ›" })).toHaveAttribute("href", "#/domains/global/mcp");
   });
 
-  it("shows toggle (disable/enable) buttons on servers", () => {
-    // Each server row should have a toggle button to disable or enable
-    const servers = [
-      makeServer({ name: "enabled-srv", status: "connected" }),
-      makeServer({ name: "disabled-srv", status: "disabled" }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
+  it("shows an empty state, without any add form", () => {
     render(<McpSection sessionId="s1" />);
-
-    // Connected server should have a "Disable server" button
-    expect(screen.getByTitle("Disable server")).toBeInTheDocument();
-    // Disabled server should have an "Enable server" button
-    expect(screen.getByTitle("Enable server")).toBeInTheDocument();
-  });
-
-  it("calls sendMcpToggle when toggle button is clicked", () => {
-    // Clicking the disable button should call sendMcpToggle(sessionId, name, false)
-    const servers = [makeServer({ name: "my-server", status: "connected" })];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    render(<McpSection sessionId="s1" />);
-
-    fireEvent.click(screen.getByTitle("Disable server"));
-    expect(mockSendMcpToggle).toHaveBeenCalledWith("s1", "my-server", false);
-  });
-
-  it("shows reconnect button for connected and failed servers", () => {
-    // Reconnect should appear for "connected" and "failed" statuses (per component logic)
-    const servers = [
-      makeServer({ name: "ok-srv", status: "connected" }),
-      makeServer({ name: "fail-srv", status: "failed" }),
-      makeServer({ name: "off-srv", status: "disabled" }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    render(<McpSection sessionId="s1" />);
-
-    // Two reconnect buttons: one for connected, one for failed
-    const reconnectButtons = screen.getAllByTitle("Reconnect server");
-    expect(reconnectButtons).toHaveLength(2);
-  });
-
-  it("calls sendMcpReconnect when reconnect button is clicked", () => {
-    // Clicking reconnect should call the correct WS function
-    const servers = [makeServer({ name: "fail-srv", status: "failed" })];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    render(<McpSection sessionId="s1" />);
-
-    fireEvent.click(screen.getByTitle("Reconnect server"));
-    expect(mockSendMcpReconnect).toHaveBeenCalledWith("s1", "fail-srv");
-  });
-
-  it("does not show reconnect button for disabled or connecting servers", () => {
-    // Reconnect should only appear for "connected" and "failed"
-    const servers = [
-      makeServer({ name: "disabled-srv", status: "disabled" }),
-      makeServer({ name: "connecting-srv", status: "connecting" }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    render(<McpSection sessionId="s1" />);
-
-    expect(screen.queryByTitle("Reconnect server")).not.toBeInTheDocument();
+    expect(screen.getByText("No MCP servers in this session.")).toBeInTheDocument();
+    expect(screen.queryByTitle("Add MCP server")).toBeNull();
   });
 });
 
-describe("McpSection add server form", () => {
-  it("opens form when add button is clicked", () => {
-    // Clicking the add button should reveal the AddServerForm
-    render(<McpSection sessionId="s1" />);
-
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-    expect(screen.getByText("Server Name")).toBeInTheDocument();
-    expect(screen.getByText("Type")).toBeInTheDocument();
-  });
-
-  it("form shows name input, type selector, and command/args fields for stdio", () => {
-    // The default form should show stdio-specific fields (Command, Args)
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    expect(screen.getByPlaceholderText("my-mcp-server")).toBeInTheDocument();
-    expect(screen.getByText("stdio")).toBeInTheDocument();
-    expect(screen.getByText("sse")).toBeInTheDocument();
-    expect(screen.getByText("http")).toBeInTheDocument();
-    expect(screen.getByText("Command")).toBeInTheDocument();
-    expect(screen.getByText(/Args/)).toBeInTheDocument();
-  });
-
-  it("form shows URL field when type is changed to sse", () => {
-    // Switching type to sse should replace command/args with a URL field
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    // Click the sse type button
-    fireEvent.click(screen.getByText("sse"));
-
-    expect(screen.getByText("URL")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("http://localhost:3000/mcp")).toBeInTheDocument();
-    // Command and Args should not be visible
-    expect(screen.queryByText("Command")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Args/)).not.toBeInTheDocument();
-  });
-
-  it("form shows URL field when type is changed to http", () => {
-    // Switching type to http should also show the URL field
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    fireEvent.click(screen.getByText("http"));
-
-    expect(screen.getByText("URL")).toBeInTheDocument();
-    expect(screen.queryByText("Command")).not.toBeInTheDocument();
-  });
-
-  it("submit calls sendMcpSetServers with stdio config", () => {
-    // Submitting a valid stdio form should call the WS function with correct config
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    fireEvent.change(screen.getByPlaceholderText("my-mcp-server"), {
-      target: { value: "my-new-server" },
-    });
-    fireEvent.change(
-      screen.getByPlaceholderText("npx -y @modelcontextprotocol/server-memory"),
-      { target: { value: "npx" } },
-    );
-    fireEvent.change(screen.getByPlaceholderText("--port 3000"), {
-      target: { value: "-y @mcp/server" },
-    });
-
-    fireEvent.click(screen.getByText("Add Server"));
-
-    expect(mockSendMcpSetServers).toHaveBeenCalledWith("s1", {
-      "my-new-server": {
-        type: "stdio",
-        command: "npx",
-        args: ["-y", "@mcp/server"],
-      },
-    });
-  });
-
-  it("submit calls sendMcpSetServers with sse config", () => {
-    // Submitting a valid sse form should call with url instead of command
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    fireEvent.change(screen.getByPlaceholderText("my-mcp-server"), {
-      target: { value: "remote-server" },
-    });
-    fireEvent.click(screen.getByText("sse"));
-    fireEvent.change(screen.getByPlaceholderText("http://localhost:3000/mcp"), {
-      target: { value: "http://example.com/mcp" },
-    });
-
-    fireEvent.click(screen.getByText("Add Server"));
-
-    expect(mockSendMcpSetServers).toHaveBeenCalledWith("s1", {
-      "remote-server": {
-        type: "sse",
-        url: "http://example.com/mcp",
-      },
-    });
-  });
-
-  it("submit button is disabled when form is incomplete", () => {
-    // With no name or command, the Add Server button should be disabled
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    const submitButton = screen.getByText("Add Server");
-    expect(submitButton).toBeDisabled();
-  });
-
-  it("cancel button closes the form", () => {
-    // Clicking Cancel should hide the form and return to normal view
-    render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    // Form should be visible
-    expect(screen.getByText("Server Name")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("Cancel"));
-
-    // Form should no longer be visible
-    expect(screen.queryByText("Server Name")).not.toBeInTheDocument();
-  });
-
-  it("hides empty state when add form is open", () => {
-    // When the form is showing, the empty state message should not appear
-    render(<McpSection sessionId="s1" />);
-    expect(screen.getByText(/No MCP servers configured/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-
-    expect(screen.queryByText(/No MCP servers configured/)).not.toBeInTheDocument();
-  });
-});
-
-describe("McpSection refresh and auto-fetch", () => {
-  it("refresh button calls sendMcpGetStatus", () => {
-    // Clicking the refresh button should trigger a status fetch
-    render(<McpSection sessionId="s1" />);
-
-    // Clear the auto-fetch call that happens on mount
-    mockSendMcpGetStatus.mockClear();
-
-    fireEvent.click(screen.getByTitle("Refresh MCP server status"));
+describe("McpSection status", () => {
+  it("auto-fetches the status when the CLI is connected, not when it is disconnected", () => {
+    const { unmount } = render(<McpSection sessionId="s1" />);
     expect(mockSendMcpGetStatus).toHaveBeenCalledWith("s1");
-  });
-
-  it("auto-fetches MCP status when CLI is connected (useEffect)", () => {
-    // On mount with cliConnected=true, sendMcpGetStatus should be called automatically
-    render(<McpSection sessionId="s1" />);
-    expect(mockSendMcpGetStatus).toHaveBeenCalledWith("s1");
-  });
-
-  it("does not auto-fetch when CLI is disconnected", () => {
-    // When cliConnected is false, no automatic status fetch should occur
+    unmount();
+    vi.clearAllMocks();
     resetStore({ cliConnected: new Map([["s1", false]]) });
     render(<McpSection sessionId="s1" />);
     expect(mockSendMcpGetStatus).not.toHaveBeenCalled();
   });
-});
 
-describe("McpSection disabled state when not connected", () => {
-  it("add button is disabled when CLI is not connected", () => {
-    // The add button should be non-interactive when disconnected
+  it("refreshes on request, and not while the CLI is disconnected", () => {
+    const { unmount } = render(<McpSection sessionId="s1" />);
+    mockSendMcpGetStatus.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh MCP server status" }));
+    expect(mockSendMcpGetStatus).toHaveBeenCalledWith("s1");
+    unmount();
     resetStore({ cliConnected: new Map([["s1", false]]) });
     render(<McpSection sessionId="s1" />);
-
-    const addButton = screen.getByTitle("Add MCP server");
-    expect(addButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh MCP server status" })).toBeDisabled();
   });
 
-  it("refresh button is disabled when CLI is not connected", () => {
-    // The refresh button should also be disabled when disconnected
-    resetStore({ cliConnected: new Map([["s1", false]]) });
+  it("falls back to the session's init list when detailed status is not available", () => {
+    resetStore({ sessions: new Map([["s1", { mcp_servers: [{ name: "from-init", status: "connected" }] }]]) });
     render(<McpSection sessionId="s1" />);
+    expand();
+    expect(screen.getByText("from-init")).toBeInTheDocument();
+  });
 
-    const refreshButton = screen.getByTitle("Refresh MCP server status");
-    expect(refreshButton).toBeDisabled();
+  it("renders the status badges", () => {
+    withServers([
+      makeServer({ name: "c" }),
+      makeServer({ name: "f", status: "failed" }),
+      makeServer({ name: "d", status: "disabled" }),
+      makeServer({ name: "g", status: "connecting" }),
+      makeServer({ name: "n", status: "needs-auth" }),
+    ]);
+    render(<McpSection sessionId="s1" />);
+    for (const label of ["Connected", "Failed", "Disabled", "Connecting", "Sign-in needed"]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it("reconnects connected and failed servers only", () => {
+    withServers([
+      makeServer({ name: "c" }),
+      makeServer({ name: "f", status: "failed" }),
+      makeServer({ name: "d", status: "disabled" }),
+      makeServer({ name: "g", status: "connecting" }),
+    ]);
+    render(<McpSection sessionId="s1" />);
+    const reconnects = screen.getAllByTitle("Reconnect server");
+    expect(reconnects).toHaveLength(2);
+    fireEvent.click(reconnects[0]);
+    expect(mockSendMcpReconnect).toHaveBeenCalledWith("s1", "c");
   });
 });
 
-describe("McpSection fallback from session mcp_servers", () => {
-  it("falls back to session mcp_servers when detailed servers are not available", () => {
-    // When mcpServers map is empty but session has mcp_servers, use those as fallback
-    resetStore({
-      mcpServers: new Map(),
-      sessions: new Map([
-        ["s1", { mcp_servers: [{ name: "fallback-srv", status: "connected" }] }],
-      ]),
-    });
-    render(<McpSection sessionId="s1" />);
-
-    expect(screen.getByText("fallback-srv")).toBeInTheDocument();
-    expect(screen.getByText("Connected")).toBeInTheDocument();
-  });
-});
-
-describe("McpSection server row expansion", () => {
-  it("expands to show config details when server name is clicked", () => {
-    // Clicking a server name should expand to show type, command, scope, etc.
-    const servers = [
+describe("McpSection details", () => {
+  it("shows config, URL, scope, error and tools when a server is opened", () => {
+    withServers([
       makeServer({
-        name: "detail-srv",
-        status: "connected",
-        config: { type: "stdio", command: "npx", args: ["-y", "mcp-tool"] },
-        scope: "project",
-      }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    render(<McpSection sessionId="s1" />);
-
-    // Click the server name to expand
-    fireEvent.click(screen.getByText("detail-srv"));
-
-    // Expanded details should show type, command, and scope
-    expect(screen.getByText("stdio")).toBeInTheDocument();
-    expect(screen.getByText(/npx/)).toBeInTheDocument();
-    expect(screen.getByText("project")).toBeInTheDocument();
-  });
-
-  it("shows tools list when server has tools", () => {
-    // Expanded view should list available tools
-    const servers = [
-      makeServer({
-        name: "tool-srv",
-        tools: [
-          { name: "read_file" },
-          { name: "write_file", annotations: { destructive: true } },
-        ],
-      }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    render(<McpSection sessionId="s1" />);
-
-    // Expand the server
-    fireEvent.click(screen.getByText("tool-srv"));
-
-    expect(screen.getByText("Tools (2)")).toBeInTheDocument();
-    expect(screen.getByText("read_file")).toBeInTheDocument();
-    expect(screen.getByText("write_file")).toBeInTheDocument();
-  });
-
-  it("shows error message when server has an error", () => {
-    // Failed servers with an error message should display it in the expanded view
-    const servers = [
-      makeServer({
-        name: "err-srv",
+        name: "web",
         status: "failed",
+        config: { type: "http", url: "http://localhost:3000/mcp" },
         error: "Connection refused on port 3000",
+        tools: [{ name: "read_file", annotations: { readOnly: true } }, { name: "write_file", annotations: { destructive: true } }],
       }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
+      makeServer({ name: "cmd" }),
+    ]);
     render(<McpSection sessionId="s1" />);
-
-    // Expand the server
-    fireEvent.click(screen.getByText("err-srv"));
-
+    fireEvent.click(screen.getByText("web"));
+    expect(screen.getByText("http://localhost:3000/mcp")).toBeInTheDocument();
     expect(screen.getByText("Connection refused on port 3000")).toBeInTheDocument();
+    expect(screen.getByText("Tools (2)")).toBeInTheDocument();
+    expect(screen.getByText("read_file")).toHaveAttribute("title", "readOnly");
+    fireEvent.click(screen.getByText("cmd"));
+    expect(screen.getByText("npx -y mcp-server")).toBeInTheDocument();
   });
 
-  it("shows URL in expanded view for sse/http servers", () => {
-    // SSE and HTTP servers should display their URL instead of command
-    const servers = [
-      makeServer({
-        name: "sse-srv",
-        config: { type: "sse", url: "http://example.com/mcp" },
-      }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
+  it("turns a server off or on for this session only, until it reloads", () => {
+    withServers([makeServer({ name: "on" }), makeServer({ name: "off", status: "disabled" })]);
     render(<McpSection sessionId="s1" />);
-
-    fireEvent.click(screen.getByText("sse-srv"));
-
-    expect(screen.getByText("http://example.com/mcp")).toBeInTheDocument();
+    expand();
+    fireEvent.click(screen.getByText("on"));
+    fireEvent.click(screen.getByRole("button", { name: "Turn off for this session (until reload)" }));
+    expect(mockSendMcpToggle).toHaveBeenCalledWith("s1", "on", false);
+    fireEvent.click(screen.getByText("off"));
+    fireEvent.click(screen.getByRole("button", { name: "Turn on for this session" }));
+    expect(mockSendMcpToggle).toHaveBeenCalledWith("s1", "off", true);
   });
 });
 
-describe("McpSection accessibility", () => {
-  it("passes axe accessibility checks with no servers", async () => {
-    const { axe } = await import("vitest-axe");
-    resetStore();
-    const { container } = render(<McpSection sessionId="s1" />);
-    const results = await axe(container);
-    expect(results).toHaveNoViolations();
+// OAuth servers waiting for a login (Claude reports "needs-auth"; Codex
+// "notLoggedIn" is mapped to it) get a sign-in entry point in their row.
+describe("McpSection sign-in", () => {
+  it("shows the sign-in button for a server that needs a login, and starts the login", () => {
+    withServers([makeServer({ name: "brain", status: "needs-auth", config: { type: "http", url: "https://b/mcp" } })]);
+    render(<McpSection sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(mockSendMcpAuthenticate).toHaveBeenCalledWith("s1", "brain");
   });
 
-  it("passes axe accessibility checks with servers", async () => {
-    const { axe } = await import("vitest-axe");
-    const servers = [
-      makeServer({ name: "a-srv", status: "connected" }),
-      makeServer({ name: "b-srv", status: "failed" }),
-    ];
-    resetStore({ mcpServers: new Map([["s1", servers]]) });
-    const { container } = render(<McpSection sessionId="s1" />);
-    const results = await axe(container);
-    expect(results).toHaveNoViolations();
+  it("keeps the login visible while it runs, even once the status changed", () => {
+    withServers([makeServer({ name: "brain", status: "connecting" })], { mcpAuth: new Map([["s1", { brain: { authUrl: "https://login" } }]]) });
+    render(<McpSection sessionId="s1" />);
+    expand();
+    expect(screen.getByRole("link", { name: "Open the sign-in page" })).toHaveAttribute("href", "https://login");
   });
 
-  it("passes axe accessibility checks with add form open", async () => {
-    const { axe } = await import("vitest-axe");
-    resetStore();
-    const { container } = render(<McpSection sessionId="s1" />);
-    fireEvent.click(screen.getByTitle("Add MCP server"));
-    const results = await axe(container);
-    expect(results).toHaveNoViolations();
+  it("shows no sign-in for connected servers", () => {
+    withServers([makeServer()]);
+    render(<McpSection sessionId="s1" />);
+    expand();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
   });
 });

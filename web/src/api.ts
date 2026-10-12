@@ -463,11 +463,32 @@ export interface SessionFolderPreview {
 
 export interface DomainMcpServerView {
   name: string;
-  source: "global" | "domain";
+  /** "account": the user's own Claude config or a claude.ai connector (Claude-only). */
+  source: "global" | "domain" | "account";
   enabled: boolean;
-  /** Turned off in GLOBAL, hence everywhere. */
+  /** The domain chose this state itself (else it follows GLOBAL; for GLOBAL, the default "on"). */
+  own: boolean;
+  /** Off only because GLOBAL turns it off (the domain has no choice of its own). */
   disabledGlobally?: boolean;
   type: string;
+  /** URL, or command and args (env and headers are never sent). */
+  target: string;
+  /** Account servers: health from the last `claude mcp list`. */
+  health?: string;
+}
+
+/** A Claude Code marketplace plugin installed for the user, turned on/off per domain. */
+export interface PluginInfo {
+  /** `name@marketplace`. */
+  id: string;
+  name: string;
+  marketplace: string;
+  version?: string;
+  description?: string;
+  skills: string[];
+  mcpServers: { name: string; type: string; target: string }[];
+  /** On in the user's own settings.json: the state when no domain decides. */
+  enabledByUser: boolean;
 }
 
 export interface SkillGroupInfo {
@@ -475,6 +496,8 @@ export interface SkillGroupInfo {
   label: string;
   description: string;
   skills: string[];
+  /** One-line description per skill (from SKILL.md), when known. */
+  descriptions: Record<string, string>;
   /** How Codex sessions get the group: linked, turned off in config.toml, or Claude-only. */
   codex: "linked" | "toggled" | "unsupported";
 }
@@ -484,25 +507,51 @@ export interface DomainSummary {
   name: string;
   createdAt: number;
   description?: string;
-  mcpDisabled: string[];
+  /** MCP servers turned on/off by the domain itself (name → on). */
+  mcp: Record<string, boolean>;
   chrome: boolean;
   /** Claude only, used when chrome is on: "local" (default) or a browser deviceId. */
   chromeBrowser: string;
   plugins?: Record<string, boolean>;
   skillGroups?: Record<string, boolean>;
+  /** Single skills turned on/off by the domain itself, keyed "<group>:<name>". */
+  skillChoices?: Record<string, boolean>;
   path: string;
   sessionCount: number;
   totalSessions: number;
   memoryNotes: number;
   skills: string[];
+  /** The domain's own skills with their descriptions. */
+  ownSkills: { name: string; description: string }[];
   mcpServers: DomainMcpServerView[];
   mcpError?: string;
-  skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+  skillGroupStates: Record<string, { on: boolean; own: boolean; onCount: number }>;
+  /** Each single skill ("<group>:<name>"): on, and whether the domain chose it itself. */
+  skillStates: Record<string, { on: boolean; own: boolean }>;
+  /** Effective state of each installed plugin, and whether it is this domain's own choice. */
+  pluginStates: Record<string, { on: boolean; own: boolean }>;
+}
+
+type Choices = Record<string, boolean | null>;
+
+/** A change to a domain: text fields, and partial on/off maps (null = back to the inherited state). */
+export interface DomainPatch {
+  name?: string;
+  description?: string;
+  chrome?: boolean;
+  chromeBrowser?: string;
+  mcp?: Choices;
+  plugins?: Choices;
+  skillGroups?: Choices;
+  skillChoices?: Choices;
 }
 
 export interface DomainsResponse {
   root: string;
   skillGroups: SkillGroupInfo[];
+  plugins: PluginInfo[];
+  /** The cached list of account MCP servers: when it was read, and whether it is being refreshed. */
+  accountMcp?: { at: number; stale: boolean; error?: string };
   domains: DomainSummary[];
 }
 
@@ -996,10 +1045,17 @@ export const api = {
   // Domains
   listDomains: () => get<DomainsResponse>("/domains"),
   createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),
-  updateDomain: (
-    slug: string,
-    changes: Partial<Pick<DomainSummary, "name" | "description" | "mcpDisabled" | "chrome" | "chromeBrowser" | "plugins" | "skillGroups">>,
-  ) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
+  /**
+   * Change a domain. The on/off maps are partial: true/false sets a choice,
+   * null removes it (back to GLOBAL's), keys not sent are left alone.
+   */
+  updateDomain: (slug: string, changes: DomainPatch) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
+  /** Create a skill of the domain's own (<domain>/skills/<name>/SKILL.md). */
+  createDomainSkill: (slug: string, name: string, description: string) =>
+    post<DomainSummary>(`/domains/${encodeURIComponent(slug)}/skills`, { name, description }),
+  /** Remove a skill of the domain's own (moved to .removed-skills, never deleted). */
+  removeDomainSkill: (slug: string, name: string) =>
+    del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`),
   deleteDomain: (slug: string) => del<{ ok: true; keptOnDisk: string }>(`/domains/${encodeURIComponent(slug)}`),
   readDomainFile: (slug: string, name: string) =>
     get<{ path: string; content: string; format: ConfigFileFormat; readOnly: boolean }>(
@@ -1007,6 +1063,13 @@ export const api = {
     ),
   writeDomainFile: (slug: string, name: string, content: string) =>
     put<{ ok: boolean; path: string }>(`/domains/${encodeURIComponent(slug)}/file`, { name, content }),
+  /** Add or replace one server in the domain's mcp.json: a URL (HTTP) or a command (stdio). */
+  setDomainMcpServer: (slug: string, name: string, server: { url: string } | { command: string; args?: string[] }) =>
+    put<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`, server),
+  /** Re-read the MCP servers of the user's Claude config and claude.ai account (`claude mcp list`, ~10 s). */
+  refreshAccountMcp: () => post<{ at: number; servers: number; error?: string }>("/account-mcp-servers/refresh", {}),
+  removeDomainMcpServer: (slug: string, name: string) =>
+    del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`),
 
   /** Browsers connected to Claude in Chrome, listed by a short isolated Claude query. `force` bypasses the brief cache. */
   listChromeBrowsers: (force?: boolean) =>

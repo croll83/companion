@@ -1629,3 +1629,99 @@ describe("memory folder and Claude in Chrome", () => {
     }
   });
 });
+
+// ─── MCP OAuth login (mcp_authenticate / mcp_oauth_callback_url) ─────────────
+// Flow verified against CLI 2.1.293 with a mock OAuth MCP server: the CLI
+// returns the sign-in URL; with the browser on this machine it connects the
+// server by itself (watched via mcp_status); a pasted redirect is submitted
+// with mcp_oauth_callback_url and needs mcp_reconnect to apply in place.
+describe("MCP OAuth login", () => {
+  let ws: ReturnType<typeof createMockSocket>;
+  beforeEach(() => {
+    ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const sent = () => ws.send.mock.calls.map((c: unknown[]) => JSON.parse(String(c[0]).trim()));
+  const lastRequest = (subtype: string) =>
+    [...sent()].reverse().find((m: { type: string; request?: { subtype?: string } }) => m.type === "control_request" && m.request?.subtype === subtype);
+  const reply = (req: { request_id: string }, response: unknown, error?: string) =>
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_response",
+      response: error
+        ? { subtype: "error", request_id: req.request_id, error }
+        : { subtype: "success", request_id: req.request_id, response },
+    }));
+  const authMessages = () => browserMessageCb.mock.calls.map((c) => c[0]).filter((m: { type: string }) => m.type === "mcp_auth");
+
+  it("sends the sign-in URL, then reports done once the server is connected", async () => {
+    vi.useFakeTimers();
+    expect(adapter.send({ type: "mcp_authenticate", serverName: "brain" })).toBe(true);
+    const req = lastRequest("mcp_authenticate");
+    expect(req.request).toEqual({ subtype: "mcp_authenticate", serverName: "brain" });
+    reply(req, { authUrl: "https://login/authorize?x=1", requiresUserAction: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authMessages()).toEqual([{ type: "mcp_auth", serverName: "brain", authUrl: "https://login/authorize?x=1" }]);
+
+    // Still waiting for the user: no "done".
+    await vi.advanceTimersByTimeAsync(3_000);
+    reply(lastRequest("mcp_status"), { mcpServers: [{ name: "brain", status: "needs-auth" }] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authMessages()).toHaveLength(1);
+
+    // Signed in with a browser on this machine: the CLI connected the server.
+    await vi.advanceTimersByTimeAsync(3_000);
+    reply(lastRequest("mcp_status"), { mcpServers: [{ name: "brain", status: "connected" }] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authMessages().at(-1)).toEqual({ type: "mcp_auth", serverName: "brain", done: true });
+    expect(browserMessageCb).toHaveBeenCalledWith({ type: "mcp_status", servers: [{ name: "brain", status: "connected" }] });
+  });
+
+  it("keeps watching through a failed status read, and stops after the time limit", async () => {
+    vi.useFakeTimers();
+    adapter.send({ type: "mcp_authenticate", serverName: "brain" });
+    reply(lastRequest("mcp_authenticate"), { authUrl: "https://login" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    reply(lastRequest("mcp_status"), undefined, "busy");
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 6_000);
+    const polls = sent().filter((m: { request?: { subtype?: string } }) => m.request?.subtype === "mcp_status").length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sent().filter((m: { request?: { subtype?: string } }) => m.request?.subtype === "mcp_status").length).toBe(polls);
+    expect(authMessages().some((m: { done?: boolean }) => m.done)).toBe(false);
+  });
+
+  it("reports done at once when no sign-in is needed, and the CLI's refusal as an error", async () => {
+    adapter.send({ type: "mcp_authenticate", serverName: "a" });
+    reply(lastRequest("mcp_authenticate"), {});
+    adapter.send({ type: "mcp_authenticate", serverName: "b" });
+    reply(lastRequest("mcp_authenticate"), undefined, "Server not found: b");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(authMessages()).toEqual([
+      { type: "mcp_auth", serverName: "a", done: true },
+      { type: "mcp_auth", serverName: "b", error: "Server not found: b" },
+    ]);
+  });
+
+  it("submits a pasted redirect, reconnects the server in place, then reports done", async () => {
+    expect(adapter.send({ type: "mcp_oauth_callback", serverName: "brain", callbackUrl: "http://localhost:7498/callback?code=c&state=s" })).toBe(true);
+    const cb = lastRequest("mcp_oauth_callback_url");
+    expect(cb.request).toEqual({ subtype: "mcp_oauth_callback_url", serverName: "brain", callbackUrl: "http://localhost:7498/callback?code=c&state=s" });
+    reply(cb, {});
+    await new Promise((r) => setTimeout(r, 0));
+    const rc = lastRequest("mcp_reconnect");
+    expect(rc.request).toEqual({ subtype: "mcp_reconnect", serverName: "brain" });
+    reply(rc, {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(lastRequest("mcp_status")).toBeDefined();
+    expect(authMessages()).toEqual([{ type: "mcp_auth", serverName: "brain", done: true }]);
+  });
+
+  it("reports a refused pasted redirect as an error", async () => {
+    adapter.send({ type: "mcp_oauth_callback", serverName: "brain", callbackUrl: "nope" });
+    reply(lastRequest("mcp_oauth_callback_url"), undefined, "Invalid callback URL: missing authorization code.");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(authMessages()).toEqual([{ type: "mcp_auth", serverName: "brain", error: "Invalid callback URL: missing authorization code." }]);
+    expect(lastRequest("mcp_reconnect")).toBeUndefined();
+  });
+});

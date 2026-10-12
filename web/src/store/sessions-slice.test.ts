@@ -286,6 +286,22 @@ describe("MCP Servers", () => {
     expect(useStore.getState().mcpServers.get("s1")).toEqual(servers);
   });
 
+  // MCP OAuth logins in progress, per session and server; null clears one.
+  it("setMcpAuth: sets and clears the login state of one server", () => {
+    useStore.getState().setMcpAuth("s1", "brain", { pending: true });
+    useStore.getState().setMcpAuth("s1", "other", { authUrl: "https://login" });
+    expect(useStore.getState().mcpAuth.get("s1")).toEqual({ brain: { pending: true }, other: { authUrl: "https://login" } });
+    useStore.getState().setMcpAuth("s1", "brain", null);
+    expect(useStore.getState().mcpAuth.get("s1")).toEqual({ other: { authUrl: "https://login" } });
+  });
+
+  it("removeSession: clears its MCP logins", () => {
+    useStore.getState().addSession(makeSession("s1"));
+    useStore.getState().setMcpAuth("s1", "brain", { pending: true });
+    useStore.getState().removeSession("s1");
+    expect(useStore.getState().mcpAuth.has("s1")).toBe(false);
+  });
+
   it("setMcpServers: replaces existing servers", () => {
     const first = [{ name: "old", status: "connected" as const, config: { type: "stdio" }, scope: "project" }];
     const second = [{ name: "new", status: "failed" as const, config: { type: "sse" }, scope: "user" }];

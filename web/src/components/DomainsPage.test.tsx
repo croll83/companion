@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 /**
- * The Domains page lists domains with their folder, sessions, memory, skills,
- * MCP servers and skill groups (on/off per domain), Claude in Chrome
- * (Claude Code only), edits CLAUDE.md / mcp.json, creates domains, and
- * removes one only when no session uses it (files stay on disk).
+ * The Domains page container: on phones the list of domains, then one
+ * domain (#/domains/<slug>); on desktop both side by side (GLOBAL when none
+ * is chosen). Every change goes to the API as a partial update and the page
+ * reloads every domain (states depend on GLOBAL). Errors are shown; a stale
+ * list of account MCP servers is refreshed once when the page opens.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const mockApi = vi.hoisted(() => ({
@@ -17,198 +18,156 @@ const mockApi = vi.hoisted(() => ({
   readDomainFile: vi.fn(),
   writeDomainFile: vi.fn(),
   listChromeBrowsers: vi.fn(),
+  setDomainMcpServer: vi.fn(),
+  removeDomainMcpServer: vi.fn(),
+  refreshAccountMcp: vi.fn(),
+  createDomainSkill: vi.fn(),
+  removeDomainSkill: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
+vi.mock("../ws.js", () => ({ sendMcpAuthenticate: vi.fn(), sendMcpOAuthCallback: vi.fn() }));
 
 import { DomainsPage } from "./DomainsPage.js";
+import { domainsResponse, herdDomain } from "../test-fixtures/domains.js";
 
-const base = { createdAt: 0, mcpDisabled: [], chrome: false, chromeBrowser: "local", memoryNotes: 0, skills: [], mcpServers: [], skillGroupStates: {} };
-const groups = [
-  { id: "user", label: "Your skills", description: "In ~/.claude/skills", skills: ["foundry-poc"], codex: "linked" },
-  { id: "claude-ai", label: "claude.ai skills", description: "Synced", skills: ["pdf", "docs"], codex: "unsupported" },
-];
-const response = () => ({
-  root: "/home/u",
-  skillGroups: groups,
-  domains: [
-    { ...base, slug: "global", name: "GLOBAL", path: "/home/u/companion_domain_global", sessionCount: 4, totalSessions: 5,
-      skillGroupStates: { user: { on: true, own: false }, "claude-ai": { on: true, own: false } } },
-    { ...base, slug: "herd", name: "Herd", description: "The herd project", path: "/home/u/companion_domain_herd", sessionCount: 0, totalSessions: 0,
-      memoryNotes: 3, skills: ["herd-hello"], mcpDisabled: ["gh"],
-      mcpServers: [
-        { name: "gh", source: "global", enabled: false, type: "stdio" },
-        { name: "noisy", source: "global", enabled: false, disabledGlobally: true, type: "stdio" },
-        { name: "ping", source: "domain", enabled: true, type: "http" },
-      ],
-      skillGroupStates: { user: { on: false, own: true }, "claude-ai": { on: true, own: false } } },
-  ],
-});
+const originalMatchMedia = window.matchMedia;
+function desktop(on: boolean) {
+  window.matchMedia = vi.fn(() => ({ matches: on, addEventListener: vi.fn(), removeEventListener: vi.fn() })) as unknown as typeof window.matchMedia;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockApi.listDomains.mockResolvedValue(response());
-  mockApi.updateDomain.mockResolvedValue({});
-  mockApi.createDomain.mockResolvedValue({});
+  desktop(false);
+  window.location.hash = "";
+  mockApi.listDomains.mockResolvedValue(domainsResponse());
+  for (const fn of ["createDomain", "updateDomain", "setDomainMcpServer", "removeDomainMcpServer", "createDomainSkill", "removeDomainSkill"] as const) {
+    mockApi[fn].mockResolvedValue({});
+  }
   mockApi.deleteDomain.mockResolvedValue({ ok: true });
   mockApi.readDomainFile.mockResolvedValue({ path: "/home/u/companion_domain_herd/CLAUDE.md", content: "# Herd", format: "markdown", readOnly: false });
-  mockApi.writeDomainFile.mockResolvedValue({ ok: true });
-  mockApi.listChromeBrowsers.mockResolvedValue({
-    browsers: [
-      { deviceId: "dev-linux", name: "Chrome", osPlatform: "Linux", isLocal: true, inUse: true },
-      { deviceId: "dev-mac", name: "Safari-Chrome", osPlatform: "macOS", isLocal: false, inUse: false },
-    ],
-  });
+  mockApi.refreshAccountMcp.mockResolvedValue({ at: Date.now(), servers: 3 });
+  mockApi.listChromeBrowsers.mockResolvedValue({ browsers: [] });
 });
-
-/** A clone of the response where Herd has Claude in Chrome on. */
-function chromeOnResponse(chromeBrowser = "local") {
-  const data = response();
-  data.domains[1] = { ...data.domains[1], chrome: true, chromeBrowser };
-  return data;
-}
-
-const herdCard = () => screen.getByRole("article", { name: "Domain Herd" });
+afterEach(() => { window.matchMedia = originalMatchMedia; });
 
 describe("DomainsPage", () => {
-  it("renders every domain with its stats", async () => {
+  it("on phones shows the list of domains first", async () => {
     render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
+    expect(await screen.findByRole("navigation", { name: "Domains" })).toBeInTheDocument();
     expect(screen.getByText(/Domain folders live in/)).toHaveTextContent("/home/u");
-    const herd = within(herdCard());
-    expect(herd.getByText("The herd project")).toBeInTheDocument();
-    expect(herd.getByText("herd-hello")).toBeInTheDocument();
-    expect(herd.getByText("3")).toBeInTheDocument();
-    expect(herd.getByText("off in GLOBAL")).toBeInTheDocument();
-    expect(herd.getByText(/Requires Claude Code \(Codex sessions are not affected\)/)).toBeInTheDocument();
-    // GLOBAL cannot be removed: no Remove button in its card.
-    expect(within(screen.getByRole("article", { name: "Domain GLOBAL" })).queryByRole("button", { name: "Remove" })).toBeNull();
+    expect(screen.queryByRole("article")).toBeNull();
   });
 
-  it("passes axe accessibility scan", async () => {
+  it("passes axe accessibility scan on the list and on a domain", async () => {
     const { axe } = await import("vitest-axe");
-    const { container } = render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
+    const { container, unmount } = render(<DomainsPage />);
+    await screen.findByRole("navigation", { name: "Domains" });
     expect(await axe(container)).toHaveNoViolations();
-  });
-
-  it("toggles MCP servers, skill groups and Chrome per domain", async () => {
-    render(<DomainsPage />);
+    unmount();
+    const second = render(<DomainsPage slug="herd" />);
     await screen.findByRole("article", { name: "Domain Herd" });
-    const herd = within(herdCard());
-    fireEvent.click(herd.getByRole("switch", { name: "MCP server gh" }));
-    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { mcpDisabled: [] }));
-    fireEvent.click(herd.getByRole("switch", { name: "MCP server ping" }));
-    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { mcpDisabled: ["gh", "ping"] }));
-    // A server switched off in GLOBAL cannot be switched on per domain.
-    expect(herd.getByRole("switch", { name: "MCP server noisy" })).toBeDisabled();
-    fireEvent.click(herd.getByRole("switch", { name: "Skill group Your skills" }));
-    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { skillGroups: { user: true } }));
-    fireEvent.click(herd.getByRole("switch", { name: "Claude in Chrome" }));
-    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { chrome: true }));
-    expect(mockApi.listDomains.mock.calls.length).toBeGreaterThan(1);
+    expect(await axe(second.container)).toHaveNoViolations();
   });
 
-  it("creates a domain", async () => {
-    render(<DomainsPage />);
-    const form = await screen.findByRole("form", { name: "New domain" });
-    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "Design" } });
-    fireEvent.change(within(form).getByLabelText(/What it is about/), { target: { value: "UI work" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Create domain" }));
-    await waitFor(() => expect(mockApi.createDomain).toHaveBeenCalledWith("Design", "UI work"));
+  it("on phones shows one domain when chosen, and says so when it does not exist", async () => {
+    const { unmount } = render(<DomainsPage slug="herd" />);
+    expect(await screen.findByRole("article", { name: "Domain Herd" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Domains" })).toBeNull();
+    unmount();
+    render(<DomainsPage slug="nope" />);
+    expect(await screen.findByText('No domain "nope".')).toBeInTheDocument();
   });
 
-  // Removing never deletes files, and a domain in use cannot be removed.
-  it("removes an unused domain after confirmation, keeping its files", async () => {
+  it("on desktop shows the list next to the chosen domain, GLOBAL when none is chosen", async () => {
+    desktop(true);
     render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    fireEvent.click(within(herdCard()).getByRole("button", { name: "Remove" }));
-    expect(within(herdCard()).getByText(/folder and files stay on disk/)).toBeInTheDocument();
-    fireEvent.click(within(herdCard()).getByRole("button", { name: "Cancel" }));
-    fireEvent.click(within(herdCard()).getByRole("button", { name: "Remove" }));
-    fireEvent.click(within(herdCard()).getByRole("button", { name: "Remove domain" }));
+    expect(await screen.findByRole("article", { name: "Domain GLOBAL" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Domains" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /MCP servers/ })).toBeInTheDocument();
+  });
+
+  it("sends a switch as a partial update and reloads every domain", async () => {
+    desktop(true);
+    render(<DomainsPage slug="herd" tab="mcp" />);
+    fireEvent.click(await screen.findByRole("switch", { name: "MCP server ping" }));
+    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { mcp: { ping: false } }));
+    await waitFor(() => expect(mockApi.listDomains).toHaveBeenCalledTimes(2));
+  });
+
+  it("adds and removes servers and skills, creates a domain", async () => {
+    desktop(true);
+    const { unmount } = render(<DomainsPage slug="herd" tab="mcp" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add server" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "brain" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "http://h/mcp" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(mockApi.setDomainMcpServer).toHaveBeenCalledWith("herd", "brain", { url: "http://h/mcp" }));
+    fireEvent.click(screen.getByRole("button", { name: "Details of ping" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove MCP server ping" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(mockApi.removeDomainMcpServer).toHaveBeenCalledWith("herd", "ping"));
+    unmount();
+
+    render(<DomainsPage slug="herd" tab="skills" />);
+    fireEvent.click(await screen.findByRole("button", { name: "New skill" }));
+    fireEvent.change(screen.getByLabelText(/Name \(lowercase/), { target: { value: "deploy-check" } });
+    fireEvent.change(screen.getByLabelText("When the model should use it"), { target: { value: "Before merging" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(mockApi.createDomainSkill).toHaveBeenCalledWith("herd", "deploy-check", "Before merging"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove skill herd-hello" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(mockApi.removeDomainSkill).toHaveBeenCalledWith("herd", "herd-hello"));
+
+    fireEvent.click(screen.getByRole("button", { name: "New domain" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Satoshi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create domain" }));
+    await waitFor(() => expect(mockApi.createDomain).toHaveBeenCalledWith("Satoshi", undefined));
+  });
+
+  it("removes an unused domain and goes back to the list", async () => {
+    mockApi.listDomains.mockResolvedValue(domainsResponse({ domains: [herdDomain({ totalSessions: 0 })] }));
+    render(<DomainsPage slug="herd" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Domain actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove domain…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove domain" }));
     await waitFor(() => expect(mockApi.deleteDomain).toHaveBeenCalledWith("herd"));
-  });
-
-  it("does not offer to remove a domain in use", async () => {
-    const data = response();
-    data.domains[1].totalSessions = 2;
-    mockApi.listDomains.mockResolvedValue(data);
-    render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    expect(within(herdCard()).getByRole("button", { name: "Remove" })).toBeDisabled();
-    expect(within(herdCard()).getByText(/Used by 2 sessions/)).toBeInTheDocument();
+    await waitFor(() => expect(window.location.hash).toBe("#/domains"));
   });
 
   it("edits a domain's CLAUDE.md through the domain file routes", async () => {
-    render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    fireEvent.click(within(herdCard()).getByRole("button", { name: "Edit CLAUDE.md" }));
-    const editor = await screen.findByRole("dialog");
-    expect(mockApi.readDomainFile).toHaveBeenCalledWith("herd", "CLAUDE.md");
-    const textarea = await within(editor).findByLabelText(/Contents of/);
-    fireEvent.change(textarea, { target: { value: "# Herd rules" } });
-    fireEvent.click(within(editor).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(mockApi.writeDomainFile).toHaveBeenCalledWith("herd", "CLAUDE.md", "# Herd rules"));
-    fireEvent.click(within(editor).getByRole("button", { name: "Close" }));
-    expect(screen.queryByRole("dialog")).toBeNull();
+    render(<DomainsPage slug="herd" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Domain actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit CLAUDE.md" }));
+    await waitFor(() => expect(mockApi.readDomainFile).toHaveBeenCalledWith("herd", "CLAUDE.md"));
+    expect(await screen.findByText("Herd: CLAUDE.md")).toBeInTheDocument();
   });
 
-  it("shows API errors", async () => {
-    mockApi.listDomains.mockRejectedValueOnce(new Error("offline"));
-    render(<DomainsPage />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("offline");
+  it("shows a failed load and a failed change", async () => {
+    mockApi.listDomains.mockRejectedValueOnce(new Error("server down"));
+    const { unmount } = render(<DomainsPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("server down");
+    unmount();
+    desktop(true);
+    mockApi.updateDomain.mockRejectedValue(new Error("mcp \"a\" must be true, false or null"));
+    render(<DomainsPage slug="herd" tab="mcp" />);
+    fireEvent.click(await screen.findByRole("switch", { name: "MCP server ping" }));
+    expect(await screen.findByText(/must be true, false or null/)).toBeInTheDocument();
+    mockApi.deleteDomain.mockRejectedValue(new Error("in use"));
   });
 
-  it("shows a failed update", async () => {
-    mockApi.updateDomain.mockRejectedValue(new Error("bad toggle"));
-    render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    fireEvent.click(within(herdCard()).getByRole("switch", { name: "Claude in Chrome" }));
-    expect(await screen.findByText("bad toggle")).toBeInTheDocument();
-  });
-
-  // With Chrome on, a per-domain browser selector lists the connected browsers
-  // (local/remote) and defaults to "Prefer local browser".
-  it("shows the per-domain browser selector when Chrome is on and selects a browser", async () => {
-    mockApi.listDomains.mockResolvedValue(chromeOnResponse());
-    render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    const herd = within(herdCard());
-    const select = await herd.findByLabelText("Browser to drive");
-    expect(select).toHaveValue("local");
-    // Each connected browser is labelled name + platform + local/remote.
-    expect(await herd.findByRole("option", { name: "Chrome (Linux) · local" })).toBeInTheDocument();
-    expect(herd.getByRole("option", { name: "Safari-Chrome (macOS) · remote" })).toBeInTheDocument();
-    await waitFor(() => expect(mockApi.listChromeBrowsers).toHaveBeenCalled());
-    // Picking the Mac saves its deviceId (the VPS case: drive the remote Mac).
-    fireEvent.change(select, { target: { value: "dev-mac" } });
-    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { chromeBrowser: "dev-mac" }));
-  });
-
-  it("keeps the selector usable when the browser list cannot be fetched", async () => {
-    mockApi.listDomains.mockResolvedValue(chromeOnResponse());
-    mockApi.listChromeBrowsers.mockResolvedValue({ browsers: [], error: "Chrome is off" });
-    render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    const herd = within(herdCard());
-    expect(await herd.findByRole("status")).toHaveTextContent("Chrome is off");
-    // Prefer-local still available, plus a manual deviceId field.
-    const select = herd.getByLabelText("Browser to drive");
-    expect(select).toHaveValue("local");
-    fireEvent.change(select, { target: { value: "__manual__" } });
-    const manual = herd.getByLabelText("Browser deviceId");
-    fireEvent.change(manual, { target: { value: "  typed-device  " } });
-    fireEvent.keyDown(manual, { key: "Enter" });
-    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { chromeBrowser: "typed-device" }));
-  });
-
-  // A saved deviceId that is not in the fetched list shows up as an editable
-  // manual value so the choice is never silently lost.
-  it("surfaces a saved deviceId that is not in the list as a manual value", async () => {
-    mockApi.listDomains.mockResolvedValue(chromeOnResponse("offline-device"));
-    render(<DomainsPage />);
-    await screen.findByRole("article", { name: "Domain Herd" });
-    const herd = within(herdCard());
-    expect(await herd.findByLabelText("Browser deviceId")).toHaveValue("offline-device");
+  it("refreshes a stale account list once when the page opens, and on request", async () => {
+    desktop(true);
+    mockApi.listDomains.mockResolvedValue(domainsResponse({ accountMcp: { at: 0, stale: true } }));
+    let finish!: (v: unknown) => void;
+    mockApi.refreshAccountMcp.mockReturnValue(new Promise((r) => { finish = r; }));
+    render(<DomainsPage slug="herd" tab="mcp" />);
+    expect(await screen.findByText(/being read/)).toBeInTheDocument();
+    await act(async () => { finish({ at: 1, servers: 0 }); });
+    // Still stale after the reload: not asked again (no loop).
+    await waitFor(() => expect(mockApi.listDomains).toHaveBeenCalledTimes(2));
+    expect(mockApi.refreshAccountMcp).toHaveBeenCalledTimes(1);
+    mockApi.refreshAccountMcp.mockResolvedValue({ at: 2, servers: 1 });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(mockApi.refreshAccountMcp).toHaveBeenCalledTimes(2));
   });
 });

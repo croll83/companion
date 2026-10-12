@@ -37,11 +37,13 @@ import {
   codexDomainMcp,
   codexMcpTable,
   codexSkillToggles,
-  disabledSkillGroups,
+  disabledDomainSkills,
   domainMcpView,
   domainRuntimeDir,
   effectiveMcpServers,
   linkCodexSkills,
+  mcpTargetOf,
+  mcpTypeOf,
   prepareCodexDomainHome,
   removeDomainRuntime,
   resolveDomain,
@@ -124,16 +126,52 @@ describe("MCP servers", () => {
     });
   });
 
+  // The domain's own servers first, then GLOBAL's; "own" = the domain chose
+  // the state itself; "disabledGlobally" = off only because GLOBAL says so.
   it("lists every server with its source and state for the Domains page", () => {
     expect(domainMcpView(resolveDomain("herd"))).toEqual([
-      { name: "gh", source: "global", enabled: false, type: "stdio" },
-      { name: "noisy", source: "global", enabled: false, disabledGlobally: true, type: "stdio" },
-      { name: "ping", source: "domain", enabled: true, type: "stdio" },
-      { name: "shared", source: "domain", enabled: true, type: "stdio" },
+      { name: "ping", source: "domain", enabled: true, own: false, type: "stdio", target: "node ping.js" },
+      { name: "shared", source: "domain", enabled: true, own: false, type: "stdio", target: "herd-version" },
+      { name: "gh", source: "global", enabled: false, own: true, type: "stdio", target: "gh-mcp" },
+      { name: "noisy", source: "global", enabled: false, own: false, disabledGlobally: true, type: "stdio", target: "n" },
     ]);
     expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN)).find((s) => s.name === "noisy")).toEqual({
-      name: "noisy", source: "global", enabled: false, type: "stdio",
+      name: "noisy", source: "global", enabled: false, own: true, type: "stdio", target: "n",
     });
+  });
+
+  // GLOBAL's choice is a default, not a lock: a domain can turn back on a
+  // server GLOBAL turns off (Marco's decision, 2026-10-13).
+  it("lets a domain turn on a server GLOBAL turns off", () => {
+    updateDomain("herd", { mcp: { noisy: true } });
+    expect(effectiveMcpServers(resolveDomain("herd"))).toHaveProperty("noisy");
+    expect(domainMcpView(resolveDomain("herd")).find((s) => s.name === "noisy")).toMatchObject({ enabled: true, own: true });
+    expect(effectiveMcpServers(resolveDomain(GLOBAL_DOMAIN))).not.toHaveProperty("noisy");
+    // Back to GLOBAL's choice.
+    updateDomain("herd", { mcp: { noisy: null } });
+    expect(effectiveMcpServers(resolveDomain("herd"))).not.toHaveProperty("noisy");
+  });
+
+  // The account's servers (cached `claude mcp list`) are listed for every
+  // domain with their own toggle state; a mcp.json server of the same name wins.
+  it("lists the account's servers after the declared ones, with their state", () => {
+    const account = [
+      { name: "claude.ai Gmail", target: "https://gmail/mcp", health: "connected", connector: true },
+      { name: "github", target: "npx gh", health: "connected", connector: false },
+      { name: "remote", target: "https://r/mcp", health: "needs-auth", connector: false },
+      { name: "gh", target: "dup", health: "connected", connector: false },
+    ];
+    updateDomain(GLOBAL_DOMAIN, { mcpDisabled: ["noisy", "remote"] });
+    updateDomain("herd", { mcpDisabled: ["gh", "github"] });
+    const herd = domainMcpView(resolveDomain("herd"), account).filter((v) => v.source === "account");
+    expect(herd).toEqual([
+      { name: "claude.ai Gmail", source: "account", enabled: true, own: false, type: "claude.ai", target: "https://gmail/mcp", health: "connected" },
+      { name: "github", source: "account", enabled: false, own: true, type: "stdio", target: "npx gh", health: "connected" },
+      { name: "remote", source: "account", enabled: false, own: false, disabledGlobally: true, type: "http", target: "https://r/mcp", health: "needs-auth" },
+    ]);
+    // In GLOBAL a server off in GLOBAL is simply off (not "off in GLOBAL").
+    expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN), account).find((v) => v.name === "remote")).toMatchObject({ enabled: false });
+    expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN), account).find((v) => v.name === "remote")?.disabledGlobally).toBeUndefined();
   });
 
   it("converts servers to Codex config.toml tables", () => {
@@ -222,6 +260,23 @@ describe("Claude spawn", () => {
     });
   });
 
+  // Servers the CLI loads by itself (user config, claude.ai connectors) are
+  // turned off by name with deniedMcpServers (verified on CLI 2.1.293):
+  // GLOBAL's choices for every domain, plus the domain's own. Companion's own
+  // server is never denied.
+  it("denies the servers turned off by GLOBAL and by the domain, never companion", () => {
+    updateDomain(GLOBAL_DOMAIN, { mcpDisabled: ["claude.ai Gmail", "companion"] });
+    updateDomain("herd", { mcpDisabled: ["github", "claude.ai Gmail"] });
+    expect(buildClaudeDomainSpawn("sess-1", "herd").settings.deniedMcpServers).toEqual([
+      { serverName: "claude.ai Gmail" },
+      { serverName: "github" },
+    ]);
+    expect(buildClaudeDomainSpawn("sess-2", GLOBAL_DOMAIN).settings.deniedMcpServers).toEqual([{ serverName: "claude.ai Gmail" }]);
+    updateDomain(GLOBAL_DOMAIN, { mcpDisabled: [] });
+    updateDomain("herd", { mcpDisabled: [] });
+    expect(buildClaudeDomainSpawn("sess-1", "herd").settings.deniedMcpServers).toBeUndefined();
+  });
+
   it("removes a session's generated files", () => {
     buildClaudeDomainSpawn("sess-1", "herd");
     removeDomainRuntime("sess-1");
@@ -230,20 +285,32 @@ describe("Claude spawn", () => {
 });
 
 describe("skill groups", () => {
-  it("resolves the groups that are off for a domain (domain, then GLOBAL)", () => {
+  it("resolves the skills that are off for a domain (its choices, then GLOBAL's)", () => {
     updateDomain(GLOBAL_DOMAIN, { skillGroups: { design: false } });
-    updateDomain("herd", { skillGroups: { "claude-ai": false } });
-    expect([...disabledSkillGroups(resolveDomain("herd"))].sort()).toEqual(["claude-ai", "design"]);
-    expect([...disabledSkillGroups(resolveDomain(GLOBAL_DOMAIN))]).toEqual(["design"]);
+    updateDomain("herd", { skillGroups: { "claude-ai": false }, skillChoices: { "design:polish": true } });
+    const herd = disabledDomainSkills(resolveDomain("herd"));
+    expect(herd.has("design:adapt")).toBe(true);
+    // A single skill turned back on in the domain, while its group is off in GLOBAL.
+    expect(herd.has("design:polish")).toBe(false);
+    expect([...herd].every((k) => k.startsWith("design:") || k.startsWith("claude-ai:"))).toBe(true);
+    const global = disabledDomainSkills(resolveDomain(GLOBAL_DOMAIN));
+    expect(global.size).toBe(18);
+    expect(global.has("design:polish")).toBe(true);
   });
 
   // Codex turns off the repository design skills it finds by itself with
   // marked [[skills.config]] entries (verified on Codex 0.161).
   it("writes Codex [[skills.config]] entries for toggled groups only", () => {
     const groups = listSkillGroups();
-    expect(codexSkillToggles(groups, new Set(["user", "claude-ai"]))).toEqual([]);
-    const toggles = codexSkillToggles(groups, new Set(["design"]));
+    expect(codexSkillToggles(groups, new Set(["user:foundry-poc", "claude-ai:pdf"]))).toEqual([]);
+    const toggles = codexSkillToggles(groups, new Set(groups[2].skills.map((n) => `design:${n}`)));
     expect(toggles).toHaveLength(18);
+    expect(codexSkillToggles(groups, new Set(["design:polish"]))).toEqual([[
+      "# Managed by Companion: skill toggle (design). Rewritten at every launch.",
+      "[[skills.config]]",
+      'name = "polish"',
+      "enabled = false",
+    ]]);
     expect(toggles[0]).toEqual([
       "# Managed by Companion: skill toggle (design). Rewritten at every launch.",
       "[[skills.config]]",
@@ -310,6 +377,18 @@ describe("Codex skills and home", () => {
     warn.mockRestore();
   });
 
+  // Single skills: one user skill off for the domain is not linked, the others are.
+  it("links the user's skills one by one, following the domain's single-skill choices", () => {
+    addSkill(join(tmp, "claude", "skills"), "foundry-poc");
+    addSkill(join(tmp, "claude", "skills"), "ton-audit");
+    const home = join(tmp, "codex");
+    updateDomain("herd", { skillChoices: { "user:ton-audit": false } });
+    expect(linkCodexSkills(home, resolveDomain("herd"), []).sort()).toEqual(["foundry-poc"]);
+    // Group off but one skill kept on in the domain.
+    updateDomain("herd", { skillGroups: { user: false }, skillChoices: { "user:ton-audit": true } });
+    expect(linkCodexSkills(home, resolveDomain("herd"), ["foundry-poc"]).sort()).toEqual(["ton-audit"]);
+  });
+
   it("returns nothing to link when there are no skills", () => {
     expect(linkCodexSkills(join(tmp, "codex"), resolveDomain("herd"), [])).toEqual([]);
   });
@@ -348,5 +427,115 @@ describe("Codex skills and home", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, ".companion-domain.json"), "{");
     expect(prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") }).mcp.remove).toEqual([]);
+  });
+});
+
+// Codex has no plugins: a plugin turned on for the domain reaches Codex
+// sessions as its MCP servers (config.toml) and its skills (links).
+describe("plugins for Codex", () => {
+  function installPlugin(id: string, opts: { skills?: string[]; mcp?: Record<string, unknown>; userOn?: boolean } = {}) {
+    const name = id.split("@")[0];
+    const root = join(tmp, "claude", "plugins", "cache", name);
+    mkdirSync(join(root, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name }));
+    for (const sk of opts.skills ?? []) addSkill(join(root, "skills"), sk);
+    if (opts.mcp) writeFileSync(join(root, ".mcp.json"), JSON.stringify(opts.mcp));
+    const regPath = join(tmp, "claude", "plugins", "installed_plugins.json");
+    const reg = existsSync(regPath) ? JSON.parse(readFileSync(regPath, "utf-8")) : { version: 2, plugins: {} };
+    reg.plugins[id] = [{ scope: "user", installPath: root }];
+    writeFileSync(regPath, JSON.stringify(reg));
+    if (opts.userOn !== undefined) writeFileSync(join(tmp, "claude", "settings.json"), JSON.stringify({ enabledPlugins: { [id]: opts.userOn } }));
+    return root;
+  }
+
+  it("adds the servers and skills of the domain's plugins, and takes them out when the plugin is turned off", () => {
+    const root = installPlugin("brain@lab", { skills: ["brain"], mcp: { brain: { type: "http", url: "http://127.0.0.1:7420/mcp" } }, userOn: false });
+    const home = join(tmp, "codex");
+    mkdirSync(home, { recursive: true });
+
+    // Off for the user and not chosen by the domain: nothing for Codex.
+    let prepared = prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") });
+    expect(prepared.mcp.names).not.toContain("brain");
+    prepared.commit();
+
+    updateDomain("herd", { plugins: { "brain@lab": true } });
+    prepared = prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") });
+    expect(prepared.mcp.names).toContain("brain");
+    const table = prepared.mcp.tables.find((t) => t.includes("[mcp_servers.brain]"));
+    expect(table).toEqual([
+      "# Managed by Companion: MCP server of domain herd (plugin brain@lab). Rewritten at every launch.",
+      "[mcp_servers.brain]",
+      'url = "http://127.0.0.1:7420/mcp"',
+    ]);
+    expect(readlinkSync(join(home, "skills", "brain"))).toBe(join(root, "skills", "brain"));
+    prepared.commit();
+
+    // Other domains (and GLOBAL) are not affected by herd's choice.
+    expect(codexDomainMcp(join(tmp, "codex2"), resolveDomain(GLOBAL_DOMAIN)).names).not.toContain("brain");
+
+    updateDomain("herd", { plugins: { "brain@lab": false } });
+    prepared = prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") });
+    expect(prepared.mcp.names).not.toContain("brain");
+    expect(prepared.mcp.remove).toContain("brain");
+    expect(existsSync(join(home, "skills", "brain"))).toBe(false);
+  });
+
+  // A server the domain declares itself wins over a plugin's of the same name.
+  it("lets the domain's own mcp.json win on a name clash", () => {
+    installPlugin("brain@lab", { mcp: { brain: { url: "http://plugin/mcp" } }, userOn: true });
+    writeMcp("herd", { brain: { url: "http://domain/mcp" } });
+    const mcp = codexDomainMcp(join(tmp, "codex"), resolveDomain("herd"));
+    expect(mcp.names.filter((n) => n === "brain")).toHaveLength(1);
+    expect(mcp.tables.find((t) => t.includes("[mcp_servers.brain]"))).toContain('url = "http://domain/mcp"');
+  });
+
+  // Claude expands ${VAR} in headers and handles OAuth itself; Codex needs
+  // its own keys (verified with `codex mcp list/get` on Codex 0.161.0).
+  it("maps OAuth clients and env-based headers to Codex keys", () => {
+    expect(codexMcpTable("brain", { type: "http", url: "https://b/mcp", oauth: { clientId: "cid", callbackPort: 7498 } }, "hercle", "brain@lab")).toEqual([
+      "# Managed by Companion: MCP server of domain hercle (plugin brain@lab). Rewritten at every launch.",
+      "[mcp_servers.brain]",
+      'url = "https://b/mcp"',
+      "",
+      "[mcp_servers.brain.oauth]",
+      'client_id = "cid"',
+    ]);
+    expect(codexMcpTable("t", {
+      url: "https://t/mcp",
+      headers: { Authorization: "Bearer ${MY_TOKEN}", "X-Api-Key": "${MY_KEY}", "X-Team": "ops", "X-Mixed": "a ${B}" },
+    }, "herd")).toEqual([
+      "# Managed by Companion: MCP server of domain herd. Rewritten at every launch.",
+      "[mcp_servers.t]",
+      'url = "https://t/mcp"',
+      'bearer_token_env_var = "MY_TOKEN"',
+      'env_http_headers = { X-Api-Key = "MY_KEY" }',
+      'http_headers = { X-Team = "ops", X-Mixed = "a ${B}" }',
+    ]);
+    // A literal bearer token stays a literal header; an empty OAuth client is ignored.
+    expect(codexMcpTable("l", { url: "https://l", headers: { Authorization: "Bearer abc" }, oauth: { clientId: "" } }, "herd")).toEqual([
+      "# Managed by Companion: MCP server of domain herd. Rewritten at every launch.",
+      "[mcp_servers.l]",
+      'url = "https://l"',
+      'http_headers = { Authorization = "Bearer abc" }',
+    ]);
+  });
+
+  // The [mcp_servers.x.oauth] sub-table goes with its server when the server is removed.
+  it("removes a server's OAuth sub-table with the server", () => {
+    const path = join(tmp, "config.toml");
+    const table = codexMcpTable("brain", { url: "https://b/mcp", oauth: { clientId: "cid" } }, "hercle")!;
+    rewriteCodexMcpServers(path, ["brain"], [table]);
+    expect(readFileSync(path, "utf-8")).toContain("[mcp_servers.brain.oauth]");
+    rewriteCodexMcpServers(path, ["brain"], []);
+    expect(readFileSync(path, "utf-8")).not.toContain("brain");
+  });
+
+  it("describes a server by its URL or command, never env or headers", () => {
+    expect(mcpTypeOf({ url: "http://x" })).toBe("http");
+    expect(mcpTypeOf({ command: "c" })).toBe("stdio");
+    expect(mcpTypeOf({ type: "sse", url: "http://x" })).toBe("sse");
+    expect(mcpTargetOf({ url: "http://x", headers: { Authorization: "secret" } })).toBe("http://x");
+    expect(mcpTargetOf({ command: "npx", args: ["-y", "srv"], env: { TOKEN: "secret" } })).toBe("npx -y srv");
+    expect(mcpTargetOf({})).toBe("");
   });
 });

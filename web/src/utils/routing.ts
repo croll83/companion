@@ -9,7 +9,8 @@ export type Route =
   | { page: "integration-linear-oauth" }
   | { page: "prompts" }
   | { page: "environments" }
-  | { page: "domains" }
+  /** The Domains page; with a slug, that domain; with a tab, its MCP / skills / plugins view. */
+  | { page: "domains"; slug?: string; tab?: DomainTab }
   | { page: "agents" }
   | { page: "agent-detail"; agentId: string }
   | { page: "runs" }
@@ -27,6 +28,19 @@ function ensureClipboardFallbackInstalled(): void {
   clipboardFallbackInitialized = true;
 }
 
+/** The views of one domain on the Domains page. */
+export type DomainTab = "mcp" | "skills" | "plugins";
+
+export function isDomainTab(value: unknown): value is DomainTab {
+  return value === "mcp" || value === "skills" || value === "plugins";
+}
+
+/** Hash of the Domains page, of one domain, or of one of its views. */
+export function domainsHash(slug?: string, tab?: DomainTab): string {
+  if (!slug) return "#/domains";
+  return `#/domains/${encodeURIComponent(slug)}${tab ? `/${tab}` : ""}`;
+}
+
 /**
  * Parse a window.location.hash string into a typed Route.
  */
@@ -40,6 +54,13 @@ export function parseHash(hash: string): Route {
   if (hash === "#/prompts") return { page: "prompts" };
   if (hash === "#/environments") return { page: "environments" };
   if (hash === "#/domains") return { page: "domains" };
+  if (hash.startsWith("#/domains/")) {
+    const [slug, tab] = hash.slice("#/domains/".length).split("?")[0].split("/");
+    if (slug) {
+      return { page: "domains", slug: decodeURIComponent(slug), ...(isDomainTab(tab) ? { tab } : {}) };
+    }
+    return { page: "domains" };
+  }
   // #/scheduled (the removed "Scheduled Runs" page) opens #/agents, where
   // schedules now live as agent triggers.
   if (hash === "#/scheduled") return { page: "agents" };

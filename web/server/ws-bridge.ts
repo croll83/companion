@@ -62,6 +62,8 @@ const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>(
   "mcp_toggle",
   "mcp_reconnect",
   "mcp_set_servers",
+  "mcp_authenticate",
+  "mcp_oauth_callback",
 ]);
 
 export class WsBridge {

@@ -25,6 +25,7 @@ import type { RecorderManager } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { isKnownServerNotification } from "./codex-protocol-known.js";
 import { log } from "./logger.js";
+import { deliverLoopbackCallback } from "./mcp-oauth.js";
 import { INLINE_IMAGE_TYPES, saveAttachment, attachmentNote, type SavedAttachment } from "./attachment-store.js";
 
 /** Retryable: thread/resume refused because the previous app-server still holds the thread lock. */
@@ -933,6 +934,12 @@ export class CodexAdapter implements IBackendAdapter {
       case "mcp_reconnect":
         this.handleOutgoingMcpReconnect();
         return true;
+      case "mcp_authenticate":
+        void this.handleOutgoingMcpAuthenticate(msg.serverName);
+        return true;
+      case "mcp_oauth_callback":
+        void this.handleOutgoingMcpOAuthCallback(msg.serverName, msg.callbackUrl);
+        return true;
       case "mcp_set_servers":
         this.handleOutgoingMcpSetServers(msg.servers);
         return true;
@@ -1580,7 +1587,7 @@ export class CodexAdapter implements IBackendAdapter {
         const serverStatus: McpServerDetail["status"] =
           !isEnabled
             ? "disabled"
-            : (status?.authStatus === "notLoggedIn" ? "failed" : "connected");
+            : (status?.authStatus === "notLoggedIn" ? "needs-auth" : "connected");
 
         return {
           name,
@@ -1650,6 +1657,51 @@ export class CodexAdapter implements IBackendAdapter {
     } catch (err) {
       this.emit({ type: "error", message: `Failed to reload MCP servers: ${err}` });
     }
+  }
+
+  /**
+   * Start an MCP server's OAuth login (`mcpServer/oauth/login`, Codex 0.161)
+   * and send the sign-in URL to the browser. Codex saves the token in the
+   * system keyring, shared by every session's CODEX_HOME (verified), so one
+   * login serves all Codex sessions.
+   */
+  private async handleOutgoingMcpAuthenticate(serverName: string): Promise<void> {
+    try {
+      const res = await this.transport.call("mcpServer/oauth/login", {
+        name: serverName,
+        ...(this.threadId ? { threadId: this.threadId } : {}),
+      }) as { authorizationUrl?: string };
+      if (!res?.authorizationUrl) throw new Error("Codex returned no sign-in URL");
+      this.emit({ type: "mcp_auth", serverName, authUrl: res.authorizationUrl });
+    } catch (err) {
+      this.emit({ type: "mcp_auth", serverName, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /**
+   * A pasted redirect URL (browser on another machine). Codex has no request
+   * to submit it, so Companion, on the same machine, delivers it to Codex's
+   * loopback listener; the completion notification follows.
+   */
+  private async handleOutgoingMcpOAuthCallback(serverName: string, callbackUrl: string): Promise<void> {
+    const error = await deliverLoopbackCallback(callbackUrl);
+    if (error) this.emit({ type: "mcp_auth", serverName, error });
+  }
+
+  private async handleMcpLoginCompleted(params: { name?: string; success?: boolean; error?: string | null }): Promise<void> {
+    const serverName = typeof params?.name === "string" ? params.name : "";
+    if (!serverName) return;
+    if (!params.success) {
+      this.emit({ type: "mcp_auth", serverName, error: params.error || "The login did not complete" });
+      return;
+    }
+    try {
+      await this.reloadMcpServers();
+    } catch {
+      /* the status below still reports what Codex sees */
+    }
+    await this.handleOutgoingMcpGetStatus();
+    this.emit({ type: "mcp_auth", serverName, done: true });
   }
 
   private async handleOutgoingMcpSetServers(servers: Record<string, McpServerConfig>): Promise<void> {
@@ -1830,6 +1882,11 @@ export class CodexAdapter implements IBackendAdapter {
       // sees up-to-date server states.
       case "mcpServer/startupStatus/updated":
         this.handleOutgoingMcpGetStatus();
+        break;
+      // End of an OAuth login started with mcpServer/oauth/login: on success
+      // the servers are reloaded so the session uses the new token.
+      case "mcpServer/oauthLogin/completed":
+        void this.handleMcpLoginCompleted(params as { name?: string; success?: boolean; error?: string | null });
         break;
       // Context compaction — similar to codex/event/context_compacted.
       case "thread/compacted":

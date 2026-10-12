@@ -2701,6 +2701,92 @@ describe("CodexAdapter", () => {
 
   // ── MCP server management (Codex app-server methods) ───────────────────
 
+  // MCP OAuth login (Codex 0.161): mcpServer/oauth/login gives the sign-in
+  // URL; mcpServer/oauthLogin/completed ends it; a pasted redirect is
+  // delivered by Companion itself to Codex's loopback listener.
+  describe("MCP OAuth login", () => {
+    const requestId = (method: string) => {
+      for (const line of stdin.chunks.join("").split("\n").reverse()) {
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line) as { id?: number; method?: string; params?: unknown };
+        if (msg.method === method) return msg;
+      }
+      return undefined;
+    };
+    async function started() {
+      const messages: BrowserIncomingMessage[] = [];
+      const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+      adapter.onBrowserMessage((msg) => messages.push(msg));
+      await new Promise((r) => setTimeout(r, 50));
+      stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+      await new Promise((r) => setTimeout(r, 50));
+      stdin.chunks.length = 0;
+      return { adapter, messages, auth: () => messages.filter((m) => m.type === "mcp_auth") };
+    }
+
+    it("starts the login and sends the sign-in URL", async () => {
+      const { adapter, auth } = await started();
+      adapter.sendBrowserMessage({ type: "mcp_authenticate", serverName: "brain" });
+      await new Promise((r) => setTimeout(r, 20));
+      const req = requestId("mcpServer/oauth/login")!;
+      expect(req.params).toEqual({ name: "brain", threadId: "thr_123" });
+      stdout.push(JSON.stringify({ id: req.id, result: { authorizationUrl: "https://login/authorize", loginId: "l1" } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(auth()).toEqual([{ type: "mcp_auth", serverName: "brain", authUrl: "https://login/authorize" }]);
+    });
+
+    it("reports a failed start, and a response without URL, as errors", async () => {
+      const { adapter, auth } = await started();
+      adapter.sendBrowserMessage({ type: "mcp_authenticate", serverName: "brain" });
+      await new Promise((r) => setTimeout(r, 20));
+      stdout.push(JSON.stringify({ id: requestId("mcpServer/oauth/login")!.id, error: { code: -1, message: "unknown server" } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      adapter.sendBrowserMessage({ type: "mcp_authenticate", serverName: "other" });
+      await new Promise((r) => setTimeout(r, 20));
+      stdout.push(JSON.stringify({ id: requestId("mcpServer/oauth/login")!.id, result: {} }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(auth().map((m) => (m as { serverName: string }).serverName)).toEqual(["brain", "other"]);
+      expect(auth().every((m) => typeof (m as { error?: string }).error === "string")).toBe(true);
+      expect((auth()[1] as { error: string }).error).toContain("no sign-in URL");
+    });
+
+    it("on completion reloads the servers, refreshes the status and reports done", async () => {
+      const { auth } = await started();
+      stdout.push(JSON.stringify({ method: "mcpServer/oauthLogin/completed", params: { name: "brain", success: true, loginId: "l1" } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      const reload = requestId("config/mcpServer/reload")!;
+      expect(reload).toBeDefined();
+      stdout.push(JSON.stringify({ id: reload.id, result: {} }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      stdout.push(JSON.stringify({ id: requestId("mcpServerStatus/list")!.id, result: { data: [{ name: "brain", authStatus: "oAuth", tools: {} }], nextCursor: null } }) + "\n");
+      await new Promise((r) => setTimeout(r, 20));
+      stdout.push(JSON.stringify({ id: requestId("config/read")!.id, result: { config: { mcp_servers: { brain: { url: "https://b/mcp" } } } } }) + "\n");
+      await new Promise((r) => setTimeout(r, 30));
+      expect(auth()).toEqual([{ type: "mcp_auth", serverName: "brain", done: true }]);
+    });
+
+    it("reports a failed completion, and ignores one without a server name", async () => {
+      const { auth } = await started();
+      stdout.push(JSON.stringify({ method: "mcpServer/oauthLogin/completed", params: { name: "brain", success: false, error: "access_denied" } }) + "\n");
+      stdout.push(JSON.stringify({ method: "mcpServer/oauthLogin/completed", params: { success: true } }) + "\n");
+      stdout.push(JSON.stringify({ method: "mcpServer/oauthLogin/completed", params: { name: "x", success: false } }) + "\n");
+      await new Promise((r) => setTimeout(r, 30));
+      expect(auth()).toEqual([
+        { type: "mcp_auth", serverName: "brain", error: "access_denied" },
+        { type: "mcp_auth", serverName: "x", error: "The login did not complete" },
+      ]);
+    });
+
+    it("refuses to deliver a pasted URL that is not a loopback OAuth redirect", async () => {
+      const { adapter, auth } = await started();
+      adapter.sendBrowserMessage({ type: "mcp_oauth_callback", serverName: "brain", callbackUrl: "https://evil.example/callback?code=1" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect((auth()[0] as { error: string }).error).toContain("Paste the full address");
+    });
+  });
+
   it("handles mcp_get_status via mcpServerStatus/list + config/read", async () => {
     const messages: BrowserIncomingMessage[] = [];
     const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
@@ -2758,7 +2844,8 @@ describe("CodexAdapter", () => {
       | undefined;
     expect(mcpStatus).toBeDefined();
     expect(mcpStatus!.servers.find((s) => s.name === "alpha")?.status).toBe("connected");
-    expect(mcpStatus!.servers.find((s) => s.name === "beta")?.status).toBe("failed");
+    // Not logged in is "needs-auth" (the panel offers Authenticate), not a failure.
+    expect(mcpStatus!.servers.find((s) => s.name === "beta")?.status).toBe("needs-auth");
     expect(mcpStatus!.servers.find((s) => s.name === "beta")?.error).toContain("requires login");
     expect(mcpStatus!.servers.find((s) => s.name === "alpha")?.tools?.length).toBe(1);
   });

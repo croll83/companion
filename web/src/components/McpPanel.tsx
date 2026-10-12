@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
-import { sendMcpGetStatus, sendMcpToggle, sendMcpReconnect, sendMcpSetServers } from "../ws.js";
-import type { McpServerDetail, McpServerConfig } from "../types.js";
+import { sendMcpGetStatus, sendMcpToggle, sendMcpReconnect } from "../ws.js";
+import type { McpServerDetail } from "../types.js";
+import { domainsHash } from "../utils/routing.js";
+import { McpServerAuth } from "./McpServerAuth.js";
 
 const EMPTY_SERVERS: McpServerDetail[] = [];
 const EMPTY_MCP_INIT: { name: string; status: string }[] = [];
@@ -10,6 +12,7 @@ const STATUS_STYLES: Record<string, { label: string; badge: string; dot: string 
   connected:  { label: "Connected",  badge: "text-cc-success bg-cc-success/10", dot: "bg-cc-success" },
   connecting: { label: "Connecting", badge: "text-cc-warning bg-cc-warning/10", dot: "bg-cc-warning animate-pulse" },
   failed:     { label: "Failed",     badge: "text-cc-error bg-cc-error/10",     dot: "bg-cc-error" },
+  "needs-auth": { label: "Sign-in needed", badge: "text-cc-warning bg-cc-warning/10", dot: "bg-cc-warning" },
   disabled:   { label: "Disabled",   badge: "text-cc-muted bg-cc-hover",        dot: "bg-cc-muted opacity-40" },
 };
 const DEFAULT_STATUS = { label: "Unknown", badge: "text-cc-muted bg-cc-hover", dot: "bg-cc-muted opacity-40" };
@@ -25,6 +28,7 @@ function McpServerRow({
   const style = STATUS_STYLES[server.status] || DEFAULT_STATUS;
   const isEnabled = server.status !== "disabled";
   const toolCount = server.tools?.length ?? 0;
+  const hasAuth = useStore((s) => !!s.mcpAuth.get(sessionId)?.[server.name]);
 
   return (
     <div className="rounded-lg border border-cc-border bg-cc-bg">
@@ -48,29 +52,6 @@ function McpServerRow({
 
         {/* Actions */}
         <div className="flex items-center gap-0.5 shrink-0">
-          {/* Toggle enable/disable */}
-          <button
-            onClick={() => sendMcpToggle(sessionId, server.name, !isEnabled)}
-            className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors cursor-pointer ${
-              isEnabled
-                ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
-                : "text-cc-muted/50 hover:text-cc-success hover:bg-cc-success/10"
-            }`}
-            title={isEnabled ? "Disable server" : "Enable server"}
-          >
-            {isEnabled ? (
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3">
-                <circle cx="8" cy="8" r="6" />
-                <path d="M5 8h6" strokeLinecap="round" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3">
-                <circle cx="8" cy="8" r="6" />
-                <path d="M8 5v6M5 8h6" strokeLinecap="round" />
-              </svg>
-            )}
-          </button>
-
           {/* Reconnect */}
           {(server.status === "failed" || server.status === "connected") && (
             <button
@@ -86,6 +67,13 @@ function McpServerRow({
           )}
         </div>
       </div>
+
+      {/* OAuth sign-in (Claude Code and Codex) */}
+      {(server.status === "needs-auth" || hasAuth) && (
+        <div className="px-2.5 pb-2">
+          <McpServerAuth sessionId={sessionId} serverName={server.name} />
+        </div>
+      )}
 
       {/* Expanded details */}
       {expanded && (
@@ -116,6 +104,15 @@ function McpServerRow({
               <span>{server.scope}</span>
             </div>
           </div>
+
+          {/* For this session only: the domain decides what every session gets. */}
+          <button
+            type="button"
+            onClick={() => sendMcpToggle(sessionId, server.name, !isEnabled)}
+            className="text-[11px] text-cc-muted hover:text-cc-fg underline-offset-2 hover:underline cursor-pointer"
+          >
+            {isEnabled ? "Turn off for this session (until reload)" : "Turn on for this session"}
+          </button>
 
           {/* Error */}
           {server.error && (
@@ -156,155 +153,18 @@ function McpServerRow({
   );
 }
 
-type ServerType = "stdio" | "sse" | "http";
-
-function AddServerForm({
-  sessionId,
-  onDone,
-}: {
-  sessionId: string;
-  onDone: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [serverType, setServerType] = useState<ServerType>("stdio");
-  const [command, setCommand] = useState("");
-  const [args, setArgs] = useState("");
-  const [url, setUrl] = useState("");
-
-  const canSubmit =
-    name.trim() &&
-    (serverType === "stdio" ? command.trim() : url.trim());
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canSubmit) return;
-
-    const config: McpServerConfig = { type: serverType };
-    if (serverType === "stdio") {
-      config.command = command.trim();
-      if (args.trim()) config.args = args.trim().split(/\s+/);
-    } else {
-      config.url = url.trim();
-    }
-
-    sendMcpSetServers(sessionId, { [name.trim()]: config });
-    onDone();
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-2 p-2.5 rounded-lg border border-cc-border bg-cc-bg">
-      {/* Server name */}
-      <div>
-        <label className="text-[10px] text-cc-muted uppercase tracking-wider block mb-0.5">
-          Server Name
-        </label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="my-mcp-server"
-          className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 focus:outline-none focus:border-cc-primary"
-        />
-      </div>
-
-      {/* Server type */}
-      <div>
-        <label className="text-[10px] text-cc-muted uppercase tracking-wider block mb-0.5">
-          Type
-        </label>
-        <div className="flex gap-1">
-          {(["stdio", "sse", "http"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setServerType(t)}
-              className={`text-[11px] px-2 py-1 rounded-md border transition-colors cursor-pointer ${
-                serverType === t
-                  ? "border-cc-primary text-cc-primary bg-cc-primary/10"
-                  : "border-cc-border text-cc-muted hover:text-cc-fg hover:border-cc-muted"
-              }`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Stdio fields */}
-      {serverType === "stdio" && (
-        <>
-          <div>
-            <label className="text-[10px] text-cc-muted uppercase tracking-wider block mb-0.5">
-              Command
-            </label>
-            <input
-              type="text"
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-              placeholder="npx -y @modelcontextprotocol/server-memory"
-              className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-primary"
-            />
-          </div>
-          <div>
-            <label className="text-[10px] text-cc-muted uppercase tracking-wider block mb-0.5">
-              Args (space-separated, optional)
-            </label>
-            <input
-              type="text"
-              value={args}
-              onChange={(e) => setArgs(e.target.value)}
-              placeholder="--port 3000"
-              className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-primary"
-            />
-          </div>
-        </>
-      )}
-
-      {/* URL field for sse/http */}
-      {(serverType === "sse" || serverType === "http") && (
-        <div>
-          <label className="text-[10px] text-cc-muted uppercase tracking-wider block mb-0.5">
-            URL
-          </label>
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="http://localhost:3000/mcp"
-            className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-primary"
-          />
-        </div>
-      )}
-
-      {/* Actions */}
-      <div className="flex gap-1.5 pt-1">
-        <button
-          type="submit"
-          disabled={!canSubmit}
-          className={`flex-1 text-[11px] font-medium py-1.5 rounded-md transition-colors ${
-            canSubmit
-              ? "bg-cc-primary text-white hover:bg-cc-primary-hover cursor-pointer"
-              : "bg-cc-hover text-cc-muted cursor-not-allowed"
-          }`}
-        >
-          Add Server
-        </button>
-        <button
-          type="button"
-          onClick={onDone}
-          className="text-[11px] font-medium px-3 py-1.5 rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
-  );
-}
-
+/**
+ * The MCP servers of one session, as its CLI sees them right now: a one-line
+ * summary that opens by itself when a server failed or waits for a sign-in.
+ * Rows show the live status, sign-in, reconnect, tools and errors; what every
+ * session of the domain gets is managed on the Domains page (link). A server
+ * can still be turned off for this session only, until it reloads.
+ */
 export function McpSection({ sessionId }: { sessionId: string }) {
   const servers = useStore((s) => s.mcpServers.get(sessionId) || EMPTY_SERVERS);
   const cliConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
-  const [showAddForm, setShowAddForm] = useState(false);
+  const sdk = useStore((s) => s.sdkSessions.find((x) => x.sessionId === sessionId));
+  const domainSlug = sdk && !sdk.legacyMemory ? sdk.domain || "global" : undefined;
 
   // The session_init mcp_servers gives us basic info (name + status).
   // We can detect if MCP servers exist from session state to show the section.
@@ -332,32 +192,49 @@ export function McpSection({ sessionId }: { sessionId: string }) {
           scope: "",
         }));
 
+  const count = (status: string) => displayServers.filter((s) => s.status === status).length;
+  const problems = count("failed") + count("needs-auth");
+  const [expanded, setExpanded] = useState(false);
+  // Open by itself when a problem appears (not again once the user closed it for that problem).
+  const seenProblems = useRef(0);
+  useEffect(() => {
+    if (problems > seenProblems.current) setExpanded(true);
+    seenProblems.current = problems;
+  }, [problems]);
+
+  const summary = [
+    `${count("connected")} connected`,
+    count("needs-auth") ? `${count("needs-auth")} need sign-in` : "",
+    count("failed") ? `${count("failed")} failed` : "",
+    count("disabled") ? `${count("disabled")} off` : "",
+  ].filter(Boolean).join(" · ");
+
   return (
     <>
       {/* MCP section header */}
-      <div className="shrink-0 px-4 py-2.5 flex items-center justify-between">
-        <span className="text-[13px] font-semibold text-cc-fg flex items-center gap-1.5">
-          <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-muted">
-            <path d="M1.5 3A1.5 1.5 0 013 1.5h10A1.5 1.5 0 0114.5 3v1A1.5 1.5 0 0113 5.5H3A1.5 1.5 0 011.5 4V3zm0 5A1.5 1.5 0 013 6.5h10A1.5 1.5 0 0114.5 8v1A1.5 1.5 0 0113 10.5H3A1.5 1.5 0 011.5 9V8zm0 5A1.5 1.5 0 013 11.5h10a1.5 1.5 0 011.5 1.5v1a1.5 1.5 0 01-1.5 1.5H3A1.5 1.5 0 011.5 14v-1z" />
-          </svg>
-          MCP Servers
-        </span>
-        <div className="flex items-center gap-1">
-          {/* Add server button */}
-          <button
-            onClick={() => setShowAddForm(!showAddForm)}
-            disabled={!cliConnected}
-            className={`text-[11px] font-medium transition-colors ${
-              cliConnected
-                ? "text-cc-muted hover:text-cc-fg cursor-pointer"
-                : "text-cc-muted/30 cursor-not-allowed"
-            }`}
-            title="Add MCP server"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
-              <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+      <div className="shrink-0 px-4 py-2.5 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+          className="min-w-0 flex-1 text-left cursor-pointer"
+        >
+          <span className="text-[13px] font-semibold text-cc-fg flex items-center gap-1.5">
+            <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-muted" aria-hidden="true">
+              <path d="M1.5 3A1.5 1.5 0 013 1.5h10A1.5 1.5 0 0114.5 3v1A1.5 1.5 0 0113 5.5H3A1.5 1.5 0 011.5 4V3zm0 5A1.5 1.5 0 013 6.5h10A1.5 1.5 0 0114.5 8v1A1.5 1.5 0 0113 10.5H3A1.5 1.5 0 011.5 9V8zm0 5A1.5 1.5 0 013 11.5h10a1.5 1.5 0 011.5 1.5v1a1.5 1.5 0 01-1.5 1.5H3A1.5 1.5 0 011.5 14v-1z" />
             </svg>
-          </button>
+            MCP Servers
+          </span>
+          {displayServers.length > 0 && (
+            <span className={`block text-[11px] ${problems ? "text-cc-warning" : "text-cc-muted"}`}>{summary}</span>
+          )}
+        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {domainSlug && (
+            <a href={domainsHash(domainSlug, "mcp")} className="text-[11px] text-cc-primary hover:underline">
+              Manage in domain ›
+            </a>
+          )}
           {/* Refresh button */}
           <button
             onClick={() => sendMcpGetStatus(sessionId)}
@@ -368,6 +245,7 @@ export function McpSection({ sessionId }: { sessionId: string }) {
                 : "text-cc-muted/30 cursor-not-allowed"
             }`}
             title="Refresh MCP server status"
+            aria-label="Refresh MCP server status"
           >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
               <path d="M2.5 8a5.5 5.5 0 019.78-3.5M13.5 8a5.5 5.5 0 01-9.78 3.5" strokeLinecap="round" />
@@ -377,18 +255,8 @@ export function McpSection({ sessionId }: { sessionId: string }) {
         </div>
       </div>
 
-      {/* Add server form */}
-      {showAddForm && (
-        <div className="px-3 py-2">
-          <AddServerForm
-            sessionId={sessionId}
-            onDone={() => setShowAddForm(false)}
-          />
-        </div>
-      )}
-
       {/* Server list */}
-      {displayServers.length > 0 && (
+      {expanded && displayServers.length > 0 && (
         <div className="px-3 py-2 space-y-1.5">
           {displayServers.map((server) => (
             <McpServerRow
@@ -401,19 +269,9 @@ export function McpSection({ sessionId }: { sessionId: string }) {
       )}
 
       {/* Empty state */}
-      {!showAddForm && displayServers.length === 0 && (
+      {displayServers.length === 0 && (
         <div className="px-3 py-3">
-          <p className="text-[11px] text-cc-muted text-center">
-            No MCP servers configured.{" "}
-            {cliConnected && (
-              <button
-                onClick={() => setShowAddForm(true)}
-                className="text-cc-primary hover:underline cursor-pointer"
-              >
-                Add one
-              </button>
-            )}
-          </p>
+          <p className="text-[11px] text-cc-muted text-center">No MCP servers in this session.</p>
         </div>
       )}
     </>
