@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
@@ -34,8 +34,13 @@ export interface DomainInfo {
   name: string;
   createdAt: number;
   description?: string;
-  /** MCP server names (from global or domain mcp.json) turned off for this domain's sessions. */
-  mcpDisabled: string[];
+  /**
+   * MCP servers turned on (true) or off (false) by name: the domain's own
+   * choice, else GLOBAL's (the default for every domain), else on. Covers
+   * mcp.json servers and the ones Claude loads by itself (account-mcp.ts).
+   * Replaces the older `mcpDisabled` list (converted when read).
+   */
+  mcp: Record<string, boolean>;
   /** Claude only: sessions of this domain start with `--chrome`. */
   chrome: boolean;
   /**
@@ -49,6 +54,8 @@ export interface DomainInfo {
   plugins?: Record<string, boolean>;
   /** Skill groups (skill-groups.ts) turned on/off for this domain; absent = GLOBAL's choice, else on. */
   skillGroups?: Record<string, boolean>;
+  /** Single skills turned on/off, keyed "<group>:<name>"; wins over the groups (see isSkillOn). */
+  skillChoices?: Record<string, boolean>;
 }
 
 export interface McpServerDef {
@@ -109,12 +116,47 @@ function normalize(raw: Partial<DomainInfo> & { slug: string }): DomainInfo {
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : raw.slug,
     createdAt: typeof raw.createdAt === "number" ? raw.createdAt : Date.now(),
     ...(typeof raw.description === "string" && raw.description.trim() ? { description: raw.description.trim() } : {}),
-    mcpDisabled: Array.isArray(raw.mcpDisabled) ? raw.mcpDisabled.filter((s): s is string => typeof s === "string") : [],
+    mcp: readMcpChoices(raw),
     chrome: raw.chrome === true,
     chromeBrowser: typeof raw.chromeBrowser === "string" && raw.chromeBrowser.trim() ? raw.chromeBrowser.trim() : "local",
     ...(raw.plugins && typeof raw.plugins === "object" ? { plugins: sanitizePlugins(raw.plugins) } : {}),
     ...(raw.skillGroups && typeof raw.skillGroups === "object" ? { skillGroups: sanitizePlugins(raw.skillGroups) } : {}),
+    ...(raw.skillChoices && typeof raw.skillChoices === "object" ? { skillChoices: sanitizePlugins(raw.skillChoices) } : {}),
   };
+}
+
+/** The MCP on/off map; a registry from before it has a `mcpDisabled` list (all off). */
+function readMcpChoices(raw: Partial<DomainInfo> & { mcpDisabled?: unknown }): Record<string, boolean> {
+  if (raw.mcp && typeof raw.mcp === "object") return sanitizePlugins(raw.mcp);
+  const legacy = Array.isArray(raw.mcpDisabled) ? raw.mcpDisabled.filter((s): s is string => typeof s === "string" && !!s.trim()) : [];
+  return Object.fromEntries(legacy.map((name) => [name, false]));
+}
+
+/** Whether an MCP server is on for a domain: its own choice, else GLOBAL's, else on. */
+export function isMcpOn(
+  name: string,
+  domain: Pick<DomainInfo, "mcp"> | undefined,
+  global: Pick<DomainInfo, "mcp">,
+): boolean {
+  return domain?.mcp?.[name] ?? global.mcp?.[name] ?? true;
+}
+
+/**
+ * Apply a partial on/off map: true/false set a choice, null removes it (back
+ * to the inherited state); other keys are untouched, so two quick changes
+ * from different screens never undo each other.
+ */
+function mergeChoices(current: Record<string, boolean> | undefined, patch: unknown): Record<string, boolean> | string {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return "must be an object of name: true | false | null";
+  const out = { ...(current ?? {}) };
+  for (const [k, v] of Object.entries(patch as Record<string, unknown>)) {
+    const key = k.trim();
+    if (!key) continue;
+    if (v === null) delete out[key];
+    else if (typeof v === "boolean") out[key] = v;
+    else return `"${key}" must be true, false or null`;
+  }
+  return out;
 }
 
 /** A name → on/off map (plugins, skill groups), anything else dropped. */
@@ -221,7 +263,7 @@ export function ensureGlobalDomain(): DomainInfo {
   const domains = readRegistry();
   let global = domains.find((d) => d.slug === GLOBAL_DOMAIN);
   if (!global) {
-    global = normalize({ slug: GLOBAL_DOMAIN, name: "GLOBAL", mcpDisabled: [], chrome: false });
+    global = normalize({ slug: GLOBAL_DOMAIN, name: "GLOBAL", mcp: {}, chrome: false });
     writeRegistry([global, ...domains]);
   }
   ensureDomainLayout(global);
@@ -244,7 +286,7 @@ export function createDomain(input: { name?: unknown; slug?: unknown; descriptio
     name,
     createdAt: Date.now(),
     description: typeof input.description === "string" ? input.description : undefined,
-    mcpDisabled: [],
+    mcp: {},
     chrome: false,
   });
   ensureDomainLayout(domain);
@@ -255,7 +297,11 @@ export function createDomain(input: { name?: unknown; slug?: unknown; descriptio
 export interface DomainPatch {
   name?: unknown;
   description?: unknown;
+  /** Partial map name → true | false | null (null = back to GLOBAL's choice). */
+  mcp?: unknown;
+  /** Older form: the full list of servers off for the domain (replaces every "off" choice). */
   mcpDisabled?: unknown;
+  skillChoices?: unknown;
   chrome?: unknown;
   chromeBrowser?: unknown;
   plugins?: unknown;
@@ -281,7 +327,13 @@ export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
     if (!Array.isArray(patch.mcpDisabled) || patch.mcpDisabled.some((s) => typeof s !== "string")) {
       return { ok: false, status: 400, error: "mcpDisabled must be a list of server names" };
     }
-    next.mcpDisabled = [...new Set(patch.mcpDisabled as string[])];
+    const kept = Object.entries(next.mcp).filter(([, on]) => on);
+    next.mcp = { ...Object.fromEntries(kept), ...Object.fromEntries((patch.mcpDisabled as string[]).map((n) => [n, false])) };
+  }
+  if (patch.mcp !== undefined) {
+    const merged = mergeChoices(next.mcp, patch.mcp);
+    if (typeof merged === "string") return { ok: false, status: 400, error: `mcp ${merged}` };
+    next.mcp = merged;
   }
   if (patch.chrome !== undefined) {
     if (typeof patch.chrome !== "boolean") return { ok: false, status: 400, error: "chrome must be a boolean" };
@@ -293,13 +345,12 @@ export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
     }
     next.chromeBrowser = patch.chromeBrowser.trim();
   }
-  if (patch.plugins !== undefined) {
-    if (!patch.plugins || typeof patch.plugins !== "object") return { ok: false, status: 400, error: "plugins must be an object" };
-    next.plugins = { ...(cur.plugins ?? {}), ...sanitizePlugins(patch.plugins) };
-  }
-  if (patch.skillGroups !== undefined) {
-    if (!patch.skillGroups || typeof patch.skillGroups !== "object") return { ok: false, status: 400, error: "skillGroups must be an object" };
-    next.skillGroups = { ...(cur.skillGroups ?? {}), ...sanitizePlugins(patch.skillGroups) };
+  for (const key of ["plugins", "skillGroups", "skillChoices"] as const) {
+    if (patch[key] === undefined) continue;
+    const merged = mergeChoices(cur[key], patch[key]);
+    if (typeof merged === "string") return { ok: false, status: 400, error: `${key} ${merged}` };
+    if (Object.keys(merged).length > 0) next[key] = merged;
+    else delete next[key];
   }
   domains[idx] = next;
   writeRegistry(domains);
@@ -399,6 +450,43 @@ export function setDomainMcpServer(
   mkdirSync(domainDir(slug), { recursive: true });
   writePrivateFile(path, `${JSON.stringify({ ...doc, mcpServers: servers }, null, 2)}\n`);
   return { ok: true, servers: Object.keys(servers).sort() };
+}
+
+export type SkillEditResult = { ok: true; path: string } | { ok: false; status: 400 | 404 | 409; error: string };
+
+const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * Create a skill of the domain's own: `<domain>/skills/<name>/SKILL.md` with
+ * its frontmatter. Claude loads it through the domain plugin (/<name> is
+ * namespaced as domain-<slug>:<name>), Codex through the linked skills.
+ */
+export function createDomainSkill(slug: string, name: unknown, description: unknown): SkillEditResult {
+  if (slug !== GLOBAL_DOMAIN && !getDomain(slug)) return { ok: false, status: 404, error: "Domain not found" };
+  if (typeof name !== "string" || !SKILL_NAME.test(name)) {
+    return { ok: false, status: 400, error: "Skill name: lowercase letters, digits and \"-\" (max 64)" };
+  }
+  if (typeof description !== "string" || !description.trim()) {
+    return { ok: false, status: 400, error: "A description is required: it tells the model when to use the skill" };
+  }
+  const dir = join(domainDir(slug), "skills", name);
+  if (existsSync(dir)) return { ok: false, status: 409, error: `The domain already has a skill "${name}"` };
+  mkdirSync(dir, { recursive: true });
+  const desc = description.trim().replace(/\s+/g, " ");
+  const path = join(dir, "SKILL.md");
+  writeFileSync(path, `---\nname: ${name}\ndescription: ${JSON.stringify(desc)}\n---\n\n# ${name}\n\nInstructions for the agent go here.\n`, "utf-8");
+  return { ok: true, path };
+}
+
+/** Remove a skill of the domain's own: its folder is moved to `<domain>/.removed-skills/<name>-<time>`, never deleted. */
+export function removeDomainSkill(slug: string, name: string): SkillEditResult {
+  if (slug !== GLOBAL_DOMAIN && !getDomain(slug)) return { ok: false, status: 404, error: "Domain not found" };
+  const dir = join(domainDir(slug), "skills", name);
+  if (!SKILL_NAME.test(name) || !existsSync(join(dir, "SKILL.md"))) return { ok: false, status: 404, error: `No skill "${name}" in the domain` };
+  const dest = join(domainDir(slug), ".removed-skills", `${name}-${Date.now()}`);
+  mkdirSync(dirname(dest), { recursive: true });
+  renameSync(dir, dest);
+  return { ok: true, path: dest };
 }
 
 /** Skill folder names (`skills/<name>/SKILL.md`) of a domain. */

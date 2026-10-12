@@ -103,12 +103,17 @@ describe("POST/PATCH/DELETE /domains", () => {
     const res = await app.request("/domains/herd", patch({ chrome: true, mcpDisabled: ["gh"], skillGroups: { user: false } }));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ chrome: true, mcpDisabled: ["gh"] });
+    expect(body).toMatchObject({ chrome: true, mcp: { gh: false } });
     expect(body.skillGroupStates).toEqual({
-      user: { on: false, own: true },
-      "claude-ai": { on: true, own: false },
-      design: { on: false, own: false }, // inherited from GLOBAL
+      user: { on: false, own: true, onCount: 0 },
+      "claude-ai": { on: true, own: false, onCount: 0 },
+      design: { on: false, own: false, onCount: 0 }, // inherited from GLOBAL
     });
+    // One design skill turned back on: the group is now "mixed" (1 of 18 on).
+    const one = await (await app.request("/domains/herd", patch({ skillChoices: { "design:polish": true } }))).json();
+    expect(one.skillGroupStates.design).toEqual({ on: false, own: false, onCount: 1 });
+    expect(one.skillStates["design:polish"]).toEqual({ on: true, own: true });
+    expect(one.skillStates["design:adapt"]).toEqual({ on: false, own: false });
     expect((await app.request("/domains/herd", patch({ chrome: "yes" }))).status).toBe(400);
     expect((await app.request("/domains/nope", patch({}))).status).toBe(404);
   });
@@ -208,7 +213,7 @@ describe("domain MCP servers", () => {
     let res = await app.request("/domains/herd/mcp/brain", put({ url: "http://100.1.2.3:7421/mcp" }));
     expect(res.status).toBe(200);
     expect((await res.json()).mcpServers).toEqual([
-      { name: "brain", source: "domain", enabled: true, type: "http", target: "http://100.1.2.3:7421/mcp" },
+      { name: "brain", source: "domain", enabled: true, own: false, type: "http", target: "http://100.1.2.3:7421/mcp" },
     ]);
     res = await app.request("/domains/herd/mcp/brain", del);
     expect((await res.json()).mcpServers).toEqual([]);
@@ -260,5 +265,21 @@ describe("account MCP servers", () => {
     expect(await res.json()).toEqual({ at: 5, servers: 1, error: "partial" });
     refreshAccountMcp.mockResolvedValueOnce({ servers: [], at: 6 });
     expect(await (await app.request("/account-mcp-servers/refresh", { method: "POST" })).json()).toEqual({ at: 6, servers: 0 });
+  });
+});
+
+// Skills of the domain's own from the Domains page: create and remove (moved aside).
+describe("domain skills", () => {
+  it("creates a skill, lists it with its description, and removes it", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    const res = await app.request("/domains/herd/skills", json({ name: "deploy-check", description: "Check a deploy" }));
+    expect(res.status).toBe(201);
+    expect((await res.json()).ownSkills).toEqual([{ name: "deploy-check", description: "Check a deploy" }]);
+    expect((await app.request("/domains/herd/skills", json({ name: "deploy-check", description: "x" }))).status).toBe(409);
+    expect((await app.request("/domains/herd/skills", json({ name: "Bad", description: "x" }))).status).toBe(400);
+    const del = await app.request("/domains/herd/skills/deploy-check", { method: "DELETE" });
+    expect((await del.json()).ownSkills).toEqual([]);
+    expect((await app.request("/domains/herd/skills/deploy-check", { method: "DELETE" })).status).toBe(404);
+    expect((await app.request("/domains/global/skills", { method: "POST", body: "bad" })).status).toBe(400);
   });
 });

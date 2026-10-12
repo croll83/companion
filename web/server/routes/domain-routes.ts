@@ -16,11 +16,13 @@ import {
   listDomains,
   readDomainMcp,
   setDomainMcpServer,
+  createDomainSkill,
+  removeDomainSkill,
   updateDomain,
   type DomainInfo,
 } from "../domain-store.js";
 import { domainMcpView, mcpTargetOf, mcpTypeOf, resolveDomain, type DomainMcpServerView } from "../domain-runtime.js";
-import { isSkillGroupOn, listSkillGroups, type SkillGroup } from "../skill-groups.js";
+import { isSkillGroupOn, isSkillOn, listSkillGroups, skillDescription, skillKey, type SkillGroup } from "../skill-groups.js";
 import { isPluginOn, listInstalledPlugins, type InstalledPlugin } from "../claude-plugins.js";
 import { cachedAccountMcpServers, isAccountMcpStale, refreshAccountMcpServers, type AccountMcpList } from "../account-mcp.js";
 
@@ -62,10 +64,17 @@ export interface DomainSummary extends DomainInfo {
   totalSessions: number;
   memoryNotes: number;
   skills: string[];
+  /** The domain's own skills with their descriptions. */
+  ownSkills: { name: string; description: string }[];
   mcpServers: DomainMcpServerView[];
   mcpError?: string;
-  /** Effective state of each skill group, and whether it is this domain's own choice. */
-  skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+  /**
+   * Each skill group: on as a whole, whether that is the domain's own choice,
+   * and how many of its skills are on (some on, some off = "mixed").
+   */
+  skillGroupStates: Record<string, { on: boolean; own: boolean; onCount: number }>;
+  /** Each single skill (keyed "<group>:<name>"): on or off, and whether the domain chose it itself. */
+  skillStates: Record<string, { on: boolean; own: boolean }>;
   /** Effective state of each installed plugin, and whether it is this domain's own choice. */
   pluginStates: Record<string, { on: boolean; own: boolean }>;
 }
@@ -88,10 +97,19 @@ function summarize(
   const mcp = readDomainMcp(domain.slug);
   const own = domain.slug === GLOBAL_DOMAIN ? undefined : domain;
   const skillGroupStates: DomainSummary["skillGroupStates"] = {};
+  const skillStates: DomainSummary["skillStates"] = {};
   for (const g of groups) {
+    let onCount = 0;
+    for (const name of g.skills) {
+      const key = skillKey(g.id, name);
+      const on = isSkillOn(g.id, name, own, global);
+      if (on) onCount++;
+      skillStates[key] = { on, own: domain.skillChoices?.[key] !== undefined };
+    }
     skillGroupStates[g.id] = {
       on: isSkillGroupOn(g.id, own, global),
       own: domain.skillGroups?.[g.id] !== undefined,
+      onCount,
     };
   }
   const pluginStates: DomainSummary["pluginStates"] = {};
@@ -105,9 +123,14 @@ function summarize(
     totalSessions: inDomain.length,
     memoryNotes: countMemoryNotes(domainMemoryDir(domain.slug)),
     skills: listDomainSkills(domain.slug),
+    ownSkills: listDomainSkills(domain.slug).map((name) => ({
+      name,
+      description: skillDescription(join(domainDir(domain.slug), "skills", name, "SKILL.md")),
+    })),
     mcpServers: domainMcpView(r),
     ...(mcp.error ? { mcpError: mcp.error } : {}),
     skillGroupStates,
+    skillStates,
     pluginStates,
   };
 }
@@ -157,6 +180,22 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
   api.post("/account-mcp-servers/refresh", async (c) => {
     const list = await refreshAccountMcp();
     return c.json({ at: list.at, servers: list.servers.length, ...(list.error ? { error: list.error } : {}) });
+  });
+
+  // A skill of the domain's own (<domain>/skills/<name>/SKILL.md): create, or remove (kept in .removed-skills).
+  api.post("/domains/:slug/skills", async (c) => {
+    const slug = c.req.param("slug");
+    const body = (await c.req.json().catch(() => ({}))) as { name?: unknown; description?: unknown };
+    const result = createDomainSkill(slug, body.name, body.description);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(summarize(slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!, ensureGlobalDomain(), sessions, listSkillGroups()), 201);
+  });
+
+  api.delete("/domains/:slug/skills/:name", (c) => {
+    const slug = c.req.param("slug");
+    const result = removeDomainSkill(slug, c.req.param("name"));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(summarize(slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!, ensureGlobalDomain(), sessions, listSkillGroups()));
   });
 
   // One MCP server of the domain's mcp.json: add or replace (URL or command), or remove.

@@ -21,6 +21,7 @@ import {
   ensureDomainLayout,
   ensureGlobalDomain,
   getDomain,
+  isMcpOn,
   listDomainSkills,
   readDomainMcp,
   readMemoryIndex,
@@ -30,7 +31,8 @@ import {
 import { SKILL_TOGGLE_MARKER, tomlInlineTable, tomlKey, tomlString } from "./companion-mcp-config.js";
 import {
   claudeSkillOverrides,
-  isSkillGroupOn,
+  disabledSkills,
+  skillKey,
   listSkillGroups,
   userSkillDirs,
   type SkillGroup,
@@ -116,7 +118,9 @@ export interface DomainMcpServerView {
   source: "global" | "domain" | "account";
   /** Whether sessions of this domain get it. */
   enabled: boolean;
-  /** Turned off in the GLOBAL domain itself (so off everywhere). */
+  /** The domain made this choice itself (else it follows GLOBAL, or for GLOBAL the default: on). */
+  own: boolean;
+  /** Off because GLOBAL turns it off and the domain has no choice of its own. */
   disabledGlobally?: boolean;
   type: string;
   /** The URL, or the command and its args (never env or headers: they may hold tokens). */
@@ -125,19 +129,21 @@ export interface DomainMcpServerView {
   health?: string;
 }
 
+/** The domain whose choices apply on top of GLOBAL's (none for GLOBAL itself). */
+function ownChoices(r: ResolvedDomain): DomainInfo | undefined {
+  return r.isGlobal ? undefined : r.domain;
+}
+
 /**
- * The MCP servers a session of `r.domain` gets: GLOBAL's (minus the ones
- * GLOBAL turns off), then the domain's own (same name: the domain wins), minus
- * the ones the domain turns off.
+ * The MCP servers a session of `r.domain` gets: GLOBAL's mcp.json, then the
+ * domain's own (same name: the domain wins), keeping the ones that are on
+ * (the domain's choice, else GLOBAL's, else on).
  */
 export function effectiveMcpServers(r: ResolvedDomain): Record<string, McpServerDef> {
-  const out: Record<string, McpServerDef> = {};
-  for (const [name, def] of Object.entries(readDomainMcp(GLOBAL_DOMAIN).servers)) {
-    if (!r.global.mcpDisabled.includes(name)) out[name] = def;
-  }
-  if (!r.isGlobal) {
-    for (const [name, def] of Object.entries(readDomainMcp(r.domain.slug).servers)) out[name] = def;
-    for (const name of r.domain.mcpDisabled) delete out[name];
+  const out: Record<string, McpServerDef> = { ...readDomainMcp(GLOBAL_DOMAIN).servers };
+  if (!r.isGlobal) Object.assign(out, readDomainMcp(r.domain.slug).servers);
+  for (const name of Object.keys(out)) {
+    if (!isMcpOn(name, ownChoices(r), r.global)) delete out[name];
   }
   return out;
 }
@@ -152,56 +158,59 @@ export function mcpTargetOf(def: McpServerDef): string {
   return def.url ?? [def.command ?? "", ...(def.args ?? [])].join(" ").trim();
 }
 
+/** On/off state of a server for a domain, and where it comes from. */
+function mcpState(name: string, r: ResolvedDomain): Pick<DomainMcpServerView, "enabled" | "own" | "disabledGlobally"> {
+  const own = !r.isGlobal && r.domain.mcp[name] !== undefined;
+  const enabled = isMcpOn(name, ownChoices(r), r.global);
+  return {
+    enabled,
+    own: r.isGlobal ? r.global.mcp[name] !== undefined : own,
+    // Off because GLOBAL turns it off and the domain has no choice of its own.
+    ...(!r.isGlobal && !own && r.global.mcp[name] === false ? { disabledGlobally: true } : {}),
+  };
+}
+
 /**
  * What the Domains page lists for a domain: every server it could get, with
- * its toggle state. Account servers (account-mcp.ts) come last, unless a
- * mcp.json declares the same name.
+ * its state. Account servers (account-mcp.ts) come last, unless a mcp.json
+ * declares the same name.
  */
 export function domainMcpView(r: ResolvedDomain, account: AccountMcpServer[] = cachedAccountMcpServers().servers): DomainMcpServerView[] {
   const view = new Map<string, DomainMcpServerView>();
-  const typeOf = mcpTypeOf;
-  const targetOf = mcpTargetOf;
   for (const [name, def] of Object.entries(readDomainMcp(GLOBAL_DOMAIN).servers)) {
-    const off = r.global.mcpDisabled.includes(name);
-    view.set(name, {
-      name,
-      source: "global",
-      enabled: !off && (r.isGlobal || !r.domain.mcpDisabled.includes(name)),
-      ...(off && !r.isGlobal ? { disabledGlobally: true } : {}),
-      type: typeOf(def),
-      target: targetOf(def),
-    });
+    view.set(name, { name, source: "global", ...mcpState(name, r), type: mcpTypeOf(def), target: mcpTargetOf(def) });
   }
   if (!r.isGlobal) {
     for (const [name, def] of Object.entries(readDomainMcp(r.domain.slug).servers)) {
-      view.set(name, { name, source: "domain", enabled: !r.domain.mcpDisabled.includes(name), type: typeOf(def), target: targetOf(def) });
+      view.set(name, { name, source: "domain", ...mcpState(name, r), type: mcpTypeOf(def), target: mcpTargetOf(def) });
     }
   }
   for (const a of account) {
     if (view.has(a.name)) continue;
-    const off = r.global.mcpDisabled.includes(a.name);
     view.set(a.name, {
       name: a.name,
       source: "account",
-      enabled: !off && (r.isGlobal || !r.domain.mcpDisabled.includes(a.name)),
-      ...(off && !r.isGlobal ? { disabledGlobally: true } : {}),
+      ...mcpState(a.name, r),
       type: a.connector ? "claude.ai" : (/^https?:/.test(a.target) ? "http" : "stdio"),
       target: a.target,
       health: a.health,
     });
   }
-  return [...view.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const order = { domain: 0, global: 1, account: 2 } as const;
+  return [...view.values()].sort((a, b) => order[a.source] - order[b.source] || a.name.localeCompare(b.name));
+}
+
+/** Names of the servers turned off for a domain (its choices and GLOBAL's), Companion's own excluded. */
+export function deniedMcpServers(r: ResolvedDomain): string[] {
+  const names = new Set([...Object.keys(r.global.mcp), ...(r.isGlobal ? [] : Object.keys(r.domain.mcp))]);
+  return [...names].filter((n) => n !== "companion" && !isMcpOn(n, ownChoices(r), r.global)).sort();
 }
 
 // ── Skill groups ────────────────────────────────────────────────────────────
 
-/** The skill groups (skill-groups.ts) turned off for sessions of `r.domain`. */
-export function disabledSkillGroups(r: ResolvedDomain, groups: SkillGroup[] = listSkillGroups()): Set<SkillGroupId> {
-  const off = new Set<SkillGroupId>();
-  for (const g of groups) {
-    if (!isSkillGroupOn(g.id, r.isGlobal ? undefined : r.domain, r.global)) off.add(g.id);
-  }
-  return off;
+/** The skills (skill-groups.ts) turned off for sessions of `r.domain`, as skillKey()s. */
+export function disabledDomainSkills(r: ResolvedDomain, groups: SkillGroup[] = listSkillGroups()): Set<string> {
+  return disabledSkills(ownChoices(r), r.global, groups);
 }
 
 // ── Claude ──────────────────────────────────────────────────────────────────
@@ -290,10 +299,10 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   // Servers the CLI loads by itself (the user's own, claude.ai connectors)
   // are turned off by name; a name from a mcp.json is already left out of
   // --mcp-config, denying it too is harmless. Companion's own server never.
-  const denied = [...new Set([...r.global.mcpDisabled, ...(r.isGlobal ? [] : r.domain.mcpDisabled)])].filter((n) => n !== "companion");
+  const denied = deniedMcpServers(r);
   if (denied.length > 0) settings.deniedMcpServers = denied.map((serverName) => ({ serverName }));
   const groups = listSkillGroups();
-  const skillOverrides = claudeSkillOverrides(disabledSkillGroups(r, groups), groups);
+  const skillOverrides = claudeSkillOverrides(disabledDomainSkills(r, groups), groups);
   if (Object.keys(skillOverrides).length > 0) settings.skillOverrides = skillOverrides;
 
   return { args, env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" }, settings, chrome, chromeBrowser };
@@ -494,14 +503,14 @@ export function linkCodexSkills(
   codexHome: string,
   r: ResolvedDomain,
   previous: string[],
-  off: ReadonlySet<SkillGroupId> = disabledSkillGroups(r),
+  off: ReadonlySet<string> = disabledDomainSkills(r),
   plugins: InstalledPlugin[] = domainPlugins(r),
 ): string[] {
   const skillsDir = join(codexHome, "skills");
   const wanted = new Map<string, string>();
   // The user's ~/.claude/skills, which Codex never reads by itself: linked
   // while their group is on, so Codex sessions get what Claude sessions get.
-  if (!off.has("user")) for (const [name, dir] of userSkillDirs()) wanted.set(name, dir);
+  for (const [name, dir] of userSkillDirs()) if (!off.has(skillKey("user", name))) wanted.set(name, dir);
   // The skills of the domain's plugins (Claude gets them through the plugin).
   for (const p of plugins) for (const name of p.skills) wanted.set(name, join(p.installPath, "skills", name));
   for (const name of listDomainSkills(GLOBAL_DOMAIN)) wanted.set(name, join(r.globalDir, "skills", name));
@@ -560,7 +569,7 @@ export function prepareCodexDomainHome(
   }
   const state = readCodexState(codexHome);
   const groups = listSkillGroups();
-  const off = disabledSkillGroups(r, groups);
+  const off = disabledDomainSkills(r, groups);
   const plugins = domainPlugins(r);
   const skills = linkCodexSkills(codexHome, r, state.skills, off, plugins);
   const mcp = codexDomainMcp(codexHome, r, plugins);
@@ -586,12 +595,13 @@ export function prepareCodexDomainHome(
   };
 }
 
-/** `[[skills.config]]` entries (one per skill, marker first) turning off the "toggled" groups that are off. */
-export function codexSkillToggles(groups: SkillGroup[], off: ReadonlySet<SkillGroupId>): string[][] {
+/** `[[skills.config]]` entries (one per skill, marker first) turning off the skills of "toggled" groups that are off. */
+export function codexSkillToggles(groups: SkillGroup[], off: ReadonlySet<string>): string[][] {
   const out: string[][] = [];
   for (const g of groups) {
-    if (g.codex !== "toggled" || !off.has(g.id)) continue;
+    if (g.codex !== "toggled") continue;
     for (const name of g.skills) {
+      if (!off.has(skillKey(g.id, name))) continue;
       out.push([`${SKILL_TOGGLE_MARKER} (${g.id}). Rewritten at every launch.`, "[[skills.config]]", `name = ${tomlString(name)}`, "enabled = false"]);
     }
   }

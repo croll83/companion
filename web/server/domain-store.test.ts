@@ -34,6 +34,8 @@ import {
   readDomainMcp,
   readMemoryIndex,
   setDomainMcpServer,
+  createDomainSkill,
+  removeDomainSkill,
   slugify,
   updateDomain,
 } from "./domain-store.js";
@@ -91,7 +93,7 @@ describe("GLOBAL domain", () => {
   // Created at server start: registry entry + full folder layout.
   it("is created once with its folder layout", () => {
     const global = ensureGlobalDomain();
-    expect(global).toMatchObject({ slug: GLOBAL_DOMAIN, name: "GLOBAL", mcpDisabled: [], chrome: false });
+    expect(global).toMatchObject({ slug: GLOBAL_DOMAIN, name: "GLOBAL", mcp: {}, chrome: false });
     const dir = domainDir(GLOBAL_DOMAIN);
     for (const f of ["CLAUDE.md", "memory/MEMORY.md", ".claude-plugin/plugin.json", "mcp.json"]) {
       expect(existsSync(join(dir, f))).toBe(true);
@@ -120,7 +122,7 @@ describe("createDomain", () => {
     const res = createDomain({ name: "Herd", description: "The herd project" });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.domain).toMatchObject({ slug: "herd", name: "Herd", description: "The herd project", chrome: false, mcpDisabled: [] });
+    expect(res.domain).toMatchObject({ slug: "herd", name: "Herd", description: "The herd project", chrome: false, mcp: {} });
     const dir = domainDir("herd");
     // The domain is a Claude Code plugin named domain-<slug>.
     expect(JSON.parse(readFileSync(join(dir, ".claude-plugin", "plugin.json"), "utf-8"))).toEqual({
@@ -175,17 +177,40 @@ describe("updateDomain", () => {
       description: "  new  ",
       mcpDisabled: ["a", "a", "b"],
       chrome: true,
-      plugins: { "p@m": true, bad: "x" },
+      plugins: { "p@m": true },
       skillGroups: { user: false },
     });
     expect(res).toMatchObject({
       ok: true,
-      domain: { name: "Herd 2", description: "new", mcpDisabled: ["a", "b"], chrome: true, plugins: { "p@m": true }, skillGroups: { user: false } },
+      domain: { name: "Herd 2", description: "new", mcp: { a: false, b: false }, chrome: true, plugins: { "p@m": true }, skillGroups: { user: false } },
     });
+    // A value that is not true/false/null is refused (it used to be dropped silently).
+    expect(updateDomain("herd", { plugins: { bad: "x" } })).toMatchObject({ ok: false, status: 400 });
     // skillGroups merge: setting one group keeps the others.
     const res2 = updateDomain("herd", { skillGroups: { design: false }, description: "" });
     expect(res2).toMatchObject({ ok: true, domain: { skillGroups: { user: false, design: false } } });
     expect(getDomain("herd")?.description).toBeUndefined();
+  });
+
+  // The page sends one change at a time: maps merge, null removes a choice
+  // (back to GLOBAL's), so two quick changes never undo each other.
+  it("merges partial on/off maps, null going back to the inherited state", () => {
+    createDomain({ name: "Herd" });
+    updateDomain("herd", { mcp: { a: false }, skillChoices: { "user:x": false }, plugins: { "p@m": true } });
+    updateDomain("herd", { mcp: { b: true }, skillChoices: { "design:y": true } });
+    expect(getDomain("herd")).toMatchObject({ mcp: { a: false, b: true }, skillChoices: { "user:x": false, "design:y": true }, plugins: { "p@m": true } });
+    updateDomain("herd", { mcp: { a: null, " ": true }, skillChoices: { "user:x": null, "design:y": null }, plugins: { "p@m": null } });
+    const herd = getDomain("herd")!;
+    expect(herd.mcp).toEqual({ b: true });
+    expect(herd.skillChoices).toBeUndefined();
+    expect(herd.plugins).toBeUndefined();
+    expect(updateDomain("herd", { mcp: { a: "off" } })).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('"a"') });
+    expect(updateDomain("herd", { mcp: ["a"] })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain("herd", { skillChoices: 3 })).toMatchObject({ ok: false, status: 400 });
+    // The older list form replaces every "off" choice and keeps the "on" ones.
+    updateDomain("herd", { mcp: { c: false } });
+    updateDomain("herd", { mcpDisabled: ["d"] });
+    expect(getDomain("herd")?.mcp).toEqual({ b: true, d: false });
   });
 
   // Which Chrome browser the domain's sessions drive: "local" by default, a
@@ -301,7 +326,8 @@ describe("registry robustness", () => {
     writeFileSync(join(h.home, "domains.json"), "{not json");
     expect(listDomains()).toEqual([]);
     writeFileSync(join(h.home, "domains.json"), JSON.stringify({ domains: [{ slug: "../x" }, { slug: "ok", mcpDisabled: [1, "a"] }, null] }));
-    expect(listDomains()).toEqual([expect.objectContaining({ slug: "ok", name: "ok", mcpDisabled: ["a"], chrome: false })]);
+    // A registry from before the on/off map: its mcpDisabled list becomes "off" choices.
+    expect(listDomains()).toEqual([expect.objectContaining({ slug: "ok", name: "ok", mcp: { a: false }, chrome: false })]);
     writeFileSync(join(h.home, "domains.json"), JSON.stringify({ domains: "x" }));
     expect(listDomains()).toEqual([]);
   });
@@ -344,5 +370,42 @@ describe("domain contents", () => {
     expect(readMemoryIndex(mem)).toBe("x".repeat(50));
     expect(readMemoryIndex(mem, 10)).toContain("index truncated");
     expect(readMemoryIndex(join(tmp, "none"))).toBe("");
+  });
+});
+
+// Skills of the domain's own, created from the Domains page; removing one
+// moves its folder aside instead of deleting it.
+describe("domain skills", () => {
+  it("creates a skill with its frontmatter and lists it", () => {
+    createDomain({ name: "Herd" });
+    const res = createDomainSkill("herd", "deploy-check", "  Check a deploy\n before merging ");
+    expect(res).toMatchObject({ ok: true });
+    const text = readFileSync(join(domainDir("herd"), "skills", "deploy-check", "SKILL.md"), "utf-8");
+    expect(text.startsWith('---\nname: deploy-check\ndescription: "Check a deploy before merging"\n---\n')).toBe(true);
+    expect(listDomainSkills("herd")).toEqual(["deploy-check"]);
+    expect(createDomainSkill(GLOBAL_DOMAIN, "shared", "For everyone")).toMatchObject({ ok: true });
+  });
+
+  it("validates the domain, the name and the description, and refuses duplicates", () => {
+    createDomain({ name: "Herd" });
+    expect(createDomainSkill("nope", "a", "d")).toMatchObject({ ok: false, status: 404 });
+    expect(createDomainSkill("herd", "Bad Name", "d")).toMatchObject({ ok: false, status: 400 });
+    expect(createDomainSkill("herd", "../x", "d")).toMatchObject({ ok: false, status: 400 });
+    expect(createDomainSkill("herd", "ok", " ")).toMatchObject({ ok: false, status: 400 });
+    expect(createDomainSkill("herd", "ok", 3)).toMatchObject({ ok: false, status: 400 });
+    createDomainSkill("herd", "ok", "d");
+    expect(createDomainSkill("herd", "ok", "d")).toMatchObject({ ok: false, status: 409 });
+  });
+
+  it("removes a skill by moving it to .removed-skills, never deleting it", () => {
+    createDomain({ name: "Herd" });
+    createDomainSkill("herd", "old", "Old one");
+    const res = removeDomainSkill("herd", "old");
+    expect(res.ok).toBe(true);
+    expect(listDomainSkills("herd")).toEqual([]);
+    expect(existsSync(join((res as { path: string }).path, "SKILL.md"))).toBe(true);
+    expect(removeDomainSkill("herd", "old")).toMatchObject({ ok: false, status: 404 });
+    expect(removeDomainSkill("herd", "../etc")).toMatchObject({ ok: false, status: 404 });
+    expect(removeDomainSkill("nope", "old")).toMatchObject({ ok: false, status: 404 });
   });
 });

@@ -7,8 +7,12 @@ import {
   DESIGN_SKILLS,
   claudeConfigHome,
   claudeSkillOverrides,
+  disabledSkills,
   isSkillGroupOn,
+  isSkillOn,
   listSkillGroups,
+  skillDescription,
+  skillKey,
   syncedSkillNames,
   userSkillDirs,
 } from "./skill-groups.js";
@@ -69,6 +73,19 @@ describe("discovery", () => {
     expect(syncedSkillNames()).toEqual([]);
   });
 
+  // The page shows what each skill does, from its SKILL.md frontmatter.
+  it("reads each skill's description from its frontmatter", () => {
+    writeFileSync(join(tmp, "claude", "skills", "foundry-poc", "SKILL.md"), '---\nname: foundry-poc\ndescription: "Write a Foundry PoC"\n---\nbody');
+    writeFileSync(join(tmp, "claude", "skills", "synced", "sync-1", "pdf", "SKILL.md"), "---\ndescription: Read PDFs\n---\n");
+    const groups = listSkillGroups();
+    expect(groups[0].descriptions).toEqual({ "foundry-poc": "Write a Foundry PoC" });
+    expect(groups[1].descriptions).toEqual({ pdf: "Read PDFs" });
+    expect(groups[2].descriptions).toEqual({});
+    expect(skillDescription(join(tmp, "missing", "SKILL.md"))).toBe("");
+    writeFileSync(join(tmp, "plain.md"), "no frontmatter");
+    expect(skillDescription(join(tmp, "plain.md"))).toBe("");
+  });
+
   it("describes the three groups and how Codex gets them", () => {
     const groups = listSkillGroups();
     expect(groups.map((g) => [g.id, g.codex])).toEqual([["user", "linked"], ["claude-ai", "unsupported"], ["design", "toggled"]]);
@@ -89,14 +106,34 @@ describe("toggles", () => {
 
   // Synced skills are keyed with their plugin prefix: a bare name would also
   // turn off a bundled skill with the same name (verified on CLI 2.1.293).
-  it("builds Claude skillOverrides for the groups that are off", () => {
+  it("builds Claude skillOverrides for the skills that are off", () => {
     expect(claudeSkillOverrides(new Set())).toEqual({});
-    expect(claudeSkillOverrides(new Set(["user", "claude-ai"]))).toEqual({
+    const groupsOff = disabledSkills({ skillGroups: { user: false, "claude-ai": false } }, undefined);
+    expect(claudeSkillOverrides(groupsOff)).toEqual({
       "foundry-poc": "off",
       "ton-audit": "off",
       "anthropic-skills:docs": "off",
       "anthropic-skills:pdf": "off",
     });
-    expect(Object.keys(claudeSkillOverrides(new Set(["design"])))).toEqual([...DESIGN_SKILLS]);
+    expect(Object.keys(claudeSkillOverrides(disabledSkills({ skillGroups: { design: false } }, undefined)))).toEqual([...DESIGN_SKILLS]);
+    // A single skill off, the rest of its group on.
+    expect(claudeSkillOverrides(new Set([skillKey("claude-ai", "pdf"), skillKey("user", "ton-audit")]))).toEqual({
+      "ton-audit": "off",
+      "anthropic-skills:pdf": "off",
+    });
+  });
+
+  // A single skill's choice wins over its group's; the domain's choices win
+  // over GLOBAL's (skill, then group, at each level).
+  it("resolves a single skill: domain skill, domain group, GLOBAL skill, GLOBAL group, on", () => {
+    const key = skillKey("user", "foundry-poc");
+    expect(key).toBe("user:foundry-poc");
+    expect(isSkillOn("user", "foundry-poc", undefined, undefined)).toBe(true);
+    expect(isSkillOn("user", "foundry-poc", undefined, { skillGroups: { user: false } })).toBe(false);
+    expect(isSkillOn("user", "foundry-poc", undefined, { skillGroups: { user: false }, skillChoices: { [key]: true } })).toBe(true);
+    expect(isSkillOn("user", "foundry-poc", { skillGroups: { user: true } }, { skillChoices: { [key]: false } })).toBe(true);
+    expect(isSkillOn("user", "foundry-poc", { skillGroups: { user: true }, skillChoices: { [key]: false } }, undefined)).toBe(false);
+    expect(isSkillOn("user", "ton-audit", { skillChoices: { [key]: false } }, undefined)).toBe(true);
+    expect([...disabledSkills({ skillChoices: { [key]: false } }, undefined)]).toEqual([key]);
   });
 });

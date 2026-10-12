@@ -37,7 +37,7 @@ import {
   codexDomainMcp,
   codexMcpTable,
   codexSkillToggles,
-  disabledSkillGroups,
+  disabledDomainSkills,
   domainMcpView,
   domainRuntimeDir,
   effectiveMcpServers,
@@ -126,16 +126,30 @@ describe("MCP servers", () => {
     });
   });
 
+  // The domain's own servers first, then GLOBAL's; "own" = the domain chose
+  // the state itself; "disabledGlobally" = off only because GLOBAL says so.
   it("lists every server with its source and state for the Domains page", () => {
     expect(domainMcpView(resolveDomain("herd"))).toEqual([
-      { name: "gh", source: "global", enabled: false, type: "stdio", target: "gh-mcp" },
-      { name: "noisy", source: "global", enabled: false, disabledGlobally: true, type: "stdio", target: "n" },
-      { name: "ping", source: "domain", enabled: true, type: "stdio", target: "node ping.js" },
-      { name: "shared", source: "domain", enabled: true, type: "stdio", target: "herd-version" },
+      { name: "ping", source: "domain", enabled: true, own: false, type: "stdio", target: "node ping.js" },
+      { name: "shared", source: "domain", enabled: true, own: false, type: "stdio", target: "herd-version" },
+      { name: "gh", source: "global", enabled: false, own: true, type: "stdio", target: "gh-mcp" },
+      { name: "noisy", source: "global", enabled: false, own: false, disabledGlobally: true, type: "stdio", target: "n" },
     ]);
     expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN)).find((s) => s.name === "noisy")).toEqual({
-      name: "noisy", source: "global", enabled: false, type: "stdio", target: "n",
+      name: "noisy", source: "global", enabled: false, own: true, type: "stdio", target: "n",
     });
+  });
+
+  // GLOBAL's choice is a default, not a lock: a domain can turn back on a
+  // server GLOBAL turns off (Marco's decision, 2026-10-13).
+  it("lets a domain turn on a server GLOBAL turns off", () => {
+    updateDomain("herd", { mcp: { noisy: true } });
+    expect(effectiveMcpServers(resolveDomain("herd"))).toHaveProperty("noisy");
+    expect(domainMcpView(resolveDomain("herd")).find((s) => s.name === "noisy")).toMatchObject({ enabled: true, own: true });
+    expect(effectiveMcpServers(resolveDomain(GLOBAL_DOMAIN))).not.toHaveProperty("noisy");
+    // Back to GLOBAL's choice.
+    updateDomain("herd", { mcp: { noisy: null } });
+    expect(effectiveMcpServers(resolveDomain("herd"))).not.toHaveProperty("noisy");
   });
 
   // The account's servers (cached `claude mcp list`) are listed for every
@@ -151,9 +165,9 @@ describe("MCP servers", () => {
     updateDomain("herd", { mcpDisabled: ["gh", "github"] });
     const herd = domainMcpView(resolveDomain("herd"), account).filter((v) => v.source === "account");
     expect(herd).toEqual([
-      { name: "claude.ai Gmail", source: "account", enabled: true, type: "claude.ai", target: "https://gmail/mcp", health: "connected" },
-      { name: "github", source: "account", enabled: false, type: "stdio", target: "npx gh", health: "connected" },
-      { name: "remote", source: "account", enabled: false, disabledGlobally: true, type: "http", target: "https://r/mcp", health: "needs-auth" },
+      { name: "claude.ai Gmail", source: "account", enabled: true, own: false, type: "claude.ai", target: "https://gmail/mcp", health: "connected" },
+      { name: "github", source: "account", enabled: false, own: true, type: "stdio", target: "npx gh", health: "connected" },
+      { name: "remote", source: "account", enabled: false, own: false, disabledGlobally: true, type: "http", target: "https://r/mcp", health: "needs-auth" },
     ]);
     // In GLOBAL a server off in GLOBAL is simply off (not "off in GLOBAL").
     expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN), account).find((v) => v.name === "remote")).toMatchObject({ enabled: false });
@@ -271,20 +285,32 @@ describe("Claude spawn", () => {
 });
 
 describe("skill groups", () => {
-  it("resolves the groups that are off for a domain (domain, then GLOBAL)", () => {
+  it("resolves the skills that are off for a domain (its choices, then GLOBAL's)", () => {
     updateDomain(GLOBAL_DOMAIN, { skillGroups: { design: false } });
-    updateDomain("herd", { skillGroups: { "claude-ai": false } });
-    expect([...disabledSkillGroups(resolveDomain("herd"))].sort()).toEqual(["claude-ai", "design"]);
-    expect([...disabledSkillGroups(resolveDomain(GLOBAL_DOMAIN))]).toEqual(["design"]);
+    updateDomain("herd", { skillGroups: { "claude-ai": false }, skillChoices: { "design:polish": true } });
+    const herd = disabledDomainSkills(resolveDomain("herd"));
+    expect(herd.has("design:adapt")).toBe(true);
+    // A single skill turned back on in the domain, while its group is off in GLOBAL.
+    expect(herd.has("design:polish")).toBe(false);
+    expect([...herd].every((k) => k.startsWith("design:") || k.startsWith("claude-ai:"))).toBe(true);
+    const global = disabledDomainSkills(resolveDomain(GLOBAL_DOMAIN));
+    expect(global.size).toBe(18);
+    expect(global.has("design:polish")).toBe(true);
   });
 
   // Codex turns off the repository design skills it finds by itself with
   // marked [[skills.config]] entries (verified on Codex 0.161).
   it("writes Codex [[skills.config]] entries for toggled groups only", () => {
     const groups = listSkillGroups();
-    expect(codexSkillToggles(groups, new Set(["user", "claude-ai"]))).toEqual([]);
-    const toggles = codexSkillToggles(groups, new Set(["design"]));
+    expect(codexSkillToggles(groups, new Set(["user:foundry-poc", "claude-ai:pdf"]))).toEqual([]);
+    const toggles = codexSkillToggles(groups, new Set(groups[2].skills.map((n) => `design:${n}`)));
     expect(toggles).toHaveLength(18);
+    expect(codexSkillToggles(groups, new Set(["design:polish"]))).toEqual([[
+      "# Managed by Companion: skill toggle (design). Rewritten at every launch.",
+      "[[skills.config]]",
+      'name = "polish"',
+      "enabled = false",
+    ]]);
     expect(toggles[0]).toEqual([
       "# Managed by Companion: skill toggle (design). Rewritten at every launch.",
       "[[skills.config]]",
@@ -349,6 +375,18 @@ describe("Codex skills and home", () => {
     expect(linkCodexSkills(home, resolveDomain("herd"), linked)).not.toContain("foundry-poc");
     expect(existsSync(join(home, "skills", "foundry-poc"))).toBe(false);
     warn.mockRestore();
+  });
+
+  // Single skills: one user skill off for the domain is not linked, the others are.
+  it("links the user's skills one by one, following the domain's single-skill choices", () => {
+    addSkill(join(tmp, "claude", "skills"), "foundry-poc");
+    addSkill(join(tmp, "claude", "skills"), "ton-audit");
+    const home = join(tmp, "codex");
+    updateDomain("herd", { skillChoices: { "user:ton-audit": false } });
+    expect(linkCodexSkills(home, resolveDomain("herd"), []).sort()).toEqual(["foundry-poc"]);
+    // Group off but one skill kept on in the domain.
+    updateDomain("herd", { skillGroups: { user: false }, skillChoices: { "user:ton-audit": true } });
+    expect(linkCodexSkills(home, resolveDomain("herd"), ["foundry-poc"]).sort()).toEqual(["ton-audit"]);
   });
 
   it("returns nothing to link when there are no skills", () => {
