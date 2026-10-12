@@ -15,6 +15,7 @@ import * as sessionLinearIssues from "./session-linear-issues.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
+import { registerDomainRoutes } from "./routes/domain-routes.js";
 import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
@@ -35,6 +36,7 @@ import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
 import { isMcpRouteAllowed, isMcpToken, mcpCallerRefusal, verifyMcpToken } from "./companion-mcp-auth.js";
+import { listConnectedBrowsers } from "./chrome-browser-probe.js";
 import QRCode from "qrcode";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
@@ -258,6 +260,11 @@ export function createRoutes(
         ...s,
         // Bridge state is the source of truth for runtime cwd updates.
         cwd: bridge?.cwd || s.cwd,
+        // The session's own folder: the one it was started in (or moved to
+        // with "Change folder"). It decides CLAUDE.md, skills and settings,
+        // and the sidebar groups by it; the runtime cwd above drifts as the
+        // CLI runs commands (`cd`).
+        folder: s.cwd,
         name: names[s.sessionId] ?? s.name,
         gitBranch: bridge?.git_branch || "",
         gitAhead: bridge?.git_ahead || 0,
@@ -438,6 +445,46 @@ export function createRoutes(
     const result = await orchestrator.killSession(id);
     if (!result.ok) return c.json({ error: "Session not found or already exited" }, 404);
     return c.json({ ok: true });
+  });
+
+  // Preview / apply moving a session to another working folder.
+  api.get("/sessions/:id/folder", (c) => {
+    const result = orchestrator.previewSessionFolder(c.req.param("id"), c.req.query("cwd"));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
+  });
+
+  api.post("/sessions/:id/folder", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const result = await orchestrator.changeSessionFolder(c.req.param("id"), (body as { cwd?: unknown }).cwd);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
+  });
+
+  // Claude in Chrome browsers connected to the account (for the per-domain
+  // browser selector on the Domains page). Listed by a short isolated Claude
+  // query that calls `list_connected_browsers`; cached briefly. `force`
+  // bypasses the cache.
+  api.get("/chrome-browsers", async (c) => {
+    const force = c.req.query("force") === "1" || c.req.query("force") === "true";
+    const result = await listConnectedBrowsers(force ? { force: true } : undefined);
+    return c.json(result);
+  });
+
+  // Move a (non-legacy) session to another domain; its CLI restarts on the same conversation.
+  api.post("/sessions/:id/domain", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const result = await orchestrator.changeSessionDomain(c.req.param("id"), (body as { domain?: unknown }).domain);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
+  });
+
+  // Migrate a legacy session (from before domains) into a domain; its CLI restarts on the same conversation.
+  api.post("/sessions/:id/migrate-domain", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const result = await orchestrator.migrateSessionToDomain(c.req.param("id"), (body as { domain?: unknown }).domain);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
   });
 
   api.post("/sessions/:id/relaunch", async (c) => {
@@ -841,6 +888,7 @@ export function createRoutes(
 
   registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
   registerEnvRoutes(api);
+  registerDomainRoutes(api, launcher);
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api, {

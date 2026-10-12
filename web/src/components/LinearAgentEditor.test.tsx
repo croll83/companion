@@ -61,6 +61,7 @@ const defaultForm: AgentFormData = {
   envSlug: "",
   env: [],
   codexInternetAccess: false,
+    keepRunSessions: false,
   mcpServers: {},
   allowedTools: [],
   webhookEnabled: false,

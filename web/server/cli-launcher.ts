@@ -30,11 +30,22 @@ import { DEFAULT_CLI_BRIDGE_MODE } from "./cli-bridge-mode.js";
 import { resolveSessionEnv } from "./session-env.js";
 import {
   buildCompanionMcpEntry,
+  companionTable,
   removeClaudeMcpConfig,
+  rewriteCodexMcpServers,
   upsertCodexMcpServer,
   writeClaudeMcpConfig,
+  COMPANION_MCP_SERVER_NAME,
   type CompanionMcpEntry,
 } from "./companion-mcp-config.js";
+import { GLOBAL_DOMAIN } from "./domain-store.js";
+import {
+  buildClaudeDomainSpawn,
+  prepareCodexDomainHome,
+  removeDomainRuntime,
+  type ClaudeDomainSpawn,
+  type CodexDomainMcp,
+} from "./domain-runtime.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -265,6 +276,27 @@ export interface SdkSessionInfo {
   /** Names (never values) of the env profiles applied at the last spawn. */
   envProfiles?: string[];
 
+  /**
+   * Domain slug (domain-store.ts): what the session shares with the other
+   * sessions of the domain — memory, skills, MCP servers, instructions.
+   */
+  domain?: string;
+  /**
+   * The session existed before domains: it is shown under GLOBAL but spawns
+   * exactly as before (no domain flags, its folder-based Claude memory).
+   */
+  legacyMemory?: boolean;
+  /**
+   * Legacy Claude sessions moved with "Change folder": the auto-memory folder
+   * of the folder they were in, passed as `autoMemoryDirectory` at every
+   * spawn so the move does not switch them to another memory.
+   */
+  pinnedMemoryDir?: string;
+  /** Claude only: the last spawn had `--chrome` (its domain turns Claude in Chrome on). */
+  chromeActive?: boolean;
+  /** Claude only, when chromeActive: the browser to drive ("local" or a deviceId). See chrome-browser.ts. */
+  chromeBrowserPref?: string;
+
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport. */
   codexWsPort?: number;
@@ -330,6 +362,16 @@ export interface LaunchOptions {
   forkSource?: ForkSource;
   /** Optional system prompt to inject into Codex sessions (e.g. Linear context). */
   systemPrompt?: string;
+  /**
+   * Domain slug. Without it the session is "legacy" (spawned as before
+   * domains existed); Companion's own entry points always pass one.
+   */
+  domain?: string;
+}
+
+/** Whether a session spawns with its domain's context (see SdkSessionInfo.legacyMemory). */
+export function usesDomain(info: Pick<SdkSessionInfo, "domain" | "legacyMemory">): boolean {
+  return !!info.domain && !info.legacyMemory;
 }
 
 /**
@@ -442,13 +484,29 @@ export class CliLauncher {
     }
   }
 
-  /** Upsert (or, when turned off, remove) `mcp_servers.companion` in a Codex session's config.toml. */
-  private syncCodexMcp(sessionId: string, codexHome: string): void {
-    if (!this.companionMcp) return;
+  /**
+   * Upsert (or, when turned off, remove) `mcp_servers.companion` in a Codex
+   * session's config.toml, together with the domain's servers when given (one
+   * write, so the tables keep a stable order). Returns false when the file
+   * could not be written.
+   */
+  private syncCodexMcp(sessionId: string, codexHome: string, domainMcp?: CodexDomainMcp): boolean {
+    const configPath = join(codexHome, "config.toml");
     try {
-      upsertCodexMcpServer(join(codexHome, "config.toml"), this.companionMcpEntry(sessionId));
+      if (!domainMcp) {
+        if (this.companionMcp) upsertCodexMcpServer(configPath, this.companionMcpEntry(sessionId));
+        return true;
+      }
+      const entry = this.companionMcp ? this.companionMcpEntry(sessionId) : null;
+      rewriteCodexMcpServers(
+        configPath,
+        [...(this.companionMcp ? [COMPANION_MCP_SERVER_NAME] : []), ...domainMcp.remove],
+        [...(entry ? [companionTable(entry)] : []), ...domainMcp.tables],
+      );
+      return true;
     } catch (err) {
-      console.warn(`[cli-launcher] Could not update the companion MCP server in ${codexHome}/config.toml:`, err);
+      console.warn(`[cli-launcher] Could not update the MCP servers in ${configPath}:`, err);
+      return false;
     }
   }
 
@@ -485,8 +543,16 @@ export class CliLauncher {
     if (!data || !Array.isArray(data)) return 0;
 
     let recovered = 0;
+    let markedLegacy = 0;
     for (const info of data) {
       if (this.sessions.has(info.sessionId)) continue;
+      // Sessions from before domains: shown under GLOBAL, spawned exactly as
+      // before (see usesDomain) until they are migrated on purpose.
+      if (!info.domain) {
+        info.domain = GLOBAL_DOMAIN;
+        info.legacyMemory = true;
+        markedLegacy++;
+      }
 
       // Check if the process is still alive
       if (info.state !== "exited") {
@@ -521,6 +587,10 @@ export class CliLauncher {
     }
     if (recovered > 0) {
       console.log(`[cli-launcher] Recovered ${recovered} live session(s) from disk`);
+    }
+    if (markedLegacy > 0) {
+      console.log(`[cli-launcher] ${markedLegacy} session(s) from before domains kept as legacy (GLOBAL, unchanged spawn)`);
+      this.persistState();
     }
     return recovered;
   }
@@ -559,6 +629,13 @@ export class CliLauncher {
       info.tools = [...options.tools];
     }
     if (options.forkSource) info.forkSource = { ...options.forkSource };
+    if (options.domain) {
+      info.domain = options.domain;
+    } else {
+      // No domain asked for (embedders, tests): spawn as before domains.
+      info.domain = GLOBAL_DOMAIN;
+      info.legacyMemory = true;
+    }
     if (options.envSlug) info.envSlug = options.envSlug;
     if (options.linearConnectionId) info.linearConnectionId = options.linearConnectionId;
     if (options.repoRoot) info.repoRoot = options.repoRoot;
@@ -806,11 +883,33 @@ export class CliLauncher {
     if (options.effort && isValidEffort(options.model, options.effort)) {
       args.push("--effort", options.effort);
     }
+    // Domain context (memory, skills, MCP, CLAUDE.md), rebuilt at every spawn
+    // so edits to the domain apply at the next (re)launch. Legacy sessions get
+    // none of it.
+    let domainSpawn: ClaudeDomainSpawn | null = null;
+    if (usesDomain(info)) {
+      try {
+        domainSpawn = buildClaudeDomainSpawn(sessionId, info.domain);
+      } catch (err) {
+        console.warn(`[cli-launcher] Could not prepare domain "${info.domain}" for ${sessionId}; starting without it:`, err);
+      }
+    }
+    info.chromeActive = domainSpawn?.chrome ? true : undefined;
+    info.chromeBrowserPref = domainSpawn?.chrome ? (domainSpawn.chromeBrowser || "local") : undefined;
+    // One --settings JSON for everything set at launch.
     // Ultracode is a per-session setting the CLI never persists, and Companion
     // relaunches the CLI often (model/effort change, mid-turn recovery). Without
     // re-passing it here every relaunch would silently drop it.
-    if (options.ultracode && supportsUltracode(options.model)) {
-      args.push("--settings", JSON.stringify({ ultracode: true }));
+    const flagSettings: Record<string, unknown> = {};
+    if (options.ultracode && supportsUltracode(options.model)) flagSettings.ultracode = true;
+    if (domainSpawn) {
+      Object.assign(flagSettings, domainSpawn.settings);
+    } else if (info.pinnedMemoryDir) {
+      // A legacy session moved to another folder keeps its old memory.
+      flagSettings.autoMemoryDirectory = info.pinnedMemoryDir;
+    }
+    if (Object.keys(flagSettings).length > 0) {
+      args.push("--settings", JSON.stringify(flagSettings));
     }
     if (effectivePermissionMode) {
       args.push("--permission-mode", effectivePermissionMode);
@@ -827,6 +926,9 @@ export class CliLauncher {
     // The built-in `companion` MCP server, added to (never replacing) the
     // user's own MCP servers: no --strict-mcp-config.
     args.push(...this.claudeMcpArgs(sessionId, info));
+    // Domain flags after the companion MCP config: a second --mcp-config adds
+    // the domain's servers (both files load; verified on CLI 2.1.293).
+    if (domainSpawn) args.push(...domainSpawn.args);
     // Fork: start from a COPY of another session's transcript, until this
     // session has a transcript of its own (then --resume below takes over).
     const forkFrom = !options.resumeSessionId && !info.cliSessionId ? info.forkSource?.cliSessionId : undefined;
@@ -864,6 +966,7 @@ export class CliLauncher {
       // idle | running | requires_action) instead of Companion inferring it.
       // Off by default in the CLI; see session-work.ts for how it is used.
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+      ...domainSpawn?.env,
       ...options.env,
       PATH: getEnrichedPath(),
       ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),
@@ -982,14 +1085,32 @@ export class CliLauncher {
    * Make a session's own CODEX_HOME ready before every Codex spawn: seed it
    * from ~/.codex, then (re)write the `companion` MCP server entry.
    */
-  private prepareCodexHome(codexHome: string, sessionId: string): void {
+  private prepareCodexHome(codexHome: string, sessionId: string, info: SdkSessionInfo): { writableRoots: string[] } {
     mkdirSync(codexHome, { recursive: true });
-    this.seedCodexHome(codexHome);
+    const withDomain = usesDomain(info);
+    // A domain session gets a generated AGENTS.md (which includes the user's
+    // global one) instead of the link to ~/.codex/AGENTS.md.
+    this.seedCodexHome(codexHome, { linkAgentsMd: !withDomain });
     // After seeding: config.toml may just have been copied from ~/.codex.
-    this.syncCodexMcp(sessionId, codexHome);
+    if (!withDomain) {
+      this.syncCodexMcp(sessionId, codexHome);
+      return { writableRoots: [] };
+    }
+    try {
+      const prepared = prepareCodexDomainHome(codexHome, info.domain, {
+        userAgentsMdPath: join(getLegacyCodexHome(), "AGENTS.md"),
+      });
+      if (this.syncCodexMcp(sessionId, codexHome, prepared.mcp)) prepared.commit();
+      // A sandboxed (workspace-write) session must still be able to save notes.
+      return { writableRoots: [prepared.resolved.memoryDir] };
+    } catch (err) {
+      console.warn(`[cli-launcher] Could not prepare domain "${info.domain}" in ${codexHome}; starting without it:`, err);
+      this.syncCodexMcp(sessionId, codexHome);
+      return { writableRoots: [] };
+    }
   }
 
-  private seedCodexHome(codexHome: string): void {
+  private seedCodexHome(codexHome: string, opts: { linkAgentsMd: boolean }): void {
     const legacyHome = getLegacyCodexHome();
     if (resolve(legacyHome) === resolve(codexHome) || !existsSync(legacyHome)) {
       return;
@@ -1025,7 +1146,7 @@ export class CliLauncher {
     }
 
     this.linkAuthJson(codexHome, legacyHome);
-    this.linkGlobalAgentsMd(codexHome, legacyHome);
+    if (opts.linkAgentsMd) this.linkGlobalAgentsMd(codexHome, legacyHome);
   }
 
   /**
@@ -1195,7 +1316,7 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    this.prepareCodexHome(codexHome, sessionId);
+    const { writableRoots } = this.prepareCodexHome(codexHome, sessionId, info);
 
     const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
 
@@ -1258,6 +1379,7 @@ export class CliLauncher {
       networkAccess: options.codexInternetAccess !== false,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
+      extraWritableRoots: writableRoots,
       killProcess: async () => {
         try {
           proxyProc.kill("SIGTERM");
@@ -1371,7 +1493,7 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    this.prepareCodexHome(codexHome, sessionId);
+    const { writableRoots } = this.prepareCodexHome(codexHome, sessionId, info);
 
     const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
 
@@ -1409,6 +1531,7 @@ export class CliLauncher {
       networkAccess: options.codexInternetAccess !== false,
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
+      extraWritableRoots: writableRoots,
     });
 
     // Handle init errors — mark session as exited so UI shows failure.
@@ -1572,6 +1695,48 @@ export class CliLauncher {
     return true;
   }
 
+  /**
+   * Move a session to another working folder. The next (re)launch starts the
+   * CLI there; the conversation is resumed by id, so the context is kept.
+   * The worktree repo root no longer applies to the new folder.
+   */
+  setCwd(sessionId: string, cwd: string, opts: { pinnedMemoryDir?: string } = {}): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info) return false;
+    info.cwd = cwd;
+    delete info.repoRoot;
+    if (opts.pinnedMemoryDir) info.pinnedMemoryDir = opts.pinnedMemoryDir;
+    this.persistState();
+    return true;
+  }
+
+  /**
+   * Move a (non-legacy) session to another domain. The next (re)launch spawns
+   * it with the new domain's memory, skills, MCP servers and instructions.
+   */
+  setDomain(sessionId: string, domain: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info || !usesDomain(info)) return false;
+    info.domain = domain;
+    this.persistState();
+    return true;
+  }
+
+  /**
+   * Migrate a legacy session (from before domains) into a domain: from the
+   * next (re)launch it spawns with the domain's memory, skills, MCP servers
+   * and instructions instead of its folder-based memory. The folder does not
+   * move. A pinned memory folder is kept on record but no longer applies.
+   */
+  migrateToDomain(sessionId: string, domain: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info || usesDomain(info)) return false;
+    info.domain = domain;
+    delete info.legacyMemory;
+    this.persistState();
+    return true;
+  }
+
   setEffort(sessionId: string, effort: string): boolean {
     const info = this.sessions.get(sessionId);
     if (!info) return false;
@@ -1590,6 +1755,7 @@ export class CliLauncher {
     this.codexWsProxies.delete(sessionId);
     this.forgetRequestEnv(sessionId);
     this.forgetMcpConfig(sessionId);
+    removeDomainRuntime(sessionId);
     this.persistState();
   }
 
@@ -1604,6 +1770,7 @@ export class CliLauncher {
         this.sessions.delete(id);
         this.forgetRequestEnv(id);
         this.forgetMcpConfig(id);
+        removeDomainRuntime(id);
         this.codexWsProxies.delete(id);
         pruned++;
       }

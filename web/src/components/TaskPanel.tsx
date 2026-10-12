@@ -8,6 +8,8 @@ import { ClaudeConfigBrowser } from "./ClaudeConfigBrowser.js";
 import { SessionEnvProfiles } from "./SessionEnvProfiles.js";
 import { SessionWakeups } from "./SessionWakeups.js";
 import { SessionReload } from "./SessionReload.js";
+import { SessionFolder } from "./SessionFolder.js";
+import { SessionDomain } from "./SessionDomain.js";
 import { SECTION_DEFINITIONS } from "./task-panel-sections.js";
 import { formatResetTime, formatCodexResetTime, formatWindowDuration, formatTokenCount } from "../utils/format.js";
 import { timeAgo } from "../utils/time-ago.js";
@@ -1148,6 +1150,8 @@ export function TaskPanel({ sessionId }: { sessionId: string }) {
             <SessionEnvProfiles sessionId={sessionId} />
             <SessionWakeups sessionId={sessionId} />
             <SessionReload sessionId={sessionId} />
+            <SessionDomain sessionId={sessionId} />
+            <SessionFolder sessionId={sessionId} />
             {applicableSections
               .filter((id) => config.enabled[id] !== false)
               .map((sectionId) => {

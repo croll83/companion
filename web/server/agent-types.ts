@@ -36,6 +36,11 @@ export interface AgentConfig {
   cwd: string;
   /** Optional environment slug (references ~/.companion/envs/) */
   envSlug?: string;
+  /**
+   * Domain the runs work in (memory, skills, MCP servers, instructions shared
+   * with the domain's sessions). Absent = GLOBAL.
+   */
+  domain?: string;
   /** Extra environment variables */
   env?: Record<string, string>;
   /**
@@ -59,6 +64,8 @@ export interface AgentConfig {
    *    session's folder. The source session is never modified.
    */
   contextMode?: "brief" | "fork";
+  /** Keep each run's session visible after a successful run (default: archived after a grace period). */
+  keepRunSessions?: boolean;
   /** Companion session id each "fork" run copies the conversation of. */
   sourceSessionId?: string;
 

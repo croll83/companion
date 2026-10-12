@@ -5331,3 +5331,32 @@ describe("User message during initializing phase", () => {
     expect(session.stateMachine.phase).toBe("streaming");
   });
 });
+
+// ─── Change folder and Claude in Chrome ─────────────────────────────────────
+
+describe("session folder and Chrome control", () => {
+  // "Change folder": the state follows the new folder and browsers are told.
+  it("setSessionCwd updates the folder and notifies browsers", () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+    bridge.setSessionCwd("s1", "/new/folder");
+    expect(bridge.getSession("s1")!.state.cwd).toBe("/new/folder");
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls).toContainEqual(expect.objectContaining({ type: "session_update", session: expect.objectContaining({ cwd: "/new/folder" }) }));
+    // Unknown sessions are ignored.
+    expect(() => bridge.setSessionCwd("nope", "/x")).not.toThrow();
+  });
+
+  // Chrome controls exist only for a connected Claude CLI.
+  it("chromeControl returns the live Claude adapter only", () => {
+    expect(bridge.chromeControl("s1")).toBeNull();
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    expect(bridge.chromeControl("s1")).toBeNull();
+    bridge.handleCLIOpen(makeCliSocket("s1"), "s1");
+    const control = bridge.chromeControl("s1");
+    expect(control).not.toBeNull();
+    expect(typeof control!.selectChromeBrowser).toBe("function");
+  });
+});

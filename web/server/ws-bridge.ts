@@ -10,6 +10,7 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
+import type { ChromeControl } from "./chrome-browser.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
 import type {
@@ -222,6 +223,40 @@ export class WsBridge {
   /** Persist a session to disk (debounced). Delegates to ws-bridge-persist. */
   private persistSession(session: Session): void {
     persistSessionFn(session, this.store);
+  }
+
+  /**
+   * Point a session at another working folder (see SessionOrchestrator
+   * changeSessionFolder): update the state, re-read git info for the new
+   * folder and tell the browsers.
+   */
+  setSessionCwd(sessionId: string, cwd: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.state.cwd = cwd;
+    this.refreshGitInfo(session, { notifyPoller: true });
+    this.broadcastToBrowsers(session, {
+      type: "session_update",
+      session: {
+        cwd,
+        git_branch: session.state.git_branch,
+        is_worktree: session.state.is_worktree,
+        repo_root: session.state.repo_root,
+        git_ahead: session.state.git_ahead,
+        git_behind: session.state.git_behind,
+      },
+    });
+    this.persistSession(session);
+  }
+
+  /**
+   * Claude in Chrome controls of a session's live Claude CLI, or null (Codex,
+   * no CLI attached). See chrome-browser.ts.
+   */
+  chromeControl(sessionId: string): ChromeControl | null {
+    const adapter = this.sessions.get(sessionId)?.backendAdapter;
+    if (!(adapter instanceof ClaudeAdapter) || !adapter.isConnected()) return null;
+    return adapter;
   }
 
   private refreshGitInfo(

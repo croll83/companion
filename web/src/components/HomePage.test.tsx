@@ -26,6 +26,8 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     transitionLinearIssue: vi.fn(),
     listPrompts: vi.fn(),
     listLinearConnections: vi.fn(),
+    listDomains: vi.fn(),
+    createDomain: vi.fn(),
   },
   createSessionStreamMock: vi.fn(),
   mockStoreState: {
@@ -98,11 +100,31 @@ function buildStoreMock(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * Render the home page and switch to "Existing folder" mode. The folder mode
+ * now always starts on "New folder in this domain" (no localStorage), so the
+ * many tests below that drive an existing git folder flip the mode first,
+ * through the UI, the way a user would.
+ */
+async function renderExisting() {
+  const result = render(<HomePage />);
+  fireEvent.click(await screen.findByRole("radio", { name: "Existing folder" }));
+  return result;
+}
+
 describe("HomePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
     mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.listDomains.mockResolvedValue({
+      root: "/home/ubuntu",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/ubuntu/companion_domain_global" },
+        { slug: "herd", name: "Herd", path: "/home/ubuntu/companion_domain_herd" },
+      ],
+    });
 
     mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
     mockApi.listEnvs.mockResolvedValue([]);
@@ -150,7 +172,7 @@ describe("HomePage", () => {
   it("auto-sets branch from selected mapped Linear issue", async () => {
     // Regression guard: selecting an issue from the mapped project list must
     // update the branch picker to Linear's recommended branch.
-    render(<HomePage />);
+    await renderExisting();
 
     const issueTitle = await screen.findByText(/THE-147/i);
     const issueButton = issueTitle.closest("button");
@@ -165,7 +187,7 @@ describe("HomePage", () => {
 
   it("passes axe accessibility checks", async () => {
     const { axe } = await import("vitest-axe");
-    const { container } = render(<HomePage />);
+    const { container } = await renderExisting();
     // Wait for async effects to settle (backends, settings, etc.)
     await waitFor(() => {
       expect(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...")).toBeInTheDocument();
@@ -193,7 +215,7 @@ describe("HomePage", () => {
       ],
     });
 
-    render(<HomePage />);
+    await renderExisting();
 
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
@@ -231,7 +253,7 @@ describe("HomePage", () => {
       ],
     });
 
-    render(<HomePage />);
+    await renderExisting();
 
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
@@ -275,7 +297,7 @@ describe("HomePage", () => {
       ],
     });
 
-    render(<HomePage />);
+    await renderExisting();
 
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
@@ -317,7 +339,7 @@ describe("HomePage", () => {
       ],
     });
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
 
@@ -333,7 +355,7 @@ describe("HomePage", () => {
 
   it("renders the title, logo, textarea, and send button", async () => {
     // Verifies the core UI elements appear after initial load.
-    render(<HomePage />);
+    await renderExisting();
 
     // Title
     expect(screen.getByText("The Companion")).toBeInTheDocument();
@@ -356,7 +378,7 @@ describe("HomePage", () => {
   it("enables send button only when textarea has text", async () => {
     // The send button should be disabled when the textarea is empty,
     // and enabled once the user types a non-whitespace message.
-    render(<HomePage />);
+    await renderExisting();
 
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
     const sendButton = screen.getByTitle("Send message");
@@ -377,7 +399,7 @@ describe("HomePage", () => {
 
   it("opens and selects from the model dropdown", async () => {
     // Verifies users can open the model picker and change the selected model.
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Opus 5.5 is DEFAULT_CLAUDE_MODEL, so it becomes the
@@ -404,7 +426,7 @@ describe("HomePage", () => {
 
   it("opens and selects from the mode dropdown", async () => {
     // Verifies users can change the permission mode (Agent/Plan).
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Default mode for claude backend is "Agent"
@@ -423,7 +445,7 @@ describe("HomePage", () => {
 
   it("cycles permission mode on Shift+Tab", async () => {
     // Shift+Tab should cycle through available modes (Agent -> Plan -> Agent).
-    render(<HomePage />);
+    await renderExisting();
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
     await waitFor(() => expect(textarea).toBeInTheDocument());
 
@@ -447,7 +469,7 @@ describe("HomePage", () => {
       cwd: "/repo",
     });
 
-    render(<HomePage />);
+    await renderExisting();
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.change(textarea, { target: { value: "Build a feature" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
@@ -459,7 +481,7 @@ describe("HomePage", () => {
 
   it("does not submit on Shift+Enter", async () => {
     // Shift+Enter should allow newlines without submitting.
-    render(<HomePage />);
+    await renderExisting();
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.change(textarea, { target: { value: "Build a feature" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
@@ -473,7 +495,7 @@ describe("HomePage", () => {
   it("opens and uses the folder picker", async () => {
     // Clicking the folder selector should open the FolderPicker component,
     // and closing it should remove it from the DOM.
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Wait for the cwd to settle from getHome
@@ -506,7 +528,7 @@ describe("HomePage", () => {
     ]);
     mockApi.getBackendModels.mockResolvedValue([]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Both backends should be visible
@@ -535,7 +557,7 @@ describe("HomePage", () => {
       { id: "codex", name: "Codex", available: false },
     ]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     const codexButton = await screen.findByTitle("Codex CLI not found in PATH");
@@ -552,7 +574,7 @@ describe("HomePage", () => {
     ];
     mockApi.listEnvs.mockResolvedValue(testEnvs);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Click env selector (shows "No env" by default)
@@ -582,7 +604,7 @@ describe("HomePage", () => {
     // The "Manage environments..." link in the dropdown should open the EnvManager modal.
     mockApi.listEnvs.mockResolvedValue([]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Open env dropdown
@@ -611,7 +633,7 @@ describe("HomePage", () => {
     ];
     mockApi.listEnvs.mockResolvedValue(testEnvs);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Open env dropdown and select an env first
@@ -645,7 +667,7 @@ describe("HomePage", () => {
       cwd: "/repo",
     });
 
-    render(<HomePage />);
+    await renderExisting();
     // Wait for the cwd to settle from the getHome API call
     await waitFor(() => {
       expect(screen.getByText("repo")).toBeInTheDocument();
@@ -688,7 +710,7 @@ describe("HomePage", () => {
     mockStoreGetState.mockReturnValue(storeMock);
     createSessionStreamMock.mockRejectedValue(new Error("CLI not found"));
 
-    render(<HomePage />);
+    await renderExisting();
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.change(textarea, { target: { value: "Do something" } });
 
@@ -705,7 +727,7 @@ describe("HomePage", () => {
 
   it("does not send when textarea is empty", async () => {
     // Clicking send with an empty textarea should do nothing.
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     const sendButton = screen.getByTitle("Send message");
@@ -725,7 +747,7 @@ describe("HomePage", () => {
       { name: "main", isCurrent: true, isRemote: false, worktreePath: null, ahead: 0, behind: 3 },
     ]);
 
-    render(<HomePage />);
+    await renderExisting();
     // Wait for cwd and gitRepoInfo to settle, which triggers BranchPicker to load branches
     await waitFor(() => {
       expect(screen.getByText("repo")).toBeInTheDocument();
@@ -770,7 +792,7 @@ describe("HomePage", () => {
       cwd: "/repo",
     });
 
-    render(<HomePage />);
+    await renderExisting();
     await waitFor(() => {
       expect(screen.getByText("repo")).toBeInTheDocument();
     });
@@ -807,7 +829,7 @@ describe("HomePage", () => {
       cwd: "/repo",
     });
 
-    render(<HomePage />);
+    await renderExisting();
     await waitFor(() => {
       expect(screen.getByText("repo")).toBeInTheDocument();
     });
@@ -843,7 +865,7 @@ describe("HomePage", () => {
     ]);
     mockApi.gitPull.mockResolvedValue({ success: false, output: "merge conflict in file.ts" });
 
-    render(<HomePage />);
+    await renderExisting();
     await waitFor(() => {
       expect(screen.getByText("repo")).toBeInTheDocument();
     });
@@ -871,7 +893,7 @@ describe("HomePage", () => {
 
   it("shows upload image button", async () => {
     // The image upload button should be present in the toolbar.
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     const uploadButton = screen.getByTitle("Upload image");
@@ -886,7 +908,7 @@ describe("HomePage", () => {
 
   it("closes model dropdown on outside click", async () => {
     // Clicking outside an open dropdown should close it.
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Open model dropdown — default is Opus 5.5 (DEFAULT_CLAUDE_MODEL).
@@ -907,7 +929,7 @@ describe("HomePage", () => {
 
   it("auto-resizes textarea on input", async () => {
     // The textarea should adjust its height based on content.
-    render(<HomePage />);
+    await renderExisting();
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...") as HTMLTextAreaElement;
 
     // Simulate typing which triggers handleInput
@@ -929,7 +951,7 @@ describe("HomePage", () => {
     ]);
     mockApi.getBackendModels.mockResolvedValue([]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Logo should be the codex logo since backend was restored from localStorage
@@ -951,7 +973,7 @@ describe("HomePage", () => {
       { value: "gpt-custom", label: "GPT Custom" },
     ]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // The dynamically fetched model should appear
@@ -967,7 +989,7 @@ describe("HomePage", () => {
     // should appear in the branching panel.
     mockApi.listSessions.mockRejectedValue(new Error("Network error"));
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Open branching controls
@@ -1006,7 +1028,7 @@ describe("HomePage", () => {
       ],
     });
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
 
@@ -1035,7 +1057,7 @@ describe("HomePage", () => {
       cwd: "/repo",
     });
 
-    render(<HomePage />);
+    await renderExisting();
     const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.change(textarea, { target: { value: "New task" } });
     fireEvent.click(screen.getByTitle("Send message"));
@@ -1056,7 +1078,7 @@ describe("HomePage", () => {
     mockApi.discoverClaudeSessions.mockResolvedValue({ sessions: [] });
     mockApi.listSessions.mockResolvedValue([]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
 
@@ -1080,7 +1102,7 @@ describe("HomePage", () => {
       }],
     });
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
     fireEvent.click(screen.getByRole("button", { name: /branch from session/i }));
     await screen.findByRole("button", { name: /fork and open slug-1/i });
@@ -1103,7 +1125,7 @@ describe("HomePage", () => {
     mockApi.discoverClaudeSessions.mockResolvedValue({ sessions: [] });
     mockApi.listSessions.mockResolvedValue([]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Before opening the panel, API should not have been called yet.
@@ -1146,7 +1168,7 @@ describe("HomePage", () => {
     mockApi.getRepoInfo.mockRejectedValue(new Error("Not a git repo"));
     mockApi.listBranches.mockResolvedValue([]);
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Component should still render without errors
@@ -1167,7 +1189,7 @@ describe("HomePage", () => {
       isWorktree: false,
     });
 
-    render(<HomePage />);
+    await renderExisting();
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // The folder label should show "project" from the cwd path
@@ -1187,7 +1209,7 @@ describe("HomePage", () => {
       // Prompts must be available for the menu to show items
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description");
 
       // Type @ to trigger the mention menu
@@ -1206,7 +1228,7 @@ describe("HomePage", () => {
     it("filters prompts by query after @", async () => {
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description");
 
       // Type @rev to filter — should match "review" (startsWith) and "test-review" (includes)
@@ -1225,7 +1247,7 @@ describe("HomePage", () => {
     it("inserts prompt content on Enter without sending/creating session", async () => {
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
       // Type the exact prompt name: Enter picks a prompt only on an exact
@@ -1254,7 +1276,7 @@ describe("HomePage", () => {
     it("navigates prompts with ArrowDown and selects with Enter", async () => {
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
       // Type @ to open menu
@@ -1283,7 +1305,7 @@ describe("HomePage", () => {
     it("works with @ in the middle of text", async () => {
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
       // Type "Please " then "@rev"
@@ -1312,7 +1334,7 @@ describe("HomePage", () => {
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
       createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/repo" });
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
       await act(async () => {
@@ -1336,7 +1358,7 @@ describe("HomePage", () => {
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
       createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/repo" });
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
       await act(async () => {
@@ -1356,7 +1378,7 @@ describe("HomePage", () => {
       // Validates pointer navigation counts as an explicit pick on Home too.
       mockApi.listPrompts.mockResolvedValue(samplePrompts);
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description") as HTMLTextAreaElement;
 
       await act(async () => {
@@ -1389,7 +1411,7 @@ describe("HomePage", () => {
         },
       }));
 
-      render(<HomePage />);
+      await renderExisting();
       const textarea = await screen.findByLabelText("Task description");
       expect(screen.queryByText("Sandbox")).not.toBeInTheDocument();
       await act(async () => {
@@ -1417,7 +1439,7 @@ describe("HomePage", () => {
     it("renders the onboarding tip when cc-onboarding-dismissed is not set", async () => {
       // First-time users should see the onboarding tip explaining
       // the toolbar controls and Branch from session.
-      render(<HomePage />);
+      await renderExisting();
       await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
       expect(screen.getByText(/sets where your code lives/)).toBeInTheDocument();
@@ -1427,7 +1449,7 @@ describe("HomePage", () => {
       // Returning users who have previously dismissed the tip should
       // not see it again; the localStorage flag gates initial state.
       localStorage.setItem("cc-onboarding-dismissed", "true");
-      render(<HomePage />);
+      await renderExisting();
       await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
       expect(screen.queryByText(/sets where your code lives/)).not.toBeInTheDocument();
@@ -1437,7 +1459,7 @@ describe("HomePage", () => {
       // Clicking the dismiss button should hide the tip and write
       // the cc-onboarding-dismissed flag to localStorage so it stays
       // hidden across sessions.
-      render(<HomePage />);
+      await renderExisting();
       await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
       expect(screen.getByText(/sets where your code lives/)).toBeInTheDocument();
@@ -1455,13 +1477,93 @@ describe("HomePage", () => {
       // sentence only for Claude backend. Codex users should not see it
       // since the branching feature is Claude-only.
       localStorage.setItem("cc-backend", "codex");
-      render(<HomePage />);
+      await renderExisting();
       await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
       // The tip itself should still render (toolbar explanation)
       expect(screen.getByText(/sets where your code lives/)).toBeInTheDocument();
       // But the Claude-only sentence should be absent
       expect(screen.queryByText(/branch from session/i)).not.toBeInTheDocument();
+    });
+  });
+});
+
+
+describe("HomePage domains", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
+    mockApi.listEnvs.mockResolvedValue([]);
+    mockApi.getBackends.mockResolvedValue([{ id: "claude", name: "Claude", available: true }]);
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: false });
+    mockApi.getRepoInfo.mockResolvedValue({ repoRoot: "/repo", repoName: "repo", currentBranch: "main", defaultBranch: "main", isWorktree: false });
+    mockApi.listBranches.mockResolvedValue([]);
+    mockApi.listSessions.mockResolvedValue([]);
+    mockApi.discoverClaudeSessions.mockResolvedValue({ sessions: [] });
+    mockApi.listPrompts.mockResolvedValue([]);
+    mockApi.listDomains.mockResolvedValue({
+      root: "/home/ubuntu",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/ubuntu/companion_domain_global" },
+        { slug: "herd", name: "Herd", path: "/home/ubuntu/companion_domain_herd" },
+      ],
+    });
+    createSessionStreamMock.mockResolvedValue({ sessionId: "dom-session", state: "starting", cwd: "/home/ubuntu/companion_domain_herd/x" });
+  });
+
+  // A fresh page load always starts on "New folder in this domain", even if a
+  // previous session had switched to "Existing folder": the mode is no longer
+  // remembered, so an unrelated new session is never silently started in the
+  // last attached repo.
+  it("always starts on New folder, ignoring a stale remembered mode", async () => {
+    window.localStorage.setItem("cc-folder-mode", "existing");
+    render(<HomePage />);
+    expect(await screen.findByRole("radio", { name: "New folder in this domain" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Existing folder" })).toHaveAttribute("aria-checked", "false");
+    // New-folder mode does not touch an existing repo.
+    expect(mockApi.getRepoInfo).not.toHaveBeenCalled();
+  });
+
+  // Default: GLOBAL, new folder named after the session; the git controls
+  // (branch picker) do not apply to a folder that does not exist yet.
+  it("creates the session in a new folder of the chosen domain by default", async () => {
+    const storeMock = buildStoreMock();
+    mockStoreGetState.mockReturnValue(storeMock);
+    render(<HomePage />);
+    const select = await screen.findByLabelText("Domain");
+    await screen.findByRole("option", { name: "Herd" });
+    fireEvent.change(select, { target: { value: "herd" } });
+    expect(window.localStorage.getItem("cc-domain")).toBe("herd");
+    fireEvent.change(screen.getByLabelText("New folder name"), { target: { value: "My Task" } });
+    expect(screen.getByText("/home/ubuntu/companion_domain_herd/my-task")).toBeInTheDocument();
+    expect(mockApi.getRepoInfo).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "Go" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => {
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ domain: "herd", folderMode: "new", folderName: "My Task", cwd: undefined }),
+        expect.any(Function),
+      );
+    });
+    // The session gets the name the folder was prefilled with.
+    await waitFor(() => expect(storeMock.setSessionName).toHaveBeenCalledWith("dom-session", expect.any(String)));
+  });
+
+  it("attaches an existing folder in Existing folder mode", async () => {
+    render(<HomePage />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Existing folder" }));
+    await waitFor(() => expect(mockApi.getRepoInfo).toHaveBeenCalledWith("/repo"));
+    fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "Go" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => {
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ domain: "global", folderMode: "existing", cwd: "/repo", folderName: undefined }),
+        expect.any(Function),
+      );
     });
   });
 });

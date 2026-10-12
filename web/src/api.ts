@@ -206,6 +206,11 @@ export interface CreateSessionOpts {
   backend?: "claude" | "codex";
   resumeSessionAt?: string;
   forkSession?: boolean;
+  /** Domain slug (default GLOBAL). */
+  domain?: string;
+  /** "new": create `folderName` inside the domain folder; "existing": attach `cwd` as is. */
+  folderMode?: "new" | "existing";
+  folderName?: string;
   linearConnectionId?: string;
   linearIssue?: {
     identifier: string;
@@ -445,6 +450,73 @@ export interface TelegramBinding {
   enabled: boolean;
 }
 
+export interface SessionFolderPreview {
+  ok: true;
+  from: string;
+  to: string;
+  backend: string;
+  /** A turn or background job is running and the restart would interrupt it. */
+  interruptsWork: boolean;
+  /** The memory the session keeps using after the move (none for legacy Codex sessions). */
+  memory?: { dir: string; notes: number };
+}
+
+export interface DomainMcpServerView {
+  name: string;
+  source: "global" | "domain";
+  enabled: boolean;
+  /** Turned off in GLOBAL, hence everywhere. */
+  disabledGlobally?: boolean;
+  type: string;
+}
+
+export interface SkillGroupInfo {
+  id: "user" | "claude-ai" | "design";
+  label: string;
+  description: string;
+  skills: string[];
+  /** How Codex sessions get the group: linked, turned off in config.toml, or Claude-only. */
+  codex: "linked" | "toggled" | "unsupported";
+}
+
+export interface DomainSummary {
+  slug: string;
+  name: string;
+  createdAt: number;
+  description?: string;
+  mcpDisabled: string[];
+  chrome: boolean;
+  /** Claude only, used when chrome is on: "local" (default) or a browser deviceId. */
+  chromeBrowser: string;
+  plugins?: Record<string, boolean>;
+  skillGroups?: Record<string, boolean>;
+  path: string;
+  sessionCount: number;
+  totalSessions: number;
+  memoryNotes: number;
+  skills: string[];
+  mcpServers: DomainMcpServerView[];
+  mcpError?: string;
+  skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+}
+
+export interface DomainsResponse {
+  root: string;
+  skillGroups: SkillGroupInfo[];
+  domains: DomainSummary[];
+}
+
+/** A browser connected to Claude in Chrome (from `list_connected_browsers`). */
+export interface ConnectedBrowser {
+  deviceId: string;
+  name: string;
+  osPlatform?: string;
+  /** True when the browser runs on Companion's own machine. */
+  isLocal: boolean;
+  /** The browser Chrome actions use right now. */
+  inUse: boolean;
+}
+
 export interface ArchiveInfo {
   hasLinkedIssue: boolean;
   issueNotDone: boolean;
@@ -579,6 +651,8 @@ export interface AgentInfo {
   permissionMode: string;
   cwd: string;
   envSlug?: string;
+  /** Domain the runs work in (absent = GLOBAL). */
+  domain?: string;
   env?: Record<string, string>;
   /** Claude only: built-in tools the agent is limited to (empty = all). */
   allowedTools?: string[];
@@ -587,6 +661,8 @@ export interface AgentInfo {
   /** "brief" (default): fresh session. "fork": each run copies sourceSessionId's conversation. */
   contextMode?: "brief" | "fork";
   sourceSessionId?: string;
+  /** Keep each run's session visible (default: archived ~15 min after a successful run). */
+  keepRunSessions?: boolean;
   mcpServers?: Record<string, McpServerConfigAgent>;
   triggers?: {
     webhook?: {
@@ -697,6 +773,8 @@ export interface ClaudeConfigSkill {
   path: string;
   /** "synced" = synced from claude.ai (read-only), "link" = symlinked skill dir */
   source?: "synced" | "link";
+  /** Manual-only skill (`disable-model-invocation: true`): run with /name, never by the model. */
+  manualOnly?: boolean;
 }
 
 /** Mirrors ClaudeConfigListing in server/claude-config.ts */
@@ -898,6 +976,41 @@ export const api = {
     post<{ ok: boolean; alreadyRunning?: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/relaunch${opts?.force ? "?force=1" : ""}`,
     ),
+
+  /** What moving a session to `cwd` would do (no change made). */
+  previewSessionFolder: (sessionId: string, cwd: string) =>
+    get<SessionFolderPreview>(`/sessions/${encodeURIComponent(sessionId)}/folder?cwd=${encodeURIComponent(cwd)}`),
+
+  /** Move a session to `cwd` and restart its CLI there on the same conversation. */
+  changeSessionFolder: (sessionId: string, cwd: string) =>
+    post<SessionFolderPreview>(`/sessions/${encodeURIComponent(sessionId)}/folder`, { cwd }),
+
+  /** Move a (non-legacy) session to another domain; its CLI restarts on the same conversation. */
+  changeSessionDomain: (sessionId: string, domain: string) =>
+    post<{ ok: true; from: string; to: string; interruptsWork: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/domain`, { domain }),
+
+  /** Migrate a legacy session (from before domains) into a domain; its CLI restarts on the same conversation. */
+  migrateSessionToDomain: (sessionId: string, domain: string) =>
+    post<{ ok: true; from: string; to: string; interruptsWork: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/migrate-domain`, { domain }),
+
+  // Domains
+  listDomains: () => get<DomainsResponse>("/domains"),
+  createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),
+  updateDomain: (
+    slug: string,
+    changes: Partial<Pick<DomainSummary, "name" | "description" | "mcpDisabled" | "chrome" | "chromeBrowser" | "plugins" | "skillGroups">>,
+  ) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
+  deleteDomain: (slug: string) => del<{ ok: true; keptOnDisk: string }>(`/domains/${encodeURIComponent(slug)}`),
+  readDomainFile: (slug: string, name: string) =>
+    get<{ path: string; content: string; format: ConfigFileFormat; readOnly: boolean }>(
+      `/domains/${encodeURIComponent(slug)}/file?name=${encodeURIComponent(name)}`,
+    ),
+  writeDomainFile: (slug: string, name: string, content: string) =>
+    put<{ ok: boolean; path: string }>(`/domains/${encodeURIComponent(slug)}/file`, { name, content }),
+
+  /** Browsers connected to Claude in Chrome, listed by a short isolated Claude query. `force` bypasses the brief cache. */
+  listChromeBrowsers: (force?: boolean) =>
+    get<{ browsers: ConnectedBrowser[]; error?: string }>(`/chrome-browsers${force ? "?force=1" : ""}`),
 
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),

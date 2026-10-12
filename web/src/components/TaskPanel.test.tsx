@@ -30,6 +30,11 @@ vi.mock("./SessionWakeups.js", () => ({
   SessionWakeups: ({ sessionId }: { sessionId: string }) => <div data-testid="session-wakeups">{sessionId}</div>,
 }));
 
+// SessionDomain fetches the domains on its own; it has its own tests.
+vi.mock("./SessionDomain.js", () => ({
+  SessionDomain: ({ sessionId }: { sessionId: string }) => <div data-testid="session-domain">{sessionId}</div>,
+}));
+
 vi.mock("./LinearLogo.js", () => ({
   LinearLogo: ({ className }: { className?: string }) => (
     <span data-testid="linear-logo" className={className}>L</span>

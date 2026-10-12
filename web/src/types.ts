@@ -143,4 +143,12 @@ export interface SdkSessionInfo {
   envSlug?: string;
   /** Names (never values) of the env profiles applied at the last CLI spawn. */
   envProfiles?: string[];
+  /** Domain slug: what the session shares with the domain's other sessions. */
+  domain?: string;
+  /** From before domains: shown under GLOBAL, spawned as before (folder memory). */
+  legacyMemory?: boolean;
+  /** Legacy Claude session moved with "Change folder": the memory folder it keeps. */
+  pinnedMemoryDir?: string;
+  /** The session's own folder (stable), unlike `cwd`, which follows the CLI's `cd`. */
+  folder?: string;
 }

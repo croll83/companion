@@ -5,9 +5,9 @@ import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinear
 import { TelegramBridgeModal } from "./TelegramBridgeModal.js";
 import { disconnectSession, syncSessionSockets } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
-import { ProjectGroup } from "./ProjectGroup.js";
 import { SessionItem } from "./SessionItem.js";
-import { groupSessionsByProject, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
+import { groupSessionsByDomain, type DomainRef, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
+import { DomainGroup, domainCollapseKey } from "./DomainGroup.js";
 
 interface NavItem {
   id: string;
@@ -62,6 +62,14 @@ const NAV_ITEMS: NavItem[] = [
     iconPath: "M2.5 3A1.5 1.5 0 001 4.5v2A1.5 1.5 0 002.5 8h2A1.5 1.5 0 006 6.5v-2A1.5 1.5 0 004.5 3h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zm9 0A1.5 1.5 0 0010 5.5v2A1.5 1.5 0 0011.5 9h2A1.5 1.5 0 0015 7.5v-2A1.5 1.5 0 0013.5 4h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zM2.5 10A1.5 1.5 0 001 11.5v2A1.5 1.5 0 002.5 15h2A1.5 1.5 0 006 13.5v-2A1.5 1.5 0 004.5 10h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zM8.5 12a.5.5 0 100 1h5a.5.5 0 100-1h-5zm0-2a.5.5 0 100 1h2a.5.5 0 100-1h-2z",
   },
   {
+    id: "domains",
+    label: "Domains",
+    hash: "#/domains",
+    viewBox: "0 0 16 16",
+    iconPath: "M8 1.5l6 3.25v6.5L8 14.5l-6-3.25v-6.5L8 1.5zm0 1.15L3.2 5.25 8 7.85l4.8-2.6L8 2.65zM3 6.1v4.55l4.5 2.45V8.55L3 6.1zm5.5 7l4.5-2.45V6.1L8.5 8.55v4.55z",
+    activePages: ["domains"],
+  },
+  {
     id: "environments",
     label: "Environments",
     hash: "#/environments",
@@ -97,7 +105,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const NAV_SECTIONS = [
   { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"] },
-  { id: "workspace", label: "Workspace", itemIds: ["environments", "agents", "runs", "settings"] },
+  { id: "workspace", label: "Workspace", itemIds: ["domains", "environments", "agents", "runs", "settings"] },
 ] as const;
 
 const NAV_ITEMS_BY_ID = new Map(NAV_ITEMS.map((item) => [item.id, item]));
@@ -405,7 +413,8 @@ export function Sidebar() {
     return {
       id,
       model: bridgeState?.model || sdkInfo?.model || "",
-      cwd: bridgeState?.cwd || sdkInfo?.cwd || "",
+      // The session's own folder (stable), not the CLI's drifting working dir.
+      cwd: sdkInfo?.folder || sdkInfo?.cwd || bridgeState?.cwd || "",
       gitBranch: bridgeState?.git_branch || sdkInfo?.gitBranch || "",
       gitAhead: bridgeState?.git_ahead || sdkInfo?.gitAhead || 0,
       gitBehind: bridgeState?.git_behind || sdkInfo?.gitBehind || 0,
@@ -422,6 +431,8 @@ export function Sidebar() {
       permCount: pendingPermissions.get(id)?.size ?? 0,
       agentId: bridgeState?.agentId || sdkInfo?.agentId,
       agentName: bridgeState?.agentName || sdkInfo?.agentName,
+      domain: sdkInfo?.domain,
+      legacyMemory: sdkInfo?.legacyMemory,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 
@@ -432,10 +443,23 @@ export function Sidebar() {
   const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
   const [showAgentSessions, setShowAgentSessions] = useState(true);
 
-  // Group active sessions by project
-  const projectGroups = useMemo(
-    () => groupSessionsByProject(activeSessions),
-    [activeSessions],
+  // Domain names and folders, for the domain headers and the short labels
+  // of folders inside a domain. Refetched when a session shows up in a
+  // domain the sidebar does not know yet (just created).
+  const [domainRefs, setDomainRefs] = useState<DomainRef[]>([]);
+  const unknownDomain = activeSessions.some((s) => s.domain && !domainRefs.some((d) => d.slug === s.domain));
+  useEffect(() => {
+    let alive = true;
+    api.listDomains()
+      .then((res) => { if (alive) setDomainRefs(res.domains.map((d) => ({ slug: d.slug, name: d.name }))); })
+      .catch(() => { /* names fall back to slugs */ });
+    return () => { alive = false; };
+  }, [unknownDomain]);
+
+  // Group active sessions by domain (newest first inside each)
+  const domainGroups = useMemo(
+    () => groupSessionsByDomain(activeSessions, domainRefs),
+    [activeSessions, domainRefs],
   );
 
   // ─── Telegram bridge: fetch global status + handlers ──────────────────────
@@ -464,7 +488,7 @@ export function Sidebar() {
     });
   }, []);
 
-  // Shared props for SessionItem / ProjectGroup
+  // Shared props for every SessionItem
   const sessionItemProps = {
     onSelect: handleSelectSession,
     onStartRename: handleStartRename,
@@ -521,19 +545,26 @@ export function Sidebar() {
           </p>
         ) : (
           <>
-            {projectGroups.map((group, i) => (
-              <ProjectGroup
-                key={group.key}
-                group={group}
-                isCollapsed={collapsedProjects.has(group.key)}
+            {domainGroups.map((domain, d) => (
+              <DomainGroup
+                key={domain.key}
+                group={domain}
+                isCollapsed={collapsedProjects.has(domainCollapseKey(domain.key))}
                 onToggleCollapse={toggleProjectCollapse}
-                currentSessionId={currentSessionId}
-                sessionNames={sessionNames}
-                pendingPermissions={pendingPermissions}
-                recentlyRenamed={recentlyRenamed}
-                isFirst={i === 0}
-                {...sessionItemProps}
-              />
+                isFirst={d === 0}
+              >
+                {domain.sessions.map((s) => (
+                  <SessionItem
+                    key={s.id}
+                    session={s}
+                    isActive={currentSessionId === s.id}
+                    sessionName={sessionNames.get(s.id)}
+                    permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                    isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                    {...sessionItemProps}
+                  />
+                ))}
+              </DomainGroup>
             ))}
 
             {agentSessions.length > 0 && (

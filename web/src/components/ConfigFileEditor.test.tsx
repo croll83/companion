@@ -5,11 +5,15 @@ import "@testing-library/jest-dom";
 
 const mockRead = vi.fn();
 const mockWrite = vi.fn();
+const mockReadDomain = vi.fn();
+const mockWriteDomain = vi.fn();
 
 vi.mock("../api.js", () => ({
   api: {
     readConfigFile: (...args: unknown[]) => mockRead(...args),
     writeConfigFile: (...args: unknown[]) => mockWrite(...args),
+    readDomainFile: (...args: unknown[]) => mockReadDomain(...args),
+    writeDomainFile: (...args: unknown[]) => mockWriteDomain(...args),
   },
 }));
 
@@ -158,5 +162,24 @@ describe("ConfigFileEditor", () => {
     await waitFor(() => expect(textarea()).toHaveValue('{"a":1}'));
     fireEvent.click(document.querySelector(".bg-black\\/40")!);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Domains page: the same editor works on a domain's files (CLAUDE.md,
+// mcp.json) through the domain routes instead of the session ones.
+describe("ConfigFileEditor for a domain file", () => {
+  it("reads and saves through the domain file routes", async () => {
+    mockReadDomain.mockResolvedValue({ path: "/h/companion_domain_herd/mcp.json", content: '{"mcpServers":{}}', format: "json", readOnly: false });
+    mockWriteDomain.mockResolvedValue({ ok: true, path: "/h/companion_domain_herd/mcp.json" });
+    const onSaved = vi.fn();
+    render(<ConfigFileEditor domain="herd" path="mcp.json" label="Herd: mcp.json" onClose={vi.fn()} onSaved={onSaved} />);
+    const area = await screen.findByLabelText("Contents of Herd: mcp.json");
+    await waitFor(() => expect(area).toHaveValue('{"mcpServers":{}}'));
+    expect(mockReadDomain).toHaveBeenCalledWith("herd", "mcp.json");
+    fireEvent.change(area, { target: { value: '{"mcpServers":{"a":{"command":"x"}}}' } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(mockWriteDomain).toHaveBeenCalledWith("herd", "mcp.json", '{"mcpServers":{"a":{"command":"x"}}}');
+    expect(mockWrite).not.toHaveBeenCalled();
   });
 });

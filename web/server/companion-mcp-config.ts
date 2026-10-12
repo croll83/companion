@@ -109,20 +109,33 @@ function normalizeTomlKey(raw: string): string {
 const HEADER = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$/;
 const KEY_LINE = /^\s*("[^"]*"|'[^']*'|[A-Za-z0-9_-]+(?:\s*\.\s*(?:"[^"]*"|'[^']*'|[A-Za-z0-9_-]+))*)\s*=/;
 
-function isCompanionKey(fullKey: string): boolean {
-  const target = `mcp_servers.${COMPANION_MCP_SERVER_NAME}`;
-  return fullKey === target || fullKey.startsWith(`${target}.`);
+/** Every marker comment Companion writes above a table it manages starts with this. */
+const MANAGED_PREFIX = "# Managed by Companion";
+/**
+ * Marker above each `[[skills.config]]` entry Companion writes (a domain's
+ * skill turned off). Those entries are matched by the marker, not by key, so
+ * the user's own `[[skills.config]]` entries are never touched.
+ */
+export const SKILL_TOGGLE_MARKER = "# Managed by Companion: skill toggle";
+
+/** Whether `fullKey` is (or is inside) `mcp_servers.<one of names>`. */
+function isServerKey(fullKey: string, names: ReadonlySet<string>): boolean {
+  for (const name of names) {
+    const target = `mcp_servers.${name}`;
+    if (fullKey === target || fullKey.startsWith(`${target}.`)) return true;
+  }
+  return false;
 }
 
 /**
- * Remove every definition of `mcp_servers.companion` from a config.toml text:
- * its table and sub-tables, `companion = {…}` / `companion.x = …` lines under
- * `[mcp_servers]`, and top-level `mcp_servers.companion… = …` lines. Leaving
- * any of them next to the new table would be a duplicate key, which makes
- * Codex refuse the whole file. (Single-line values only: a multi-line array
- * in a hand-written companion entry is not expected.)
+ * Remove every definition of `mcp_servers.<name>`, for each of `names`, from a
+ * config.toml text: its table and sub-tables, `name = {…}` / `name.x = …`
+ * lines under `[mcp_servers]`, and top-level `mcp_servers.name… = …` lines.
+ * Leaving any of them next to the new table would be a duplicate key, which
+ * makes Codex refuse the whole file. (Single-line values only: a multi-line
+ * array in a hand-written entry is not expected.)
  */
-function stripCompanionServer(text: string): string[] {
+function stripServers(text: string, names: ReadonlySet<string>): string[] {
   const out: string[] = [];
   let section = "";
   let skippingTable = false;
@@ -130,20 +143,27 @@ function stripCompanionServer(text: string): string[] {
     const header = HEADER.exec(line);
     if (header) {
       section = normalizeTomlKey(header[1]);
-      skippingTable = isCompanionKey(section);
+      // A table under our skill-toggle marker is always ours to rewrite.
+      const markedSkillToggle = out.length > 0 && out[out.length - 1].trim().startsWith(SKILL_TOGGLE_MARKER);
+      skippingTable = markedSkillToggle || isServerKey(section, names);
       if (skippingTable) {
         // Drop our own marker comment right above the table.
-        if (out.length > 0 && out[out.length - 1].trim() === MANAGED_COMMENT) out.pop();
+        if (out.length > 0 && out[out.length - 1].trim().startsWith(MANAGED_PREFIX)) out.pop();
         continue;
       }
       out.push(line);
       continue;
     }
-    if (skippingTable) continue;
+    if (skippingTable) {
+      // Our marker comment always sits right above the next table: it ends
+      // the skipped one and must stay visible to the header check above.
+      if (!line.trim().startsWith(MANAGED_PREFIX)) continue;
+      skippingTable = false;
+    }
     const key = KEY_LINE.exec(line);
     if (key) {
       const full = normalizeTomlKey(section ? `${section}.${key[1]}` : key[1]);
-      if (isCompanionKey(full)) continue;
+      if (isServerKey(full, names)) continue;
     }
     out.push(line);
   }
@@ -152,12 +172,24 @@ function stripCompanionServer(text: string): string[] {
   return out;
 }
 
-function tomlString(value: string): string {
+export function tomlString(value: string): string {
   // JSON string escapes (\" \\ \n \uXXXX) are valid TOML basic-string escapes.
   return JSON.stringify(value);
 }
 
-function companionTable(entry: CompanionMcpEntry): string[] {
+/** A TOML key: bare when possible, quoted otherwise. */
+export function tomlKey(key: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(key) ? key : tomlString(key);
+}
+
+/** `{ A = "1", B = "2" }` */
+export function tomlInlineTable(values: Record<string, string>): string {
+  const body = Object.entries(values).map(([k, v]) => `${tomlKey(k)} = ${tomlString(v)}`).join(", ");
+  return body ? `{ ${body} }` : "{}";
+}
+
+/** The `[mcp_servers.companion]` block (marker comment first) written into a Codex config.toml. */
+export function companionTable(entry: CompanionMcpEntry): string[] {
   const env = Object.entries(entry.env).map(([k, v]) => `${k} = ${tomlString(v)}`).join(", ");
   return [
     MANAGED_COMMENT,
@@ -175,16 +207,31 @@ function companionTable(entry: CompanionMcpEntry): string[] {
  * replaced by a private copy first. Written 0600, it holds the MCP token.
  */
 export function upsertCodexMcpServer(configPath: string, entry: CompanionMcpEntry | null): void {
+  rewriteCodexMcpServers(configPath, [COMPANION_MCP_SERVER_NAME], entry ? [companionTable(entry)] : []);
+}
+
+/**
+ * Remove the servers named in `remove` from a Codex config.toml and append
+ * `tables` (each a whole `[mcp_servers.x]` block, marker comment first),
+ * preserving everything else. The file is never written through a symlink
+ * (that could be the user's global ~/.codex/config.toml): a link is replaced
+ * by a private copy first. Written 0600 (it can hold tokens); not rewritten
+ * when nothing changes.
+ */
+export function rewriteCodexMcpServers(configPath: string, remove: Iterable<string>, tables: string[][]): void {
   let text = "";
   let isLink = false;
   if (existsSync(configPath)) {
     isLink = lstatSync(configPath).isSymbolicLink();
     text = readFileSync(configPath, "utf-8");
-  } else if (!entry) {
+  } else if (tables.length === 0) {
     return;
   }
-  const kept = stripCompanionServer(text.replace(/\r\n/g, "\n"));
-  const lines = entry ? [...kept, ...(kept.length > 0 ? [""] : []), ...companionTable(entry)] : kept;
+  const lines = stripServers(text.replace(/\r\n/g, "\n"), new Set(remove));
+  for (const table of tables) {
+    if (lines.length > 0) lines.push("");
+    lines.push(...table);
+  }
   const next = lines.length > 0 ? `${lines.join("\n")}\n` : "";
   if (!isLink && next === text) return;
   if (isLink) unlinkSync(configPath);

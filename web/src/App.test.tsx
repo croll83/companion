@@ -163,6 +163,10 @@ vi.mock("./components/EnvManager.js", () => ({
   EnvManager: () => <div data-testid="env-manager">EnvManager</div>,
 }));
 
+vi.mock("./components/DomainsPage.js", () => ({
+  DomainsPage: () => <div data-testid="domains-page">DomainsPage</div>,
+}));
+
 
 vi.mock("./components/AgentsPage.js", () => ({
   AgentsPage: () => <div data-testid="agents-page">AgentsPage</div>,
@@ -331,6 +335,14 @@ describe("App", () => {
       render(<App />);
       await waitFor(() => {
         expect(screen.getByTestId("env-manager")).toBeInTheDocument();
+      });
+    });
+
+    it("renders DomainsPage for domains route", async () => {
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "domains" });
+      render(<App />);
+      await waitFor(() => {
+        expect(screen.getByTestId("domains-page")).toBeInTheDocument();
       });
     });
 

@@ -1,4 +1,4 @@
-import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
+import { usesDomain, type CliLauncher, type SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { SessionStore } from "./session-store.js";
 import type { WorktreeTracker } from "./worktree-tracker.js";
@@ -18,13 +18,29 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { isSessionWorking } from "./session-work.js";
+import {
+  defaultClaudeMemoryDir,
+  memoryAt,
+  resolveNewSessionPlacement,
+  validateTargetFolder,
+  type FolderMemory,
+} from "./session-folder.js";
+import { domainMemoryDir, getDomain, GLOBAL_DOMAIN } from "./domain-store.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
+import { applyChromePreference } from "./chrome-browser.js";
+import { listConnectedBrowsers } from "./chrome-browser-probe.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
+/**
+ * When to (re)try picking the Claude in Chrome browser after a CLI starts:
+ * its Chrome server connects some time after init, and the request fails
+ * until then.
+ */
+const CHROME_PICK_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 40_000];
 
 /**
  * True when a create-session body uses the removed sandbox/container fields
@@ -73,6 +89,11 @@ export interface CreateSessionRequest {
   useWorktree?: boolean;
   resumeSessionAt?: string;
   forkSession?: boolean;
+  /** Domain slug (default GLOBAL). */
+  domain?: string;
+  /** "new": create `folderName` inside the domain folder; "existing": attach `cwd`. */
+  folderMode?: "new" | "existing";
+  folderName?: string;
 }
 
 export type CreateSessionResult =
@@ -148,6 +169,8 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    // Successful agent runs archive their own session after a grace period.
+    this.agentExecutor.setRunArchiver((sessionId) => this.archiveSession(sessionId));
     this.wakeupScheduler = deps.wakeupScheduler;
   }
 
@@ -160,6 +183,8 @@ export class SessionOrchestrator {
     // When the CLI reports its internal session_id, store it for --resume
     companionBus.on("session:cli-id-received", ({ sessionId, cliSessionId }) => {
       this.launcher.setCLISessionId(sessionId, cliSessionId);
+      // Claude in Chrome on (domain setting): prefer this machine's browser.
+      if (this.launcher.getSession(sessionId)?.chromeActive) this.scheduleChromePreference(sessionId);
     });
 
     // When a Codex adapter is created, attach it to the WsBridge
@@ -343,6 +368,41 @@ export class SessionOrchestrator {
     // this.startReconnectionWatchdog();
   }
 
+  // ── Claude in Chrome ───────────────────────────────────────────────────────
+
+  private chromeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Make a Chrome-enabled Claude session drive the browser its domain prefers
+   * ("local" = the browser on this machine, falling back to a remote one; or a
+   * specific deviceId), retrying while its Chrome server is still connecting. A
+   * new init restarts the attempts.
+   */
+  private scheduleChromePreference(sessionId: string, attempt = 0): void {
+    if (attempt === 0) clearTimeout(this.chromeTimers.get(sessionId));
+    const delay = CHROME_PICK_DELAYS_MS[attempt];
+    if (delay === undefined) return;
+    const timer = setTimeout(async () => {
+      this.chromeTimers.delete(sessionId);
+      const session = this.launcher.getSession(sessionId);
+      if (!session?.chromeActive) return;
+      const control = this.wsBridge.chromeControl(sessionId);
+      const result = control
+        ? await applyChromePreference(control, session.chromeBrowserPref, () => listConnectedBrowsers())
+        : { ok: false as const, error: "CLI not connected" };
+      if (result.ok) {
+        log.info("orchestrator", "Claude in Chrome browser", {
+          sessionId, deviceId: result.deviceId, pref: session.chromeBrowserPref,
+        });
+      } else if (attempt + 1 < CHROME_PICK_DELAYS_MS.length) {
+        this.scheduleChromePreference(sessionId, attempt + 1);
+      } else {
+        log.warn("orchestrator", "Could not pick the Claude in Chrome browser", { sessionId, error: result.error });
+      }
+    }, delay);
+    this.chromeTimers.set(sessionId, timer);
+  }
+
   // ── Session Creation ───────────────────────────────────────────────────────
 
   async createSession(body: CreateSessionRequest): Promise<CreateSessionResult> {
@@ -408,7 +468,14 @@ export class SessionOrchestrator {
 
       if (onProgress) await onProgress("resolving_env", "Environment resolved", "done");
 
-      let cwd = body.cwd;
+      // --- Domain and folder ---
+      // A "new" folder is created inside the domain folder; an "existing" one
+      // (a repo, any folder) is attached where it is, never moved.
+      const placement = resolveNewSessionPlacement(body);
+      if (!placement.ok) return { ok: false, error: placement.error, status: placement.status };
+      const domain = placement.domain;
+
+      let cwd = placement.cwd;
       let worktreeInfo: { isWorktree: boolean; repoRoot: string; branch: string; actualBranch: string; worktreePath: string } | undefined;
 
       // Validate branch name to prevent command injection
@@ -494,6 +561,7 @@ export class SessionOrchestrator {
           resumeSessionAt,
           forkSession,
           systemPrompt: backend === "codex" ? linearSystemPrompt : undefined,
+          domain,
         });
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
@@ -566,6 +634,128 @@ export class SessionOrchestrator {
       session.stateMachine.mustTransition("starting", "relaunch_initiated");
     }
     return this.launcher.relaunch(sessionId);
+  }
+
+  // ── Change folder ──────────────────────────────────────────────────────────
+
+  /**
+   * The memory a session reads and writes, and keeps across a folder move:
+   * its domain's memory; for a legacy Claude session the pinned folder, else
+   * the folder the CLI reported at init, else Claude's default for its folder.
+   * Legacy Codex sessions have no memory folder.
+   */
+  private sessionMemory(info: SdkSessionInfo): FolderMemory | undefined {
+    if (usesDomain(info)) return memoryAt(domainMemoryDir(info.domain ?? GLOBAL_DOMAIN));
+    if ((info.backendType ?? "claude") !== "claude") return undefined;
+    const reported = this.wsBridge.getSession(info.sessionId)?.state.memory_dir;
+    return memoryAt(info.pinnedMemoryDir ?? reported ?? defaultClaudeMemoryDir(info.cwd));
+  }
+
+  /**
+   * What moving a session to `rawCwd` would do, without doing it: the folders,
+   * whether a running turn would be interrupted, and the memory the session
+   * keeps (domain memory, or for a legacy Claude session the memory of the
+   * folder it is in now, pinned at the move).
+   */
+  previewSessionFolder(sessionId: string, rawCwd: unknown): SessionFolderPreview {
+    const info = this.launcher.getSession(sessionId);
+    if (!info) return { ok: false, status: 404, error: "Session not found" };
+    if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
+    if (this.worktreeTracker.getBySession(sessionId)) {
+      return { ok: false, status: 409, error: "Worktree sessions cannot change folder" };
+    }
+    const target = validateTargetFolder(rawCwd);
+    if (!target.ok) return { ok: false, status: 400, error: target.error };
+    if (target.cwd === info.cwd) return { ok: false, status: 400, error: "The session is already in this folder" };
+
+    const memory = this.sessionMemory(info);
+    return {
+      ok: true,
+      from: info.cwd,
+      to: target.cwd,
+      backend: info.backendType ?? "claude",
+      interruptsWork: this.interruptsWork(sessionId),
+      ...(memory ? { memory } : {}),
+    };
+  }
+
+  private interruptsWork(sessionId: string): boolean {
+    const live = this.wsBridge.getSession(sessionId);
+    return !!live && this.wsBridge.isCliConnected(sessionId) && isSessionWorking(live);
+  }
+
+  /** Move a session to another folder and restart its CLI there on the same conversation. */
+  async changeSessionFolder(sessionId: string, rawCwd: unknown): Promise<SessionFolderPreview> {
+    const preview = this.previewSessionFolder(sessionId, rawCwd);
+    if (!preview.ok) return preview;
+    const info = this.launcher.getSession(sessionId);
+    // A legacy Claude session would otherwise switch to the new folder's
+    // default memory: pin the one it uses now (once; a later move keeps it).
+    const pin = info && !usesDomain(info) && !info.pinnedMemoryDir && preview.memory ? preview.memory.dir : undefined;
+    log.info("orchestrator", "Moving session to another folder", {
+      sessionId, from: preview.from, to: preview.to, ...(pin ? { pinnedMemoryDir: pin } : {}),
+    });
+    this.launcher.setCwd(sessionId, preview.to, { pinnedMemoryDir: pin });
+    this.wsBridge.setSessionCwd(sessionId, preview.to);
+    const relaunch = await this.relaunchSession(sessionId, { force: true });
+    if (!relaunch.ok) {
+      return { ok: false, status: 503, error: relaunch.error || "Moved, but the CLI failed to restart" };
+    }
+    return preview;
+  }
+
+  // ── Change domain ──────────────────────────────────────────────────────────
+
+  /**
+   * Move a (non-legacy) session to another domain and restart its CLI on the
+   * same conversation: from the next turn it reads the new domain's memory,
+   * skills, MCP servers and instructions. The folder does not move.
+   */
+  async changeSessionDomain(sessionId: string, rawDomain: unknown): Promise<ChangeDomainResult> {
+    const info = this.launcher.getSession(sessionId);
+    if (!info) return { ok: false, status: 404, error: "Session not found" };
+    if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
+    if (!usesDomain(info)) {
+      return { ok: false, status: 409, error: "Sessions from before domains keep their own memory and cannot change domain yet" };
+    }
+    if (typeof rawDomain !== "string" || !rawDomain) return { ok: false, status: 400, error: "Domain is required" };
+    if (rawDomain !== GLOBAL_DOMAIN && !getDomain(rawDomain)) return { ok: false, status: 404, error: `Domain not found: ${rawDomain}` };
+    if (rawDomain === info.domain) return { ok: false, status: 400, error: "The session is already in this domain" };
+    const from = info.domain ?? GLOBAL_DOMAIN;
+    const interruptsWork = this.interruptsWork(sessionId);
+    log.info("orchestrator", "Moving session to another domain", { sessionId, from, to: rawDomain });
+    this.launcher.setDomain(sessionId, rawDomain);
+    const relaunch = await this.relaunchSession(sessionId, { force: true });
+    if (!relaunch.ok) {
+      return { ok: false, status: 503, error: relaunch.error || "Moved, but the CLI failed to restart" };
+    }
+    return { ok: true, from, to: rawDomain, interruptsWork };
+  }
+
+  /**
+   * Migrate a legacy session (from before domains) into a domain and restart
+   * its CLI on the same conversation and folder. From then on it reads and
+   * writes the domain's memory, not its old folder-based one: notes there are
+   * not copied, so copy the ones to keep into the domain memory first.
+   */
+  async migrateSessionToDomain(sessionId: string, rawDomain: unknown): Promise<ChangeDomainResult> {
+    const info = this.launcher.getSession(sessionId);
+    if (!info) return { ok: false, status: 404, error: "Session not found" };
+    if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
+    if (usesDomain(info)) return { ok: false, status: 409, error: "The session already uses its domain: use Change domain" };
+    if (typeof rawDomain !== "string" || !rawDomain) return { ok: false, status: 400, error: "Domain is required" };
+    if (rawDomain !== GLOBAL_DOMAIN && !getDomain(rawDomain)) return { ok: false, status: 404, error: `Domain not found: ${rawDomain}` };
+    const oldMemory = this.sessionMemory(info)?.dir;
+    const interruptsWork = this.interruptsWork(sessionId);
+    log.info("orchestrator", "Migrating legacy session into a domain", {
+      sessionId, to: rawDomain, cwd: info.cwd, ...(oldMemory ? { oldMemory } : {}),
+    });
+    this.launcher.migrateToDomain(sessionId, rawDomain);
+    const relaunch = await this.relaunchSession(sessionId, { force: true });
+    if (!relaunch.ok) {
+      return { ok: false, status: 503, error: relaunch.error || "Migrated, but the CLI failed to restart" };
+    }
+    return { ok: true, from: "legacy", to: rawDomain, interruptsWork };
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────
@@ -827,3 +1017,20 @@ export class SessionOrchestrator {
     return { cleaned: result.removed, path: mapping.worktreePath };
   }
 }
+
+export type SessionFolderPreview =
+  | {
+      ok: true;
+      from: string;
+      to: string;
+      backend: string;
+      /** A turn or background job is running and the restart would interrupt it. */
+      interruptsWork: boolean;
+      /** The memory the session keeps using after the move (none for legacy Codex sessions). */
+      memory?: FolderMemory;
+    }
+  | { ok: false; status: 400 | 404 | 409 | 503; error: string };
+
+export type ChangeDomainResult =
+  | { ok: true; from: string; to: string; interruptsWork: boolean }
+  | { ok: false; status: 400 | 404 | 409 | 503; error: string };

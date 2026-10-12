@@ -405,6 +405,25 @@ describe("Composer slash menu", () => {
     expect(screen.queryByText("/help")).toBeNull();
   });
 
+  // The CLI reports each skill in slash_commands AND in skills: the menu used
+  // to list it twice. A skill must appear once, labelled as a skill.
+  it("lists a skill reported in both slash_commands and skills only once", () => {
+    setupMockStore({
+      session: {
+        slash_commands: ["help", "commit", "commit"],
+        skills: ["commit"],
+      },
+    });
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+
+    fireEvent.change(textarea, { target: { value: "/" } });
+
+    expect(screen.getAllByText("/commit")).toHaveLength(1);
+    expect(screen.getAllByText("skill")).toHaveLength(1);
+    expect(screen.getAllByText("command")).toHaveLength(1);
+  });
+
   it("slash menu shows command types", () => {
     setupMockStore({
       session: {

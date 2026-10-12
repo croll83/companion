@@ -952,6 +952,7 @@ export class ClaudeAdapter implements IBackendAdapter {
         agents: msg.agents ?? [],
         slash_commands: msg.slash_commands ?? [],
         skills: msg.skills ?? [],
+        ...(msg.memory_paths?.auto ? { memory_dir: msg.memory_paths.auto.replace(/\/+$/, "") } : {}),
       } as SessionState,
     });
 
@@ -1136,6 +1137,26 @@ export class ClaudeAdapter implements IBackendAdapter {
       request,
     });
     this.sendToBackend(ndjson);
+  }
+
+  /**
+   * Send a control request and wait for its answer (rejects on a CLI error
+   * or after `timeoutMs` without one).
+   */
+  private requestControl(request: Record<string, unknown>, timeoutMs = 10_000): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${String(request.subtype)}: no answer from the CLI`)), timeoutMs);
+      this.sendControlRequest(request, {
+        subtype: String(request.subtype),
+        resolve: (response) => { clearTimeout(timer); resolve(response); },
+        reject: (error) => { clearTimeout(timer); reject(new Error(error)); },
+      });
+    });
+  }
+
+  /** Claude in Chrome: make the session drive this browser. */
+  async selectChromeBrowser(deviceId: string): Promise<void> {
+    await this.requestControl({ subtype: "select_chrome_browser", device_id: deviceId });
   }
 
   /**

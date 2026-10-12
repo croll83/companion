@@ -238,9 +238,11 @@ export function SessionItem({
         ) : (
           <div className="flex-1 min-w-0">
             <span
+              // Legacy sessions (pre-domains, not yet migrated) stand out in amber.
               className={`text-[12.5px] font-medium truncate block leading-snug ${
-                isActive ? "text-cc-fg" : "text-cc-fg/90"
+                s.legacyMemory ? "text-cc-warning" : isActive ? "text-cc-fg" : "text-cc-fg/90"
               } ${isRecentlyRenamed ? "animate-name-appear" : ""}`}
+              title={s.legacyMemory ? "Legacy session — not yet migrated to a domain" : undefined}
               onAnimationEnd={() => onClearRecentlyRenamed(s.id)}
             >
               {label}

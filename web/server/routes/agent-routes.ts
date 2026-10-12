@@ -10,6 +10,7 @@ import { getOAuthConnection, createOAuthConnection } from "../linear-oauth-conne
 import { isTrustedRequest, socketAddress } from "../network-trust.js";
 import { accessDenied, agentAccessLevel, mcpCallerOf, sessionAccessLevel } from "../companion-mcp-auth.js";
 import { isPathWithin } from "../path-scope.js";
+import { GLOBAL_DOMAIN, getDomain } from "../domain-store.js";
 
 /** What the routes need to know about a session (the launcher's record). */
 export type AgentSessionLookup = (sessionId: string) => {
@@ -17,6 +18,8 @@ export type AgentSessionLookup = (sessionId: string) => {
   codexSandbox?: string;
   codexInternetAccess?: boolean;
   cwd?: string;
+  domain?: string;
+  legacyMemory?: boolean;
 } | undefined;
 
 /**
@@ -43,7 +46,7 @@ const EDITABLE_FIELDS = [
   "backendType", "model", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
   "prompt", "contextMode", "sourceSessionId", "mcpServers",
-  "triggers", "enabled",
+  "triggers", "enabled", "domain", "keepRunSessions",
 ] as const;
 
 /** A built-in Claude tool name, as `--tools` accepts it (no permission patterns). */
@@ -73,6 +76,11 @@ function validateAgentFields(
     if (!saved.sourceSessionId) return 'contextMode "fork" needs a sourceSessionId (the session to fork)';
     const forkError = opts.forkSourceError?.(saved.sourceSessionId, saved.backendType ?? "claude");
     if (forkError) return forkError;
+  }
+  if (fields.domain !== undefined && fields.domain !== null) {
+    if (typeof fields.domain !== "string" || (fields.domain !== GLOBAL_DOMAIN && !getDomain(fields.domain))) {
+      return `Unknown domain "${String(fields.domain)}": create it in the Domains page first`;
+    }
   }
   if (fields.allowedTools !== undefined) {
     if (!Array.isArray(fields.allowedTools)) return "allowedTools must be an array of tool names";
@@ -114,6 +122,7 @@ function buildCreateInput(
     sourceSessionId: body.sourceSessionId as string | undefined,
     mcpServers: body.mcpServers as AgentConfig["mcpServers"] | undefined,
     triggers: body.triggers as AgentConfig["triggers"] | undefined,
+    ...(typeof body.domain === "string" && body.domain ? { domain: body.domain } : {}),
     enabled: overrides?.enabled ?? ((body.enabled as boolean | undefined) ?? true),
   };
 }
@@ -288,6 +297,9 @@ export function registerAgentRoutes(
           }, 409);
         }
         input.createdBy = `session:${caller}`;
+        // An agent a session creates works in that session's domain by default.
+        const callerInfo = getSession?.(caller);
+        if (!input.domain && callerInfo?.domain && !callerInfo.legacyMemory) input.domain = callerInfo.domain;
       }
       const agent = agentStore.createAgent(input);
 

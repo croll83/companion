@@ -221,6 +221,11 @@ vi.mock("./usage-limits.js", () => ({
   getUsageLimits: mockGetUsageLimits,
 }));
 
+const mockListConnectedBrowsers = vi.hoisted(() => vi.fn());
+vi.mock("./chrome-browser-probe.js", () => ({
+  listConnectedBrowsers: mockListConnectedBrowsers,
+}));
+
 vi.mock("./update-checker.js", () => ({
   getUpdateState: vi.fn(() => ({ ...mockUpdateCheckerState })),
   checkForUpdate: mockCheckForUpdate,
@@ -494,11 +499,11 @@ describe("GET /api/sessions", () => {
     const json = await res.json();
     expect(json).toEqual([
       {
-        sessionId: "s1", state: "running", cwd: "/a", name: "Fix auth bug",
+        sessionId: "s1", state: "running", cwd: "/a", folder: "/a", name: "Fix auth bug",
         gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0,
       },
       {
-        sessionId: "s2", state: "stopped", cwd: "/b",
+        sessionId: "s2", state: "stopped", cwd: "/b", folder: "/b",
         gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0,
       },
     ]);
@@ -567,6 +572,17 @@ describe("GET /api/sessions", () => {
       sessionId: "s1",
       cwd: "/home/ubuntu/companion",
     });
+  });
+
+  // The sidebar groups sessions by their own folder, which must not follow
+  // the CLI's drifting runtime cwd: it is reported as `folder`.
+  it("reports the session's own folder separately from the runtime cwd", async () => {
+    launcher.listSessions.mockReturnValue([{ sessionId: "s1", state: "running", cwd: "/workspace" }]);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    bridge.getAllSessions.mockReturnValue([{ session_id: "s1", cwd: "/workspace/sub" }]);
+
+    const json = await (await app.request("/api/sessions", { method: "GET" })).json();
+    expect(json[0]).toMatchObject({ cwd: "/workspace/sub", folder: "/workspace" });
   });
 });
 
@@ -4326,5 +4342,64 @@ describe("auth middleware with Companion MCP tokens", () => {
     expect((await app.request("/api/sessions/s1", bearer(mcpTokenFor("s1")))).status).toBe(401);
     launcher.getSession.mockReturnValue({ sessionId: "s1" });
     expect((await app.request("/api/sessions/s1", bearer(`${mcpTokenFor("s1").slice(0, -1)}x`))).status).toBe(401);
+  });
+});
+
+// "Change folder" and "Change domain" (session panel): thin wrappers around
+// the orchestrator, which validates and restarts the CLI.
+describe("session folder and domain routes", () => {
+  it("previews and applies a folder move", async () => {
+    orchestrator.previewSessionFolder = vi.fn(() => ({ ok: true, from: "/a", to: "/b", backend: "claude", interruptsWork: false }));
+    orchestrator.changeSessionFolder = vi.fn(async () => ({ ok: true, from: "/a", to: "/b", backend: "claude", interruptsWork: false }));
+    const preview = await app.request("/api/sessions/s1/folder?cwd=%2Fb");
+    expect(await preview.json()).toMatchObject({ ok: true, to: "/b" });
+    expect(orchestrator.previewSessionFolder).toHaveBeenCalledWith("s1", "/b");
+    const res = await app.request("/api/sessions/s1/folder", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: "/b" }),
+    });
+    expect(res.status).toBe(200);
+    expect(orchestrator.changeSessionFolder).toHaveBeenCalledWith("s1", "/b");
+
+    orchestrator.previewSessionFolder = vi.fn(() => ({ ok: false, status: 400, error: "bad" }));
+    orchestrator.changeSessionFolder = vi.fn(async () => ({ ok: false, status: 409, error: "busy" }));
+    expect((await app.request("/api/sessions/s1/folder?cwd=x")).status).toBe(400);
+    expect((await app.request("/api/sessions/s1/folder", { method: "POST" })).status).toBe(409);
+  });
+
+  it("moves a session to another domain", async () => {
+    orchestrator.changeSessionDomain = vi.fn(async () => ({ ok: true, from: "global", to: "herd", interruptsWork: false }));
+    const res = await app.request("/api/sessions/s1/domain", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: "herd" }),
+    });
+    expect(await res.json()).toEqual({ ok: true, from: "global", to: "herd", interruptsWork: false });
+    expect(orchestrator.changeSessionDomain).toHaveBeenCalledWith("s1", "herd");
+    orchestrator.changeSessionDomain = vi.fn(async () => ({ ok: false, status: 409, error: "legacy" }));
+    expect((await app.request("/api/sessions/s1/domain", { method: "POST" })).status).toBe(409);
+  });
+
+  it("migrates a legacy session into a domain", async () => {
+    orchestrator.migrateSessionToDomain = vi.fn(async () => ({ ok: true, from: "legacy", to: "herd", interruptsWork: false }));
+    const res = await app.request("/api/sessions/s1/migrate-domain", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: "herd" }),
+    });
+    expect(await res.json()).toEqual({ ok: true, from: "legacy", to: "herd", interruptsWork: false });
+    expect(orchestrator.migrateSessionToDomain).toHaveBeenCalledWith("s1", "herd");
+    orchestrator.migrateSessionToDomain = vi.fn(async () => ({ ok: false, status: 409, error: "not legacy" }));
+    expect((await app.request("/api/sessions/s1/migrate-domain", { method: "POST" })).status).toBe(409);
+  });
+
+  // The Domains page lists the connected browsers via an isolated Claude query
+  // (chrome-browser-probe); `force` bypasses the brief cache.
+  it("lists Claude in Chrome browsers from the probe, passing force through", async () => {
+    const browsers = [{ deviceId: "d1", name: "Linux", osPlatform: "Linux", isLocal: true, inUse: true }];
+    mockListConnectedBrowsers.mockResolvedValue({ browsers });
+    expect(await (await app.request("/api/chrome-browsers")).json()).toEqual({ browsers });
+    expect(mockListConnectedBrowsers).toHaveBeenLastCalledWith(undefined);
+
+    await app.request("/api/chrome-browsers?force=1");
+    expect(mockListConnectedBrowsers).toHaveBeenLastCalledWith({ force: true });
+
+    mockListConnectedBrowsers.mockResolvedValue({ browsers: [], error: "Chrome off" });
+    expect(await (await app.request("/api/chrome-browsers")).json()).toEqual({ browsers: [], error: "Chrome off" });
   });
 });

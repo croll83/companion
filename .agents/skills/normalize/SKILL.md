@@ -6,6 +6,7 @@ args:
   - name: feature
     description: The page, route, or feature to normalize (optional)
     required: false
+disable-model-invocation: true
 ---
 
 Analyze and redesign the feature to perfectly match our design system standards, aesthetics, and established patterns.

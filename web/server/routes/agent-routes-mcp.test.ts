@@ -20,9 +20,12 @@ import { Hono } from "hono";
 import * as agentStore from "../agent-store.js";
 import { _setMcpSecretFileForTest, mcpTokenFor } from "../companion-mcp-auth.js";
 import { MAX_AGENTS_BY_SESSIONS, registerAgentRoutes } from "./agent-routes.js";
+import { createDomain } from "../domain-store.js";
 
-const SESSIONS: Record<string, { backendType: string; codexSandbox?: string; cwd?: string; codexInternetAccess?: boolean }> = {
+const SESSIONS: Record<string, { backendType: string; codexSandbox?: string; cwd?: string; codexInternetAccess?: boolean; domain?: string; legacyMemory?: boolean }> = {
   claude: { backendType: "claude", cwd: "/w" },
+  inHerd: { backendType: "claude", cwd: "/w", domain: "herd" },
+  legacy: { backendType: "claude", cwd: "/w", domain: "global", legacyMemory: true },
   claude2: { backendType: "claude", cwd: "/w" },
   codexFull: { backendType: "codex", codexSandbox: "danger-full-access", cwd: "/w" },
   codexSandboxed: { backendType: "codex", codexSandbox: "workspace-write", cwd: "/w", codexInternetAccess: false },
@@ -283,5 +286,25 @@ describe("PUT triggers", () => {
     // An explicit Linear value (the UI editor) still replaces it.
     await req("PUT", "/agents/linear-agent", { triggers: { linear: { enabled: false } } });
     expect(agentStore.getAgent("linear-agent")?.triggers?.linear).toEqual({ enabled: false });
+  });
+});
+
+describe("agent domains", () => {
+  // Runs of an agent a session creates share that session's domain (memory,
+  // skills, MCP) unless it asks for another; legacy sessions have none to give.
+  it("defaults an agent created by a session to the session's domain", async () => {
+    createDomain({ name: "Herd" });
+    expect((await (await req("POST", "/agents", claudeAgent("From Herd"), "inHerd")).json()).domain).toBe("herd");
+    expect((await (await req("POST", "/agents", claudeAgent("From Legacy"), "legacy")).json()).domain).toBeUndefined();
+    expect((await (await req("POST", "/agents", { ...claudeAgent("Explicit"), domain: "global" }, "inHerd")).json()).domain).toBe("global");
+  });
+
+  it("rejects an unknown domain", async () => {
+    const res = await req("POST", "/agents", { ...claudeAgent("Bad"), domain: "nope" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Unknown domain/);
+    const ok = await req("POST", "/agents", { ...claudeAgent("Ok"), domain: "global" });
+    expect(ok.status).toBeLessThan(300);
+    expect((await req("PUT", "/agents/ok", { domain: "nope" })).status).toBe(400);
   });
 });

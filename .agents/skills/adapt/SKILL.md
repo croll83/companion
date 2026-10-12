@@ -9,6 +9,7 @@ args:
   - name: context
     description: What to adapt for (mobile, tablet, desktop, print, email, etc.)
     required: false
+disable-model-invocation: true
 ---
 
 Adapt existing designs to work effectively across different contexts - different screen sizes, devices, platforms, or use cases.

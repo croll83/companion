@@ -28,6 +28,7 @@ vi.mock("../api.js", () => ({
   api: {
     listSkills: (...args: unknown[]) => mockApi.listSkills(...args),
     listEnvs: (...args: unknown[]) => mockApi.listEnvs(...args),
+    listDomains: () => Promise.resolve({ root: "", skillGroups: [], domains: [{ slug: "global", name: "GLOBAL" }, { slug: "herd", name: "Herd" }] }),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
   },
 }));
@@ -96,6 +97,16 @@ beforeEach(() => {
 
 describe("AgentEditor", () => {
   // ── Basic rendering ─────────────────────────────────────────────────────────
+
+  it("toggles 'Keep run sessions visible' (off by default: finished runs get archived)", () => {
+    // The checkbox maps to keepRunSessions; off means a successful run's
+    // session is archived after a grace period, keeping the sidebar clean.
+    const { getForm } = renderEditor();
+    const box = screen.getByRole("checkbox", { name: /Keep run sessions visible/ });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    expect(getForm().keepRunSessions).toBe(true);
+  });
 
   it("renders with default empty form and shows New Agent header", () => {
     // When editingId is null, the header should say "New Agent" and
@@ -533,5 +544,24 @@ describe("AgentEditor — context mode", () => {
     const { axe } = await import("vitest-axe");
     const { container } = renderEditor({ name: "Forker", prompt: "Continue", contextMode: "fork", sourceSessionId: "aaaaaaaa-1111" });
     expect(await axe(container, axeRules)).toHaveNoViolations();
+  });
+});
+
+describe("AgentEditor — domain", () => {
+  // Runs share the chosen domain's memory, skills and MCP servers; the
+  // select lists the domains and defaults to GLOBAL.
+  it("lists the domains and sets the agent's domain", async () => {
+    const { getForm } = renderEditor();
+    const select = screen.getByLabelText("Agent domain");
+    expect(select).toHaveValue("global");
+    await screen.findByRole("option", { name: "Herd" });
+    fireEvent.change(select, { target: { value: "herd" } });
+    expect(getForm().domain).toBe("herd");
+  });
+
+  it("keeps a domain that is not in the list", async () => {
+    renderEditor({ domain: "gone" });
+    await screen.findByRole("option", { name: "Herd" });
+    expect(screen.getByLabelText("Agent domain")).toHaveValue("gone");
   });
 });

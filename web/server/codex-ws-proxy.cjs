@@ -121,9 +121,33 @@ function connect() {
     }
   }
 
-  ws = new WebSocket(url, { perMessageDeflate: false });
+  // One socket at a time. A refused connection fires BOTH "error" and
+  // "close", and each used to schedule its own retry: while Codex was still
+  // starting, the retries multiplied into several open sockets. `ws` then
+  // pointed at a socket that never saw `initialize`, so every request after
+  // the first ones failed with "Not initialized" (seen with Codex 0.161 when
+  // its listener came up a few hundred ms late). Now each socket retries or
+  // reconnects at most once, and a socket that is no longer current is
+  // closed and ignored.
+  const sock = new WebSocket(url, { perMessageDeflate: false });
+  ws = sock;
+  let failed = false;
+  const fail = (reason) => {
+    if (failed || sock !== ws) return;
+    failed = true;
+    if (!opened) {
+      // Never connected yet: keep retrying until the startup timeout.
+      setTimeout(connect, Math.min(100 * connectAttempt, 500));
+      return;
+    }
+    scheduleReconnect(reason);
+  };
 
-  ws.once("open", () => {
+  sock.once("open", () => {
+    if (sock !== ws) {
+      try { sock.terminate(); } catch {}
+      return;
+    }
     if (!opened) {
       opened = true;
     }
@@ -147,39 +171,30 @@ function connect() {
     }
   });
 
-  ws.on("message", (data) => {
+  sock.on("message", (data) => {
+    if (sock !== ws) return;
     const raw = decodeMessageData(data);
     // stdout is protocol channel: ONLY write payload lines
     process.stdout.write(raw + "\n");
   });
 
-  ws.on("pong", () => {
+  sock.on("pong", () => {
     // Heartbeat response received — connection is alive
     if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
   });
 
-  ws.once("close", (code, reason) => {
+  sock.once("close", (code, reason) => {
+    if (sock !== ws) return;
     stopHeartbeat();
     if (closed || exiting) return;
     const why = reason ? ` reason=${reason}` : "";
-    // If connection closes before we ever opened, keep retrying until timeout.
-    if (!opened) {
-      setTimeout(connect, Math.min(100 * connectAttempt, 500));
-      return;
-    }
-    // Post-open close — attempt reconnection with backoff
-    scheduleReconnect(`WebSocket closed (code=${code}${why})`);
+    // Before the first open: retry until timeout; after: reconnect with backoff.
+    fail(`WebSocket closed (code=${code}${why})`);
   });
 
-  ws.once("error", (err) => {
+  sock.once("error", (err) => {
     if (closed || exiting) return;
-    // Retry during startup; after a successful connection, use reconnect logic.
-    if (!opened) {
-      setTimeout(connect, Math.min(100 * connectAttempt, 500));
-      return;
-    }
-    // Post-open error — attempt reconnection with backoff
-    scheduleReconnect(`WebSocket error: ${err && err.message ? err.message : String(err)}`);
+    fail(`WebSocket error: ${err && err.message ? err.message : String(err)}`);
   });
 }
 

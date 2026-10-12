@@ -20,6 +20,8 @@ export interface CLISystemInitMessage {
   skills?: string[];
   output_style: string;
   uuid: string;
+  /** Claude: the auto-memory folder this run reads and writes. */
+  memory_paths?: { auto?: string };
 }
 
 export interface CLISystemStatusMessage {
@@ -429,6 +431,8 @@ export interface SessionState {
   /** Same as ultracodeConfirmedAt, for runtime effort changes (Claude). */
   effortConfirmedAt?: number;
   cwd: string;
+  /** Claude: the auto-memory folder reported by the CLI at init. */
+  memory_dir?: string;
   tools: string[];
   permissionMode: string;
   claude_code_version: string;

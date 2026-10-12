@@ -52,16 +52,18 @@ export function Composer({ sessionId }: { sessionId: string }) {
     enabled: !slashMenuOpen,
   });
 
-  // Build command list from session data
+  // Build command list from session data. The CLI lists every skill in BOTH
+  // slash_commands and skills, so a name that is a skill is shown once, as a skill.
   const allCommands = useMemo<CommandItem[]>(() => {
     const cmds: CommandItem[] = [];
+    const skillNames = new Set(sessionData?.skills ?? []);
     if (sessionData?.slash_commands) {
-      for (const cmd of sessionData.slash_commands) {
-        cmds.push({ name: cmd, type: "command" });
+      for (const cmd of new Set(sessionData.slash_commands)) {
+        if (!skillNames.has(cmd)) cmds.push({ name: cmd, type: "command" });
       }
     }
     if (sessionData?.skills) {
-      for (const skill of sessionData.skills) {
+      for (const skill of skillNames) {
         cmds.push({ name: skill, type: "skill" });
       }
     }

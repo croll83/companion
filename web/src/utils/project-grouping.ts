@@ -18,76 +18,56 @@ export interface SessionItem {
   permCount: number;
   agentId?: string;
   agentName?: string;
+  /** Domain slug (absent = GLOBAL). */
+  domain?: string;
+  /** From before domains (keeps its own folder memory). */
+  legacyMemory?: boolean;
 }
 
-export interface ProjectGroup {
+export interface DomainRef {
+  slug: string;
+  name: string;
+}
+
+export interface DomainGroup {
+  /** Domain slug. */
   key: string;
   label: string;
+  /** The domain's sessions, newest first. */
   sessions: SessionItem[];
+  sessionCount: number;
   runningCount: number;
   permCount: number;
-  mostRecentActivity: number;
 }
 
 /**
- * Extracts a project key from a cwd path.
- * Uses repoRoot when available (normalizes to the parent repo).
+ * Sidebar grouping: by domain (GLOBAL first, then by name), and inside a
+ * domain its sessions, newest first. There is no folder level: the domain is
+ * what sessions share (memory, skills, MCP servers), and each row already
+ * shows its folder. The order is by creation only, so a session never moves
+ * when it starts or stops running. Sessions without a domain are GLOBAL's.
  */
-export function extractProjectKey(cwd: string, repoRoot?: string): string {
-  const basePath = repoRoot || cwd;
-  return basePath.replace(/\/+$/, "") || "/";
-}
-
-/**
- * Extracts a display label from a project key (last path component).
- */
-export function extractProjectLabel(projectKey: string): string {
-  if (projectKey === "/") return "/";
-  const parts = projectKey.split("/").filter(Boolean);
-  if (parts.length === 0) return "/";
-  return parts[parts.length - 1];
-}
-
-/**
- * Groups sessions by project directory, sorts groups by most recent activity,
- * and sorts sessions within each group (running first, then by createdAt desc).
- */
-export function groupSessionsByProject(
-  sessions: SessionItem[],
-): ProjectGroup[] {
-  const groups = new Map<string, ProjectGroup>();
-
+export function groupSessionsByDomain(sessions: SessionItem[], domains: DomainRef[]): DomainGroup[] {
+  const buckets = new Map<string, SessionItem[]>();
   for (const session of sessions) {
-    const key = extractProjectKey(session.cwd, session.repoRoot || undefined);
-    const label = extractProjectLabel(key);
-
-    if (!groups.has(key)) {
-      groups.set(key, {
-        key,
-        label,
-        sessions: [],
-        runningCount: 0,
-        permCount: 0,
-        mostRecentActivity: 0,
-      });
-    }
-
-    const group = groups.get(key)!;
-    group.sessions.push(session);
-    if (session.status === "running") group.runningCount++;
-    group.permCount += session.permCount;
-    group.mostRecentActivity = Math.max(group.mostRecentActivity, session.createdAt);
+    const slug = session.domain || "global";
+    buckets.set(slug, [...(buckets.get(slug) ?? []), session]);
   }
-
-  // Sort groups alphabetically by label (stable, predictable order)
-  const sorted = Array.from(groups.values()).sort(
-    (a, b) => a.label.localeCompare(b.label),
-  );
-
-  // Within each group, sort sessions by createdAt desc (stable order, no reordering on status change)
-  for (const group of sorted) {
-    group.sessions.sort((a, b) => b.createdAt - a.createdAt);
+  const result: DomainGroup[] = [];
+  for (const [slug, list] of buckets) {
+    const ref = domains.find((d) => d.slug === slug);
+    result.push({
+      key: slug,
+      label: ref?.name ?? (slug === "global" ? "GLOBAL" : slug),
+      sessions: [...list].sort((a, b) => b.createdAt - a.createdAt),
+      sessionCount: list.length,
+      runningCount: list.filter((s) => s.status === "running").length,
+      permCount: list.reduce((n, s) => n + s.permCount, 0),
+    });
   }
-
-  return sorted;
+  return result.sort((a, b) => {
+    if (a.key === "global") return -1;
+    if (b.key === "global") return 1;
+    return a.label.localeCompare(b.label);
+  });
 }

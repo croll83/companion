@@ -1,7 +1,15 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ── Module mocks ────────────────────────────────────────────────────────────
 // Must be declared before any imports that reference them.
+
+// Domains: the registry (COMPANION_HOME/domains.json) and the domain folders
+// live in a temp dir, never in the real home.
+const tmpState = vi.hoisted(() => `${process.env.TMPDIR || "/tmp"}/orchestrator-test-${process.pid}-${Date.now()}`);
+vi.mock("./paths.js", () => ({ COMPANION_HOME: tmpState, LEGACY_COMPANION_HOME: tmpState, legacyStatePath: () => null }));
 
 vi.mock("./env-manager.js", async () => {
   const getEnv = vi.fn((_slug: string) => null as null | { name: string; variables: Record<string, string> });
@@ -83,6 +91,10 @@ vi.mock("./auto-namer.js", () => ({
   generateSessionTitle: vi.fn(async () => "Test Title"),
 }));
 
+// Connected browsers come from an isolated Claude query; mocked here.
+const chromeProbe = vi.hoisted(() => ({ listConnectedBrowsers: vi.fn() }));
+vi.mock("./chrome-browser-probe.js", () => chromeProbe);
+
 // ── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionOrchestrator } from "./session-orchestrator.js";
@@ -97,6 +109,7 @@ import { transitionLinearIssue, fetchLinearTeamStates } from "./routes/linear-ro
 import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { resolveSessionEnv } from "./session-env.js";
+import { createDomain, domainDir, ensureGlobalDomain } from "./domain-store.js";
 
 // ── Mock factories ──────────────────────────────────────────────────────────
 
@@ -183,6 +196,7 @@ function createDeps(overrides?: Partial<SessionOrchestratorDeps>) {
     handleSessionClosed: vi.fn(),
     handleSessionUnarchived: vi.fn(),
     handleSessionInitFailed: vi.fn(),
+    setRunArchiver: vi.fn(),
   } as any;
   return {
     launcher,
@@ -1628,5 +1642,219 @@ describe("SessionOrchestrator", () => {
       // kill() is called by deleteSession, but relaunch should NOT be
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ── Domains: placement, change folder / domain, Claude in Chrome ────────────
+
+describe("SessionOrchestrator domains", () => {
+  let deps: ReturnType<typeof createDeps>;
+  let orchestrator: SessionOrchestrator;
+  let folders: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    companionBus.clear();
+    deps = createDeps();
+    deps.launcher.setCwd = vi.fn(() => true);
+    deps.launcher.setDomain = vi.fn(() => true);
+    deps.launcher.migrateToDomain = vi.fn(() => true);
+    orchestrator = new SessionOrchestrator(deps);
+    folders = mkdtempSync(join(tmpdir(), "orch-folders-"));
+    process.env.COMPANION_DOMAINS_ROOT = join(folders, "home");
+    ensureGlobalDomain();
+    createDomain({ name: "Herd" });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(folders, { recursive: true, force: true });
+  });
+
+  // New sessions carry their domain (default GLOBAL) to the launcher; a
+  // "new folder" is created inside the domain folder before the launch.
+  it("creates sessions in a domain, in a new folder inside it", async () => {
+    const res = await orchestrator.createSession({ domain: "herd", folderMode: "new", folderName: "Brave Falcon" });
+    expect(res.ok).toBe(true);
+    const opts = deps.launcher.launch.mock.calls[0][0];
+    expect(opts).toMatchObject({ domain: "herd", cwd: join(domainDir("herd"), "brave-falcon") });
+    expect(existsSync(join(domainDir("herd"), "brave-falcon"))).toBe(true);
+
+    await orchestrator.createSession({ cwd: "/somewhere" });
+    expect(deps.launcher.launch.mock.calls[1][0]).toMatchObject({ domain: "global", cwd: "/somewhere" });
+  });
+
+  it("refuses an unknown domain before launching", async () => {
+    const res = await orchestrator.createSession({ domain: "nope" });
+    expect(res).toMatchObject({ ok: false, status: 404 });
+    expect(deps.launcher.launch).not.toHaveBeenCalled();
+  });
+
+  // A legacy Claude session keeps its memory when it changes folder: the
+  // folder the CLI reported at init is pinned (once).
+  it("pins the current memory of a legacy Claude session when it changes folder", async () => {
+    const target = mkdtempSync(join(folders, "target-"));
+    const info = { sessionId: "s1", cwd: "/old", backendType: "claude", domain: "global", legacyMemory: true };
+    deps.launcher.getSession.mockReturnValue(info);
+    deps.wsBridge.getSession.mockReturnValue({ state: { memory_dir: "/claude/projects/-old/memory" } });
+    deps.wsBridge.setSessionCwd = vi.fn();
+
+    const preview = orchestrator.previewSessionFolder("s1", target);
+    expect(preview).toMatchObject({ ok: true, from: "/old", to: target, memory: { dir: "/claude/projects/-old/memory", notes: 0 } });
+    const res = await orchestrator.changeSessionFolder("s1", target);
+    expect(res.ok).toBe(true);
+    expect(deps.launcher.setCwd).toHaveBeenCalledWith("s1", target, { pinnedMemoryDir: "/claude/projects/-old/memory" });
+    expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+
+    // Already pinned: the pin is kept, not replaced.
+    deps.launcher.getSession.mockReturnValue({ ...info, pinnedMemoryDir: "/pinned" });
+    await orchestrator.changeSessionFolder("s1", folders);
+    expect(deps.launcher.setCwd).toHaveBeenLastCalledWith("s1", folders, { pinnedMemoryDir: undefined });
+  });
+
+  // Domain sessions keep the domain memory; legacy Codex has no memory folder.
+  it("reports the memory a domain or Codex session keeps, without pinning", async () => {
+    const target = mkdtempSync(join(folders, "target-"));
+    deps.wsBridge.setSessionCwd = vi.fn();
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/old", backendType: "codex", domain: "herd" });
+    expect(orchestrator.previewSessionFolder("s1", target)).toMatchObject({ memory: { dir: join(domainDir("herd"), "memory") } });
+    await orchestrator.changeSessionFolder("s1", target);
+    expect(deps.launcher.setCwd).toHaveBeenCalledWith("s1", target, { pinnedMemoryDir: undefined });
+
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/old", backendType: "codex", domain: "global", legacyMemory: true });
+    const legacyCodex = orchestrator.previewSessionFolder("s1", target);
+    expect(legacyCodex.ok && legacyCodex.memory).toBeUndefined();
+  });
+
+  it("validates folder moves", () => {
+    deps.launcher.getSession.mockReturnValue(undefined);
+    expect(orchestrator.previewSessionFolder("x", folders)).toMatchObject({ ok: false, status: 404 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: folders, archived: true });
+    expect(orchestrator.previewSessionFolder("s1", folders)).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: folders });
+    expect(orchestrator.previewSessionFolder("s1", folders)).toMatchObject({ ok: false, status: 400 });
+    expect(orchestrator.previewSessionFolder("s1", "relative")).toMatchObject({ ok: false, status: 400 });
+    deps.worktreeTracker.getBySession.mockReturnValue({ sessionId: "s1" });
+    expect(orchestrator.previewSessionFolder("s1", "/")).toMatchObject({ ok: false, status: 409 });
+  });
+
+  it("reports a failed restart after a folder move", async () => {
+    deps.wsBridge.setSessionCwd = vi.fn();
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/old", domain: "herd" });
+    deps.launcher.relaunch.mockResolvedValue({ ok: false, error: "boom" });
+    expect(await orchestrator.changeSessionFolder("s1", folders)).toEqual({ ok: false, status: 503, error: "boom" });
+  });
+
+  // Change domain: only for non-legacy sessions; the CLI restarts on the
+  // same conversation with the new domain's context.
+  it("moves a domain session to another domain and refuses legacy ones", async () => {
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global" });
+    expect(await orchestrator.changeSessionDomain("s1", "herd")).toEqual({ ok: true, from: "global", to: "herd", interruptsWork: false });
+    expect(deps.launcher.setDomain).toHaveBeenCalledWith("s1", "herd");
+    expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+
+    expect(await orchestrator.changeSessionDomain("s1", "global")).toMatchObject({ ok: false, status: 400 });
+    expect(await orchestrator.changeSessionDomain("s1", "nope")).toMatchObject({ ok: false, status: 404 });
+    expect(await orchestrator.changeSessionDomain("s1", 3)).toMatchObject({ ok: false, status: 400 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global", legacyMemory: true });
+    expect(await orchestrator.changeSessionDomain("s1", "herd")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global", archived: true });
+    expect(await orchestrator.changeSessionDomain("s1", "herd")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue(undefined);
+    expect(await orchestrator.changeSessionDomain("s1", "herd")).toMatchObject({ ok: false, status: 404 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global" });
+    deps.launcher.relaunch.mockResolvedValue({ ok: false });
+    expect(await orchestrator.changeSessionDomain("s1", "herd")).toMatchObject({ ok: false, status: 503 });
+  });
+
+  // Migrate: the explicit way a legacy session joins a domain (Change domain
+  // keeps refusing them). Same conversation and folder, CLI restarted.
+  it("migrates a legacy session into a domain and restarts it on the same conversation", async () => {
+    const legacy = { sessionId: "s1", cwd: "/w", backendType: "claude", domain: "global", legacyMemory: true };
+    deps.launcher.getSession.mockReturnValue(legacy);
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toEqual({ ok: true, from: "legacy", to: "herd", interruptsWork: false });
+    expect(deps.launcher.migrateToDomain).toHaveBeenCalledWith("s1", "herd");
+    expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+    // GLOBAL is a valid target: a legacy session is not really in it yet.
+    expect(await orchestrator.migrateSessionToDomain("s1", "global")).toMatchObject({ ok: true, to: "global" });
+    // A Codex legacy session (no folder memory) migrates the same way.
+    deps.launcher.getSession.mockReturnValue({ ...legacy, backendType: "codex" });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: true });
+  });
+
+  it("refuses to migrate what is not a live legacy session or not a domain", async () => {
+    const legacy = { sessionId: "s1", cwd: "/w", domain: "global", legacyMemory: true };
+    deps.launcher.getSession.mockReturnValue(legacy);
+    expect(await orchestrator.migrateSessionToDomain("s1", "nope")).toMatchObject({ ok: false, status: 404 });
+    expect(await orchestrator.migrateSessionToDomain("s1", "")).toMatchObject({ ok: false, status: 400 });
+    expect(await orchestrator.migrateSessionToDomain("s1", 3)).toMatchObject({ ok: false, status: 400 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global" });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue({ ...legacy, archived: true });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue(undefined);
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 404 });
+    // Nothing was changed by a refused migration.
+    expect(deps.launcher.migrateToDomain).not.toHaveBeenCalled();
+    deps.launcher.getSession.mockReturnValue(legacy);
+    deps.launcher.relaunch.mockResolvedValue({ ok: false });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 503 });
+  });
+
+  // Claude in Chrome on: after init the preferred browser is selected,
+  // retrying while the CLI's Chrome server is still connecting (select fails
+  // until then). "local" resolves to the browser on this machine.
+  it("selects the Chrome browser after init, retrying until the Chrome server answers", async () => {
+    vi.useFakeTimers();
+    orchestrator.initialize();
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", chromeActive: true, chromeBrowserPref: "local" });
+    chromeProbe.listConnectedBrowsers.mockResolvedValue({
+      browsers: [{ deviceId: "d1", name: "Here", isLocal: true, inUse: false }],
+    });
+    const control = {
+      selectChromeBrowser: vi.fn()
+        .mockRejectedValueOnce(new Error("not connected"))
+        .mockResolvedValue(undefined),
+    };
+    deps.wsBridge.chromeControl = vi.fn(() => control);
+
+    companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "c1" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    // First attempt resolved "local" → d1 and tried to select it (it failed).
+    expect(control.selectChromeBrowser).toHaveBeenCalledTimes(1);
+    expect(control.selectChromeBrowser).toHaveBeenCalledWith("d1");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(control.selectChromeBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  // A specific deviceId (e.g. the user's Mac for a VPS session) is selected
+  // directly, without listing the connected browsers.
+  it("selects a specific deviceId without listing browsers", async () => {
+    vi.useFakeTimers();
+    orchestrator.initialize();
+    chromeProbe.listConnectedBrowsers.mockClear();
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", chromeActive: true, chromeBrowserPref: "mac-remote-id" });
+    const control = { selectChromeBrowser: vi.fn(async () => {}) };
+    deps.wsBridge.chromeControl = vi.fn(() => control);
+
+    companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "c1" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(chromeProbe.listConnectedBrowsers).not.toHaveBeenCalled();
+    expect(control.selectChromeBrowser).toHaveBeenCalledWith("mac-remote-id");
+  });
+
+  it("does not touch Chrome for sessions without it, and gives up after the last retry", async () => {
+    vi.useFakeTimers();
+    orchestrator.initialize();
+    deps.wsBridge.chromeControl = vi.fn(() => null);
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1" });
+    companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "c1" });
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(deps.wsBridge.chromeControl).not.toHaveBeenCalled();
+
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", chromeActive: true });
+    companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "c1" });
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(deps.wsBridge.chromeControl).toHaveBeenCalledTimes(5);
   });
 });

@@ -25,6 +25,8 @@ interface ConfigItem {
   path: string;
   sublabel?: string;
   title?: string;
+  /** Manual-only skill: shown with an "M" badge. */
+  manualOnly?: boolean;
   /** "claude-md" = project CLAUDE.md, opened in the multi-file ClaudeMdEditor */
   editor: "claude-md" | "file";
   description?: string;
@@ -76,6 +78,7 @@ function skillGroup(skills: ClaudeConfigResponse["user"]["skills"]): ConfigGroup
       title: s.source === "synced"
         ? "Synced from claude.ai (read-only)"
         : s.source === "link" ? `Symlinked skill: ${s.description}` : s.description || undefined,
+      ...(s.manualOnly ? { manualOnly: true } : {}),
     })),
   };
 }
@@ -249,6 +252,15 @@ function ConfigItemRow({ item, onClick }: { item: ConfigItem; onClick: () => voi
       className="w-full flex items-center gap-2 px-4 pl-10 py-1.5 text-left hover:bg-cc-hover/50 transition-colors cursor-pointer"
     >
       <span className="text-[12px] text-cc-fg truncate flex-1">{item.label}</span>
+      {item.manualOnly && (
+        <span
+          className="shrink-0 w-4 h-4 rounded text-[9px] font-bold leading-4 text-center bg-cc-primary/15 text-cc-primary"
+          title="Manual only: run it with /name; the model never invokes it on its own"
+        >
+          <span aria-hidden="true">M</span>
+          <span className="sr-only">manual only</span>
+        </span>
+      )}
       {item.sublabel && (
         <span className="text-[10px] text-cc-muted shrink-0 max-w-[45%] truncate">{item.sublabel}</span>
       )}

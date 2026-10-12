@@ -77,7 +77,7 @@ const fullConfig = {
     claudeMd: { path: "/Users/test/.claude/CLAUDE.md", content: "# User" },
     skills: [
       { slug: "my-skill", name: "My Skill", description: "A test skill", path: "/Users/test/.claude/skills/my-skill/SKILL.md" },
-      { slug: "other-skill", name: "Other Skill", description: "Another", path: "/Users/test/.claude/skills/other-skill/SKILL.md" },
+      { slug: "other-skill", name: "Other Skill", description: "Another", path: "/Users/test/.claude/skills/other-skill/SKILL.md", manualOnly: true },
     ],
     agents: [
       { name: "researcher", path: "/Users/test/.claude/agents/researcher.md" },
@@ -157,6 +157,9 @@ describe("ClaudeConfigBrowser", () => {
     expect(screen.getByText("Skills (2)")).toBeInTheDocument();
     expect(screen.getByText("My Skill")).toBeInTheDocument();
     expect(screen.getByText("Other Skill")).toBeInTheDocument();
+    // Manual-only skills (disable-model-invocation) carry an "M" badge, others none.
+    expect(screen.getAllByText("manual only")).toHaveLength(1);
+    expect(screen.getByText("Other Skill").closest("button")).toHaveTextContent("M");
     // Agents
     expect(screen.getByText("Agents (1)")).toBeInTheDocument();
     expect(screen.getByText("researcher")).toBeInTheDocument();

@@ -16,6 +16,17 @@ const DONE_MS = 4_000;
  */
 export function SessionReload({ sessionId }: { sessionId: string }) {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [copied, setCopied] = useState(false);
+
+  async function copyId() {
+    try {
+      await navigator.clipboard.writeText(sessionId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked (no https / permission): leave the label unchanged */
+    }
+  }
 
   // A different session in focus starts from a clean state.
   useEffect(() => setStatus({ kind: "idle" }), [sessionId]);
@@ -63,14 +74,24 @@ export function SessionReload({ sessionId }: { sessionId: string }) {
       ) : (
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Session</h3>
-          <button
-            type="button"
-            onClick={() => setStatus({ kind: "confirm" })}
-            disabled={status.kind === "busy"}
-            className="text-[11px] px-2 py-0.5 rounded-md text-cc-primary hover:bg-cc-primary/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {status.kind === "busy" ? "Reloading..." : "Reload"}
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={copyId}
+              aria-label="Copy session ID"
+              className="text-[11px] px-2 py-0.5 rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+            >
+              {copied ? "Copied" : "Copy ID"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatus({ kind: "confirm" })}
+              disabled={status.kind === "busy"}
+              className="text-[11px] px-2 py-0.5 rounded-md text-cc-primary hover:bg-cc-primary/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {status.kind === "busy" ? "Reloading..." : "Reload"}
+            </button>
+          </div>
         </div>
       )}
       {status.kind === "done" && (
