@@ -56,6 +56,20 @@ function buildProps(overrides: Partial<ComponentProps<typeof SessionItem>> = {})
 }
 
 describe("SessionItem", () => {
+  it("shows a legacy session title in amber with a tooltip", () => {
+    // Legacy sessions (pre-domains, not yet migrated) must stand out visually.
+    render(<SessionItem {...buildProps({ session: makeSession({ legacyMemory: true }) })} />);
+    const title = screen.getByText("claude-sonnet-4-6");
+    expect(title.className).toContain("text-cc-warning");
+    expect(title).toHaveAttribute("title", expect.stringContaining("Legacy"));
+  });
+
+  it("does not color a non-legacy session title", () => {
+    render(<SessionItem {...buildProps({ session: makeSession({ legacyMemory: false }) })} />);
+    expect(screen.getByText("claude-sonnet-4-6").className).not.toContain("text-cc-warning");
+  });
+
+
   it("renders the session label and cwd", () => {
     // Validates the primary row content users rely on to identify sessions.
     render(<SessionItem {...buildProps()} />);

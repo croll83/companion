@@ -109,3 +109,26 @@ describe("SessionReload", () => {
     expect(screen.queryByRole("button", { name: "Reload now" })).not.toBeInTheDocument();
   });
 });
+
+describe("SessionReload — Copy ID", () => {
+  it("copies the session id to the clipboard and confirms", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<SessionReload sessionId="sess-xyz" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy session ID" }));
+    expect(writeText).toHaveBeenCalledWith("sess-xyz");
+    expect(await screen.findByText("Copied")).toBeInTheDocument();
+  });
+
+  it("does not throw or confirm when the clipboard is blocked", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<SessionReload sessionId="s1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy session ID" }));
+    await Promise.resolve();
+    expect(screen.queryByText("Copied")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy session ID" })).toHaveTextContent("Copy ID");
+  });
+});
