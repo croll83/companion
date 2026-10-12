@@ -6,18 +6,18 @@ interface DomainGroupProps {
   isCollapsed: boolean;
   onToggleCollapse: (key: string) => void;
   isFirst: boolean;
-  /** The domain's folder groups (ProjectGroup elements). */
+  /** The domain's session rows (SessionItem elements). */
   children: ReactNode;
 }
 
-/** Collapse key of a domain in the sidebar (folder keys are paths, so no clash). */
+/** Collapse key of a domain in the sidebar. */
 export function domainCollapseKey(slug: string): string {
   return `domain:${slug}`;
 }
 
 /**
  * Sidebar section of one domain: a collapsible header (domain name, running
- * and waiting dots, session count) above its folder groups.
+ * and waiting dots, session count) above its sessions.
  */
 export function DomainGroup({ group, isCollapsed, onToggleCollapse, isFirst, children }: DomainGroupProps) {
   return (

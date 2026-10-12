@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import type { SessionState, SdkSessionInfo } from "../types.js";
 
@@ -208,8 +208,8 @@ describe("Sidebar", () => {
     expect(screen.getByText("abcdef12")).toBeInTheDocument();
   });
 
-  it("session items show project name in group header and full cwd path in session row", () => {
-    // "myapp" appears in the project group header, full cwd path appears in the session row
+  it("session rows show the full cwd path (there is no folder header)", () => {
+    // Without folder groups the row is where the folder shows: the full path.
     const session = makeSession("s1", { cwd: "/home/user/projects/myapp" });
     const sdk = makeSdkSession("s1");
     mockState = createMockState({
@@ -218,10 +218,7 @@ describe("Sidebar", () => {
     });
 
     render(<Sidebar />);
-    // Group header shows "myapp"
-    const matches = screen.getAllByText("myapp");
-    expect(matches.length).toBeGreaterThanOrEqual(1);
-    // Session row shows the full cwd path
+    expect(screen.queryByText("myapp")).toBeNull();
     expect(screen.getByText("/home/user/projects/myapp")).toBeInTheDocument();
   });
 
@@ -649,7 +646,7 @@ describe("Sidebar", () => {
     expect(screen.getAllByText("CX").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("sessions are grouped by project directory", () => {
+  it("sessions in different folders share their domain's list", () => {
     const session1 = makeSession("s1", { cwd: "/home/user/project-a" });
     const session2 = makeSession("s2", { cwd: "/home/user/project-a" });
     const session3 = makeSession("s3", { cwd: "/home/user/project-b" });
@@ -662,12 +659,14 @@ describe("Sidebar", () => {
     });
 
     render(<Sidebar />);
-    // Project group headers should be visible (also appears as dirName in session items)
-    expect(screen.getAllByText("project-a").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("project-b").length).toBeGreaterThanOrEqual(1);
+    // One GLOBAL section holds all three; the folders show only in the rows.
+    const global = screen.getByRole("region", { name: "Domain GLOBAL" });
+    expect(within(global).getAllByText("/home/user/project-a")).toHaveLength(2);
+    expect(within(global).getByText("/home/user/project-b")).toBeInTheDocument();
+    expect(screen.queryByText("project-a")).toBeNull();
   });
 
-  it("project group header shows running status dot and session count", () => {
+  it("domain header shows running status dot and session count", () => {
     const session1 = makeSession("s1", { cwd: "/home/user/myapp" });
     const session2 = makeSession("s2", { cwd: "/home/user/myapp" });
     const sdk1 = makeSdkSession("s1", { cwd: "/home/user/myapp" });
@@ -679,34 +678,23 @@ describe("Sidebar", () => {
     });
 
     render(<Sidebar />);
-    // Status dot with title "2 running" should be present
-    expect(screen.getByTitle("2 running")).toBeInTheDocument();
-    // Session count badge should show "2"
-    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByTitle("2 running in GLOBAL")).toBeInTheDocument();
+    expect(screen.getByText("2 sessions")).toBeInTheDocument();
   });
 
-  it("collapsing a project group hides its session items but shows a preview", () => {
+  it("collapsing a domain hides its session rows but keeps its header", () => {
     const session = makeSession("s1", { cwd: "/home/user/myapp", model: "hidden-model" });
-    const sdk = makeSdkSession("s1", { cwd: "/home/user/myapp" });
+    const sdk = makeSdkSession("s1", { cwd: "/home/user/myapp", domain: "global" });
     mockState = createMockState({
       sessions: new Map([["s1", session]]),
       sdkSessions: [sdk],
-      collapsedProjects: new Set(["/home/user/myapp"]),
+      collapsedProjects: new Set(["domain:global"]),
     });
 
     render(<Sidebar />);
-    // Group header should still be visible
-    expect(screen.getByText("myapp")).toBeInTheDocument();
-    // The session button itself should not be present (no clickable session row)
-    const sessionButtons = screen.getAllByRole("button");
-    const sessionRowButton = sessionButtons.find((btn) =>
-      btn.textContent?.includes("hidden-model") && btn.classList.contains("rounded-lg"),
-    );
-    expect(sessionRowButton).toBeUndefined();
-    // But a collapsed preview text should appear with the session name
-    const previewElement = screen.getByText("hidden-model");
-    expect(previewElement).toBeInTheDocument();
-    expect(previewElement.className).toContain("text-cc-muted/70");
+    expect(screen.getByRole("button", { name: /GLOBAL/, expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText("/home/user/myapp")).toBeNull();
+    expect(screen.queryByText("hidden-model")).toBeNull();
   });
 
   it("context menu shows restore and delete for archived sessions", () => {
@@ -1798,9 +1786,9 @@ describe("Sidebar", () => {
 // ─── Domains ──────────────────────────────────────────────────────────────────
 
 describe("Sidebar domains", () => {
-  // Sessions are grouped by domain (GLOBAL first, legacy sessions included),
-  // then by their own folder: the stable `folder`, not the runtime cwd.
-  it("groups sessions by domain, then by the session's own folder", async () => {
+  // Sessions are grouped by domain (GLOBAL first, legacy sessions included)
+  // and listed directly inside it: no folder sub-groups.
+  it("groups sessions by domain with no folder level", async () => {
     mockApi.listDomains.mockResolvedValueOnce({
       root: "/home",
       skillGroups: [],
@@ -1810,19 +1798,23 @@ describe("Sidebar domains", () => {
       ],
     });
     mockState = createMockState({
-      sessions: new Map([["s1", makeSession("s1", { cwd: "/somewhere/after/cd" })], ["s2", makeSession("s2")]]),
+      sessions: new Map([["s1", makeSession("s1")], ["s2", makeSession("s2")], ["s3", makeSession("s3")]]),
       sdkSessions: [
         makeSdkSession("s1", { cwd: "/somewhere/after/cd", folder: "/home/companion_domain_herd/task-one", domain: "herd" }),
+        makeSdkSession("s3", { folder: "/repos/herd-app", domain: "herd" }),
         makeSdkSession("s2", { cwd: "/home/user/legacy", legacyMemory: true, domain: "global" }),
       ],
+      sessionNames: new Map([["s1", "Herd task"], ["s3", "Herd app"], ["s2", "Old one"]]),
     });
     render(<Sidebar />);
-    expect(await screen.findByRole("region", { name: "Domain Herd" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Domain GLOBAL" })).toBeInTheDocument();
-    // Inside its domain, a folder is named by its path relative to the domain folder.
-    expect(screen.getByText("task-one")).toBeInTheDocument();
-    expect(screen.getByText("legacy")).toBeInTheDocument();
-    expect(screen.queryByText("cd")).toBeNull();
+    const herd = await screen.findByRole("region", { name: "Domain Herd" });
+    const global = screen.getByRole("region", { name: "Domain GLOBAL" });
+    // Both Herd sessions sit in the same list although their folders differ.
+    expect(within(herd).getByText("Herd task")).toBeInTheDocument();
+    expect(within(herd).getByText("Herd app")).toBeInTheDocument();
+    expect(within(global).getByText("Old one")).toBeInTheDocument();
+    // The only collapsible header in a domain is the domain's own.
+    expect(within(herd).getAllByRole("button", { expanded: true })).toHaveLength(1);
   });
 
   it("collapses a domain through the shared collapse state", async () => {

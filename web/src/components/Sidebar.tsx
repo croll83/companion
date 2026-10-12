@@ -5,7 +5,6 @@ import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinear
 import { TelegramBridgeModal } from "./TelegramBridgeModal.js";
 import { disconnectSession, syncSessionSockets } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
-import { ProjectGroup } from "./ProjectGroup.js";
 import { SessionItem } from "./SessionItem.js";
 import { groupSessionsByDomain, type DomainRef, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 import { DomainGroup, domainCollapseKey } from "./DomainGroup.js";
@@ -452,12 +451,12 @@ export function Sidebar() {
   useEffect(() => {
     let alive = true;
     api.listDomains()
-      .then((res) => { if (alive) setDomainRefs(res.domains.map((d) => ({ slug: d.slug, name: d.name, path: d.path }))); })
+      .then((res) => { if (alive) setDomainRefs(res.domains.map((d) => ({ slug: d.slug, name: d.name }))); })
       .catch(() => { /* names fall back to slugs */ });
     return () => { alive = false; };
   }, [unknownDomain]);
 
-  // Group active sessions by domain, then by the session's own folder
+  // Group active sessions by domain (newest first inside each)
   const domainGroups = useMemo(
     () => groupSessionsByDomain(activeSessions, domainRefs),
     [activeSessions, domainRefs],
@@ -489,7 +488,7 @@ export function Sidebar() {
     });
   }, []);
 
-  // Shared props for SessionItem / ProjectGroup
+  // Shared props for every SessionItem
   const sessionItemProps = {
     onSelect: handleSelectSession,
     onStartRename: handleStartRename,
@@ -554,17 +553,14 @@ export function Sidebar() {
                 onToggleCollapse={toggleProjectCollapse}
                 isFirst={d === 0}
               >
-                {domain.groups.map((group, i) => (
-                  <ProjectGroup
-                    key={group.key}
-                    group={group}
-                    isCollapsed={collapsedProjects.has(group.key)}
-                    onToggleCollapse={toggleProjectCollapse}
-                    currentSessionId={currentSessionId}
-                    sessionNames={sessionNames}
-                    pendingPermissions={pendingPermissions}
-                    recentlyRenamed={recentlyRenamed}
-                    isFirst={i === 0}
+                {domain.sessions.map((s) => (
+                  <SessionItem
+                    key={s.id}
+                    session={s}
+                    isActive={currentSessionId === s.id}
+                    sessionName={sessionNames.get(s.id)}
+                    permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                    isRecentlyRenamed={recentlyRenamed.has(s.id)}
                     {...sessionItemProps}
                   />
                 ))}

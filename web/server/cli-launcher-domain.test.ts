@@ -70,6 +70,9 @@ beforeEach(() => {
   process.env.COMPANION_RELAUNCH_GRACE_MS = "10";
   process.env.COMPANION_DOMAINS_ROOT = join(h.home, "home");
   process.env.CLAUDE_CONFIG_DIR = join(h.home, "claude");
+  // Set when the tests run from a shell of a domain session: spawns inherit
+  // the environment, and only domain sessions may carry this variable.
+  delete process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD;
   vi.spyOn(process, "kill").mockImplementation((() => {
     throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
   }) as typeof process.kill);
