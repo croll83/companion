@@ -5,6 +5,8 @@ import {
   sessionHash,
   navigateToSession,
   navigateHome,
+  domainsHash,
+  isDomainTab,
 } from "./routing.js";
 
 describe("parseHash", () => {
@@ -150,5 +152,25 @@ describe("navigateHome", () => {
     expect(dispatchSpy).toHaveBeenCalledWith(expect.any(HashChangeEvent));
     spy.mockRestore();
     dispatchSpy.mockRestore();
+  });
+});
+
+// One domain, and one of its views, are addressable (so the phone's Back
+// closes a view, and the sidebar's gear links straight to a domain).
+describe("domain routes", () => {
+  it("parses a domain and its view", () => {
+    expect(parseHash("#/domains/herd")).toEqual({ page: "domains", slug: "herd" });
+    expect(parseHash("#/domains/herd/mcp")).toEqual({ page: "domains", slug: "herd", tab: "mcp" });
+    expect(parseHash("#/domains/my%20d/skills?x=1")).toEqual({ page: "domains", slug: "my d", tab: "skills" });
+    expect(parseHash("#/domains/herd/nope")).toEqual({ page: "domains", slug: "herd" });
+    expect(parseHash("#/domains/")).toEqual({ page: "domains" });
+  });
+
+  it("builds the hashes back", () => {
+    expect(domainsHash()).toBe("#/domains");
+    expect(domainsHash("herd")).toBe("#/domains/herd");
+    expect(domainsHash("my d", "plugins")).toBe("#/domains/my%20d/plugins");
+    expect(isDomainTab("mcp")).toBe(true);
+    expect(isDomainTab("files")).toBe(false);
   });
 });

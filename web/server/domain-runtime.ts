@@ -36,7 +36,6 @@ import {
   listSkillGroups,
   userSkillDirs,
   type SkillGroup,
-  type SkillGroupId,
 } from "./skill-groups.js";
 
 /**

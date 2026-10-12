@@ -38,4 +38,10 @@ describe("DomainGroup", () => {
     expect(onToggle).toHaveBeenCalledWith(domainCollapseKey("herd"));
     expect(domainCollapseKey("herd")).toBe("domain:herd");
   });
+
+  // The gear opens the domain's settings (its MCP servers, skills, plugins).
+  it("links the domain's settings from the header", () => {
+    render(<DomainGroup group={group} isCollapsed={false} onToggleCollapse={vi.fn()} isFirst><p>session row</p></DomainGroup>);
+    expect(screen.getByRole("link", { name: "Settings of domain Herd" })).toHaveAttribute("href", "#/domains/herd");
+  });
 });

@@ -466,7 +466,9 @@ export interface DomainMcpServerView {
   /** "account": the user's own Claude config or a claude.ai connector (Claude-only). */
   source: "global" | "domain" | "account";
   enabled: boolean;
-  /** Turned off in GLOBAL, hence everywhere. */
+  /** The domain chose this state itself (else it follows GLOBAL; for GLOBAL, the default "on"). */
+  own: boolean;
+  /** Off only because GLOBAL turns it off (the domain has no choice of its own). */
   disabledGlobally?: boolean;
   type: string;
   /** URL, or command and args (env and headers are never sent). */
@@ -494,6 +496,8 @@ export interface SkillGroupInfo {
   label: string;
   description: string;
   skills: string[];
+  /** One-line description per skill (from SKILL.md), when known. */
+  descriptions: Record<string, string>;
   /** How Codex sessions get the group: linked, turned off in config.toml, or Claude-only. */
   codex: "linked" | "toggled" | "unsupported";
 }
@@ -503,22 +507,43 @@ export interface DomainSummary {
   name: string;
   createdAt: number;
   description?: string;
-  mcpDisabled: string[];
+  /** MCP servers turned on/off by the domain itself (name → on). */
+  mcp: Record<string, boolean>;
   chrome: boolean;
   /** Claude only, used when chrome is on: "local" (default) or a browser deviceId. */
   chromeBrowser: string;
   plugins?: Record<string, boolean>;
   skillGroups?: Record<string, boolean>;
+  /** Single skills turned on/off by the domain itself, keyed "<group>:<name>". */
+  skillChoices?: Record<string, boolean>;
   path: string;
   sessionCount: number;
   totalSessions: number;
   memoryNotes: number;
   skills: string[];
+  /** The domain's own skills with their descriptions. */
+  ownSkills: { name: string; description: string }[];
   mcpServers: DomainMcpServerView[];
   mcpError?: string;
-  skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+  skillGroupStates: Record<string, { on: boolean; own: boolean; onCount: number }>;
+  /** Each single skill ("<group>:<name>"): on, and whether the domain chose it itself. */
+  skillStates: Record<string, { on: boolean; own: boolean }>;
   /** Effective state of each installed plugin, and whether it is this domain's own choice. */
   pluginStates: Record<string, { on: boolean; own: boolean }>;
+}
+
+type Choices = Record<string, boolean | null>;
+
+/** A change to a domain: text fields, and partial on/off maps (null = back to the inherited state). */
+export interface DomainPatch {
+  name?: string;
+  description?: string;
+  chrome?: boolean;
+  chromeBrowser?: string;
+  mcp?: Choices;
+  plugins?: Choices;
+  skillGroups?: Choices;
+  skillChoices?: Choices;
 }
 
 export interface DomainsResponse {
@@ -1020,10 +1045,17 @@ export const api = {
   // Domains
   listDomains: () => get<DomainsResponse>("/domains"),
   createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),
-  updateDomain: (
-    slug: string,
-    changes: Partial<Pick<DomainSummary, "name" | "description" | "mcpDisabled" | "chrome" | "chromeBrowser" | "plugins" | "skillGroups">>,
-  ) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
+  /**
+   * Change a domain. The on/off maps are partial: true/false sets a choice,
+   * null removes it (back to GLOBAL's), keys not sent are left alone.
+   */
+  updateDomain: (slug: string, changes: DomainPatch) => patch<DomainSummary>(`/domains/${encodeURIComponent(slug)}`, changes),
+  /** Create a skill of the domain's own (<domain>/skills/<name>/SKILL.md). */
+  createDomainSkill: (slug: string, name: string, description: string) =>
+    post<DomainSummary>(`/domains/${encodeURIComponent(slug)}/skills`, { name, description }),
+  /** Remove a skill of the domain's own (moved to .removed-skills, never deleted). */
+  removeDomainSkill: (slug: string, name: string) =>
+    del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`),
   deleteDomain: (slug: string) => del<{ ok: true; keptOnDisk: string }>(`/domains/${encodeURIComponent(slug)}`),
   readDomainFile: (slug: string, name: string) =>
     get<{ path: string; content: string; format: ConfigFileFormat; readOnly: boolean }>(

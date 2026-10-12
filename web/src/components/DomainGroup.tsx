@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { DomainGroup as DomainGroupType } from "../utils/project-grouping.js";
+import { domainsHash } from "../utils/routing.js";
 
 interface DomainGroupProps {
   group: DomainGroupType;
@@ -17,16 +18,18 @@ export function domainCollapseKey(slug: string): string {
 
 /**
  * Sidebar section of one domain: a collapsible header (domain name, running
- * and waiting dots, session count) above its sessions.
+ * and waiting dots, session count) above its sessions, and a gear opening the
+ * domain's settings (#/domains/<slug>).
  */
 export function DomainGroup({ group, isCollapsed, onToggleCollapse, isFirst, children }: DomainGroupProps) {
   return (
     <section aria-label={`Domain ${group.label}`} className={!isFirst ? "mt-4" : ""}>
+      <div className="flex items-center gap-1">
       <button
         type="button"
         onClick={() => onToggleCollapse(domainCollapseKey(group.key))}
         aria-expanded={!isCollapsed}
-        className="w-full px-2 py-1 flex items-center gap-1.5 rounded-md bg-cc-hover/40 hover:bg-cc-hover transition-colors cursor-pointer"
+        className="flex-1 min-w-0 px-2 py-1 flex items-center gap-1.5 rounded-md bg-cc-hover/40 hover:bg-cc-hover transition-colors cursor-pointer"
       >
         <svg
           viewBox="0 0 16 16"
@@ -49,6 +52,18 @@ export function DomainGroup({ group, isCollapsed, onToggleCollapse, isFirst, chi
           {group.sessionCount} session{group.sessionCount === 1 ? "" : "s"}
         </span>
       </button>
+      <a
+        href={domainsHash(group.key)}
+        aria-label={`Settings of domain ${group.label}`}
+        title={`MCP servers, skills and plugins of ${group.label}`}
+        className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+      >
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" className="w-3.5 h-3.5" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.2" />
+          <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" strokeLinecap="round" />
+        </svg>
+      </a>
+      </div>
       {!isCollapsed && <div className="mt-1 pl-1.5">{children}</div>}
     </section>
   );
