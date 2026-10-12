@@ -12,8 +12,8 @@ const CODEX_NOTE: Record<SkillGroupInfo["codex"], string> = {
  * The skills view of one domain. The domain's own skills (its folder's
  * skills/) can be created and removed here (removal moves the folder aside).
  * The skills installed outside the domain are grouped (yours, claude.ai,
- * design): a group switch turns the whole group on or off (mixed when only
- * some are on), and each skill has its own switch, which wins over the
+ * design), shown open: a group switch turns the whole group on or off
+ * (mixed when only some are on), and each skill has its own switch, which wins over the
  * group's; a single choice can be reset to the group's/GLOBAL's. One of your
  * skills can be kept for this domain only ("Only here": off in GLOBAL, on
  * here). Claude gets per-skill overrides; Codex gets your skills linked one
@@ -153,7 +153,8 @@ function SkillGroupBlock({
   busy: boolean;
   onPatch: (slug: string, patch: DomainPatch) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  // Open by default: the single skills are what this view is for.
+  const [open, setOpen] = useState(true);
   const [confirmGroup, setConfirmGroup] = useState<boolean | null>(null);
   const [onlyHere, setOnlyHere] = useState<string | null>(null);
   const isGlobal = domain.slug === "global";
@@ -175,6 +176,14 @@ function SkillGroupBlock({
       <div className="flex items-center gap-2">
         <Toggle label={`Skill group ${g.label}`} checked={allOn} mixed={mixed} disabled={busy || total === 0} onChange={setGroup} />
         <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="flex-1 min-w-0 text-left cursor-pointer">
+          <svg
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            aria-hidden="true"
+            className={`inline-block w-2.5 h-2.5 mr-1 text-cc-muted transition-transform ${open ? "rotate-90" : ""}`}
+          >
+            <path d="M6 4l4 4-4 4" />
+          </svg>
           <span className="text-[13px] font-medium">{g.label}</span>
           <span className="ml-1.5 text-[10px] text-cc-muted">
             {state.onCount}/{total} on · {CODEX_NOTE[g.codex]}{!isGlobal && !state.own ? " · as in GLOBAL" : ""}

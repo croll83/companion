@@ -42,14 +42,13 @@ describe("DomainSkills", () => {
     const { container } = render(
       <DomainSkills domain={herdDomain()} groups={skillGroups} busy={false} onPatch={vi.fn()} onCreateSkill={vi.fn(async () => true)} onRemoveSkill={vi.fn(async () => true)} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: /Your skills/ }));
     fireEvent.click(screen.getByRole("button", { name: "New skill" }));
     expect(await axe(container)).toHaveNoViolations();
   });
 
   it("switches and resets single skills, and keeps one of your skills for this domain only", () => {
     const p = setup();
-    fireEvent.click(screen.getByRole("button", { name: /Your skills/ }));
+    // Groups are open: every skill has its own switch right away.
     expect(screen.getByText("Write a Foundry PoC")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: "Skill foundry-poc" }));
     expect(p.onPatch).toHaveBeenCalledWith("herd", { skillChoices: { "user:foundry-poc": false } });
@@ -60,6 +59,18 @@ describe("DomainSkills", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Only here" })[1]);
     expect(p.onPatch).toHaveBeenCalledWith("global", { skillChoices: { "user:foundry-poc": false } });
     expect(p.onPatch).toHaveBeenCalledWith("herd", { skillChoices: { "user:foundry-poc": true } });
+  });
+
+  // The single skills are shown from the start; a group can still be folded.
+  it("shows every group open with one switch per skill, and folds a group", () => {
+    setup();
+    expect(screen.getByRole("switch", { name: "Skill foundry-poc" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Skill pdf" })).toBeInTheDocument();
+    const header = screen.getByRole("button", { name: /Your skills/ });
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("switch", { name: "Skill foundry-poc" })).toBeNull();
   });
 
   it("asks before a group switch drops single choices, and switches a group without any directly", () => {
@@ -112,9 +123,7 @@ describe("DomainSkills", () => {
     setup({ domain: globalDomain({ ownSkills: [] }), groups: [...skillGroups, { id: "design", label: "Design skills", description: "d", skills: [], descriptions: {}, codex: "toggled" }] });
     expect(screen.getByText(/GLOBAL's skills/)).toBeInTheDocument();
     expect(screen.getByText(/None yet/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Your skills/ }));
     expect(screen.queryByRole("button", { name: "Only here" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /Design skills/ }));
     expect(screen.getByText("No skills in this group.")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Skill group Design skills" })).toBeDisabled();
   });
