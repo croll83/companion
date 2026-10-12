@@ -1722,6 +1722,21 @@ export class CliLauncher {
     return true;
   }
 
+  /**
+   * Migrate a legacy session (from before domains) into a domain: from the
+   * next (re)launch it spawns with the domain's memory, skills, MCP servers
+   * and instructions instead of its folder-based memory. The folder does not
+   * move. A pinned memory folder is kept on record but no longer applies.
+   */
+  migrateToDomain(sessionId: string, domain: string): boolean {
+    const info = this.sessions.get(sessionId);
+    if (!info || usesDomain(info)) return false;
+    info.domain = domain;
+    delete info.legacyMemory;
+    this.persistState();
+    return true;
+  }
+
   setEffort(sessionId: string, effort: string): boolean {
     const info = this.sessions.get(sessionId);
     if (!info) return false;

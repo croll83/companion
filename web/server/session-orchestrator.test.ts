@@ -1658,6 +1658,7 @@ describe("SessionOrchestrator domains", () => {
     deps = createDeps();
     deps.launcher.setCwd = vi.fn(() => true);
     deps.launcher.setDomain = vi.fn(() => true);
+    deps.launcher.migrateToDomain = vi.fn(() => true);
     orchestrator = new SessionOrchestrator(deps);
     folders = mkdtempSync(join(tmpdir(), "orch-folders-"));
     process.env.COMPANION_DOMAINS_ROOT = join(folders, "home");
@@ -1764,6 +1765,40 @@ describe("SessionOrchestrator domains", () => {
     deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global" });
     deps.launcher.relaunch.mockResolvedValue({ ok: false });
     expect(await orchestrator.changeSessionDomain("s1", "herd")).toMatchObject({ ok: false, status: 503 });
+  });
+
+  // Migrate: the explicit way a legacy session joins a domain (Change domain
+  // keeps refusing them). Same conversation and folder, CLI restarted.
+  it("migrates a legacy session into a domain and restarts it on the same conversation", async () => {
+    const legacy = { sessionId: "s1", cwd: "/w", backendType: "claude", domain: "global", legacyMemory: true };
+    deps.launcher.getSession.mockReturnValue(legacy);
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toEqual({ ok: true, from: "legacy", to: "herd", interruptsWork: false });
+    expect(deps.launcher.migrateToDomain).toHaveBeenCalledWith("s1", "herd");
+    expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+    // GLOBAL is a valid target: a legacy session is not really in it yet.
+    expect(await orchestrator.migrateSessionToDomain("s1", "global")).toMatchObject({ ok: true, to: "global" });
+    // A Codex legacy session (no folder memory) migrates the same way.
+    deps.launcher.getSession.mockReturnValue({ ...legacy, backendType: "codex" });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: true });
+  });
+
+  it("refuses to migrate what is not a live legacy session or not a domain", async () => {
+    const legacy = { sessionId: "s1", cwd: "/w", domain: "global", legacyMemory: true };
+    deps.launcher.getSession.mockReturnValue(legacy);
+    expect(await orchestrator.migrateSessionToDomain("s1", "nope")).toMatchObject({ ok: false, status: 404 });
+    expect(await orchestrator.migrateSessionToDomain("s1", "")).toMatchObject({ ok: false, status: 400 });
+    expect(await orchestrator.migrateSessionToDomain("s1", 3)).toMatchObject({ ok: false, status: 400 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global" });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue({ ...legacy, archived: true });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue(undefined);
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 404 });
+    // Nothing was changed by a refused migration.
+    expect(deps.launcher.migrateToDomain).not.toHaveBeenCalled();
+    deps.launcher.getSession.mockReturnValue(legacy);
+    deps.launcher.relaunch.mockResolvedValue({ ok: false });
+    expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 503 });
   });
 
   // Claude in Chrome on: after init the preferred browser is selected,

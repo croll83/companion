@@ -272,3 +272,55 @@ describe("domain sessions (Codex)", () => {
     expect(toml.match(/^\[mcp_servers\.[^\]]+\]$/gm)).toEqual(["[mcp_servers.ping]"]);
   });
 });
+
+// Migration is how a legacy session joins a domain: from the next relaunch it
+// spawns like a domain session, on the same conversation and folder.
+describe("migrating legacy sessions", () => {
+  it("Claude: after migration the relaunch resumes the conversation with the domain's context", async () => {
+    const store = new SessionStore(join(h.home, "sessions"));
+    store.saveLauncher([
+      { sessionId: "old-1", state: "exited", cwd: "/a", createdAt: 1, cliSessionId: "cli-old", pinnedMemoryDir: "/mem/a" },
+    ]);
+    const launcher = wiredLauncher();
+    launcher.setStore(store);
+    launcher.restoreFromDisk();
+
+    expect(launcher.migrateToDomain("old-1", "herd")).toBe(true);
+    expect(launcher.getSession("old-1")).toMatchObject({ domain: "herd", cwd: "/a" });
+    expect(launcher.getSession("old-1")?.legacyMemory).toBeUndefined();
+    // Persisted, so a server restart does not turn it back into a legacy session.
+    expect(store.loadLauncher<{ sessionId: string; domain?: string; legacyMemory?: boolean }[]>()?.[0]).toMatchObject({ domain: "herd" });
+    expect(store.loadLauncher<{ legacyMemory?: boolean }[]>()?.[0].legacyMemory).toBeUndefined();
+
+    await launcher.relaunch("old-1");
+    const args = spawnArgs(0);
+    expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2)).toEqual(["--resume", "cli-old"]);
+    expect(args).toContain(domainDir("herd"));
+    // The domain memory replaces the old folder memory (pinned or not).
+    expect(JSON.parse(args[args.indexOf("--settings") + 1]).autoMemoryDirectory).toBe(join(domainDir("herd"), "memory"));
+    expect(spawnEnv(0).CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD).toBe("1");
+  });
+
+  it("Codex: the link to the user's AGENTS.md is replaced, never written through", async () => {
+    mkdirSync(join(h.home, "legacy-codex"), { recursive: true });
+    writeFileSync(join(h.home, "legacy-codex", "AGENTS.md"), "user rules");
+    const launcher = wiredLauncher();
+    const info = launcher.launch({ cwd: "/work", backendType: "codex" });
+    const agentsMd = join(h.home, "codex", info.sessionId, "AGENTS.md");
+    expect(lstatSync(agentsMd).isSymbolicLink()).toBe(true);
+
+    expect(launcher.migrateToDomain(info.sessionId, "herd")).toBe(true);
+    await launcher.relaunch(info.sessionId);
+    expect(lstatSync(agentsMd).isSymbolicLink()).toBe(false);
+    expect(readFileSync(agentsMd, "utf-8")).toContain(`${join(domainDir("herd"), "memory")}/MEMORY.md`);
+    expect(readFileSync(join(h.home, "legacy-codex", "AGENTS.md"), "utf-8")).toBe("user rules");
+  });
+
+  it("only migrates legacy sessions", () => {
+    const launcher = wiredLauncher();
+    const info = launcher.launch({ cwd: "/work", domain: "herd" });
+    expect(launcher.migrateToDomain(info.sessionId, GLOBAL_DOMAIN)).toBe(false);
+    expect(launcher.getSession(info.sessionId)?.domain).toBe("herd");
+    expect(launcher.migrateToDomain("missing", "herd")).toBe(false);
+  });
+});

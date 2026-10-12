@@ -989,6 +989,10 @@ export const api = {
   changeSessionDomain: (sessionId: string, domain: string) =>
     post<{ ok: true; from: string; to: string; interruptsWork: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/domain`, { domain }),
 
+  /** Migrate a legacy session (from before domains) into a domain; its CLI restarts on the same conversation. */
+  migrateSessionToDomain: (sessionId: string, domain: string) =>
+    post<{ ok: true; from: string; to: string; interruptsWork: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/migrate-domain`, { domain }),
+
   // Domains
   listDomains: () => get<DomainsResponse>("/domains"),
   createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),

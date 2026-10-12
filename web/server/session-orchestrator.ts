@@ -732,6 +732,32 @@ export class SessionOrchestrator {
     return { ok: true, from, to: rawDomain, interruptsWork };
   }
 
+  /**
+   * Migrate a legacy session (from before domains) into a domain and restart
+   * its CLI on the same conversation and folder. From then on it reads and
+   * writes the domain's memory, not its old folder-based one: notes there are
+   * not copied, so copy the ones to keep into the domain memory first.
+   */
+  async migrateSessionToDomain(sessionId: string, rawDomain: unknown): Promise<ChangeDomainResult> {
+    const info = this.launcher.getSession(sessionId);
+    if (!info) return { ok: false, status: 404, error: "Session not found" };
+    if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
+    if (usesDomain(info)) return { ok: false, status: 409, error: "The session already uses its domain: use Change domain" };
+    if (typeof rawDomain !== "string" || !rawDomain) return { ok: false, status: 400, error: "Domain is required" };
+    if (rawDomain !== GLOBAL_DOMAIN && !getDomain(rawDomain)) return { ok: false, status: 404, error: `Domain not found: ${rawDomain}` };
+    const oldMemory = this.sessionMemory(info)?.dir;
+    const interruptsWork = this.interruptsWork(sessionId);
+    log.info("orchestrator", "Migrating legacy session into a domain", {
+      sessionId, to: rawDomain, cwd: info.cwd, ...(oldMemory ? { oldMemory } : {}),
+    });
+    this.launcher.migrateToDomain(sessionId, rawDomain);
+    const relaunch = await this.relaunchSession(sessionId, { force: true });
+    if (!relaunch.ok) {
+      return { ok: false, status: 503, error: relaunch.error || "Migrated, but the CLI failed to restart" };
+    }
+    return { ok: true, from: "legacy", to: rawDomain, interruptsWork };
+  }
+
   // ── Archive ────────────────────────────────────────────────────────────────
 
   async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {

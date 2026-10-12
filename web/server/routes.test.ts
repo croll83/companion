@@ -4377,6 +4377,17 @@ describe("session folder and domain routes", () => {
     expect((await app.request("/api/sessions/s1/domain", { method: "POST" })).status).toBe(409);
   });
 
+  it("migrates a legacy session into a domain", async () => {
+    orchestrator.migrateSessionToDomain = vi.fn(async () => ({ ok: true, from: "legacy", to: "herd", interruptsWork: false }));
+    const res = await app.request("/api/sessions/s1/migrate-domain", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: "herd" }),
+    });
+    expect(await res.json()).toEqual({ ok: true, from: "legacy", to: "herd", interruptsWork: false });
+    expect(orchestrator.migrateSessionToDomain).toHaveBeenCalledWith("s1", "herd");
+    orchestrator.migrateSessionToDomain = vi.fn(async () => ({ ok: false, status: 409, error: "not legacy" }));
+    expect((await app.request("/api/sessions/s1/migrate-domain", { method: "POST" })).status).toBe(409);
+  });
+
   // The Domains page lists the connected browsers via an isolated Claude query
   // (chrome-browser-probe); `force` bypasses the brief cache.
   it("lists Claude in Chrome browsers from the probe, passing force through", async () => {

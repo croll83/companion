@@ -479,6 +479,14 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // Migrate a legacy session (from before domains) into a domain; its CLI restarts on the same conversation.
+  api.post("/sessions/:id/migrate-domain", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const result = await orchestrator.migrateSessionToDomain(c.req.param("id"), (body as { domain?: unknown }).domain);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result);
+  });
+
   api.post("/sessions/:id/relaunch", async (c) => {
     const id = c.req.param("id");
     const force = c.req.query("force") === "1";
