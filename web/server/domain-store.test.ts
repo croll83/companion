@@ -33,6 +33,7 @@ import {
   listDomains,
   readDomainMcp,
   readMemoryIndex,
+  setDomainMcpServer,
   slugify,
   updateDomain,
 } from "./domain-store.js";
@@ -208,6 +209,78 @@ describe("updateDomain", () => {
     expect(updateDomain("herd", { chromeBrowser: "  " })).toMatchObject({ ok: false, status: 400 });
     expect(updateDomain("herd", { plugins: null })).toMatchObject({ ok: false, status: 400 });
     expect(updateDomain("herd", { skillGroups: 1 })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  // The Domains page sends one plugin at a time: the others keep their choice.
+  it("merges plugin choices instead of replacing them", () => {
+    createDomain({ name: "Herd" });
+    updateDomain("herd", { plugins: { "a@m": true } });
+    updateDomain("herd", { plugins: { "b@m": false } });
+    expect(getDomain("herd")?.plugins).toEqual({ "a@m": true, "b@m": false });
+    updateDomain("herd", { plugins: { "a@m": false } });
+    expect(getDomain("herd")?.plugins).toEqual({ "a@m": false, "b@m": false });
+  });
+});
+
+// Add/remove one server from the Domains page form, without touching the
+// rest of mcp.json (other servers, env, extra keys).
+describe("setDomainMcpServer", () => {
+  const mcpPath = () => join(domainDir("herd"), "mcp.json");
+
+  it("adds HTTP and stdio servers, creating mcp.json, written 0600", () => {
+    createDomain({ name: "Herd" });
+    expect(setDomainMcpServer("herd", "brain", { url: " http://100.1.2.3:7421/mcp " })).toEqual({ ok: true, servers: ["brain"] });
+    expect(setDomainMcpServer("herd", "tool", { command: "npx", args: ["-y", "", "srv"] })).toEqual({ ok: true, servers: ["brain", "tool"] });
+    expect(setDomainMcpServer("herd", "bare", { command: "srv" })).toMatchObject({ ok: true });
+    expect(readDomainMcp("herd").servers).toEqual({
+      brain: { type: "http", url: "http://100.1.2.3:7421/mcp" },
+      tool: { type: "stdio", command: "npx", args: ["-y", "srv"] },
+      bare: { type: "stdio", command: "srv" },
+    });
+    expect(statSync(mcpPath()).mode & 0o777).toBe(0o600);
+  });
+
+  it("replaces a server and keeps the others, their env and any extra key", () => {
+    createDomain({ name: "Herd" });
+    writeFileSync(mcpPath(), JSON.stringify({ note: "keep", mcpServers: { a: { command: "a", env: { TOKEN: "t" } }, b: { command: "b" } } }));
+    expect(setDomainMcpServer("herd", "b", { url: "https://b/mcp" })).toEqual({ ok: true, servers: ["a", "b"] });
+    const doc = JSON.parse(readFileSync(mcpPath(), "utf-8"));
+    expect(doc).toEqual({ note: "keep", mcpServers: { a: { command: "a", env: { TOKEN: "t" } }, b: { type: "http", url: "https://b/mcp" } } });
+  });
+
+  it("removes a server, and reports one that is not there", () => {
+    createDomain({ name: "Herd" });
+    setDomainMcpServer("herd", "a", { command: "a" });
+    expect(setDomainMcpServer("herd", "a", null)).toEqual({ ok: true, servers: [] });
+    expect(setDomainMcpServer("herd", "a", null)).toMatchObject({ ok: false, status: 404 });
+  });
+
+  it("works for GLOBAL", () => {
+    ensureGlobalDomain();
+    expect(setDomainMcpServer(GLOBAL_DOMAIN, "g", { url: "http://g/mcp" })).toEqual({ ok: true, servers: ["g"] });
+  });
+
+  it("validates the domain, the name and the server", () => {
+    createDomain({ name: "Herd" });
+    const before = readFileSync(mcpPath(), "utf-8");
+    expect(setDomainMcpServer("nope", "a", { command: "a" })).toMatchObject({ ok: false, status: 404 });
+    expect(setDomainMcpServer("herd", "bad.name", { command: "a" })).toMatchObject({ ok: false, status: 400 });
+    expect(setDomainMcpServer("herd", 3, { command: "a" })).toMatchObject({ ok: false, status: 400 });
+    expect(setDomainMcpServer("herd", "a", {})).toMatchObject({ ok: false, status: 400, error: "Give either a URL or a command" });
+    expect(setDomainMcpServer("herd", "a", { url: "http://x", command: "c" })).toMatchObject({ ok: false, status: 400 });
+    expect(setDomainMcpServer("herd", "a", { url: "ftp://x" })).toMatchObject({ ok: false, status: 400 });
+    expect(setDomainMcpServer("herd", "a", { command: "c", args: "x y" })).toMatchObject({ ok: false, status: 400 });
+    expect(setDomainMcpServer("herd", "a", { command: "c", args: [1] })).toMatchObject({ ok: false, status: 400 });
+    // A refused change leaves the file as it was.
+    expect(readFileSync(mcpPath(), "utf-8")).toBe(before);
+  });
+
+  // A hand-edited file with a syntax error is never overwritten from the form.
+  it("refuses to touch an mcp.json that is not valid JSON", () => {
+    createDomain({ name: "Herd" });
+    writeFileSync(mcpPath(), "{ broken");
+    expect(setDomainMcpServer("herd", "a", { command: "a" })).toMatchObject({ ok: false, status: 409 });
+    expect(readFileSync(mcpPath(), "utf-8")).toBe("{ broken");
   });
 });
 

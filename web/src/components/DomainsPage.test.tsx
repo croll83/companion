@@ -17,6 +17,8 @@ const mockApi = vi.hoisted(() => ({
   readDomainFile: vi.fn(),
   writeDomainFile: vi.fn(),
   listChromeBrowsers: vi.fn(),
+  setDomainMcpServer: vi.fn(),
+  removeDomainMcpServer: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
@@ -27,9 +29,14 @@ const groups = [
   { id: "user", label: "Your skills", description: "In ~/.claude/skills", skills: ["foundry-poc"], codex: "linked" },
   { id: "claude-ai", label: "claude.ai skills", description: "Synced", skills: ["pdf", "docs"], codex: "unsupported" },
 ];
+const plugins = [{
+  id: "hercle-brain@hercle-lab", name: "hercle-brain", marketplace: "hercle-lab", version: "0.1.4", skills: ["hercle-brain"],
+  mcpServers: [{ name: "hercle-brain", type: "http", target: "http://127.0.0.1:7420/mcp" }], enabledByUser: false,
+}];
 const response = () => ({
   root: "/home/u",
   skillGroups: groups,
+  plugins,
   domains: [
     { ...base, slug: "global", name: "GLOBAL", path: "/home/u/companion_domain_global", sessionCount: 4, totalSessions: 5,
       skillGroupStates: { user: { on: true, own: false }, "claude-ai": { on: true, own: false } } },
@@ -52,6 +59,8 @@ beforeEach(() => {
   mockApi.deleteDomain.mockResolvedValue({ ok: true });
   mockApi.readDomainFile.mockResolvedValue({ path: "/home/u/companion_domain_herd/CLAUDE.md", content: "# Herd", format: "markdown", readOnly: false });
   mockApi.writeDomainFile.mockResolvedValue({ ok: true });
+  mockApi.setDomainMcpServer.mockResolvedValue({});
+  mockApi.removeDomainMcpServer.mockResolvedValue({});
   mockApi.listChromeBrowsers.mockResolvedValue({
     browsers: [
       { deviceId: "dev-linux", name: "Chrome", osPlatform: "Linux", isLocal: true, inUse: true },
@@ -210,5 +219,40 @@ describe("DomainsPage", () => {
     await screen.findByRole("article", { name: "Domain Herd" });
     const herd = within(herdCard());
     expect(await herd.findByLabelText("Browser deviceId")).toHaveValue("offline-device");
+  });
+
+  // Plugins: one switch per installed plugin, saved as that domain's choice.
+  it("turns a plugin on for one domain", async () => {
+    render(<DomainsPage />);
+    await screen.findByRole("article", { name: "Domain Herd" });
+    fireEvent.click(within(herdCard()).getByRole("switch", { name: "Plugin hercle-brain" }));
+    await waitFor(() => expect(mockApi.updateDomain).toHaveBeenCalledWith("herd", { plugins: { "hercle-brain@hercle-lab": true } }));
+  });
+
+  it("adds and removes MCP servers of a domain from its card", async () => {
+    render(<DomainsPage />);
+    await screen.findByRole("article", { name: "Domain Herd" });
+    const herd = within(herdCard());
+    fireEvent.click(herd.getByRole("button", { name: "Add server" }));
+    fireEvent.change(herd.getByLabelText("Name"), { target: { value: "jarvis-brain" } });
+    fireEvent.change(herd.getByLabelText("URL"), { target: { value: "http://100.116.99.9:7421/mcp" } });
+    fireEvent.click(herd.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(mockApi.setDomainMcpServer).toHaveBeenCalledWith("herd", "jarvis-brain", { url: "http://100.116.99.9:7421/mcp" }));
+    fireEvent.click(herd.getByRole("button", { name: "Remove MCP server ping" }));
+    await waitFor(() => expect(mockApi.removeDomainMcpServer).toHaveBeenCalledWith("herd", "ping"));
+  });
+
+  // The server's refusal is shown and the form keeps what was typed.
+  it("shows why a server was refused and keeps the form open", async () => {
+    mockApi.setDomainMcpServer.mockRejectedValue(new Error("The URL must start with http:// or https://"));
+    render(<DomainsPage />);
+    await screen.findByRole("article", { name: "Domain Herd" });
+    const herd = within(herdCard());
+    fireEvent.click(herd.getByRole("button", { name: "Add server" }));
+    fireEvent.change(herd.getByLabelText("Name"), { target: { value: "x" } });
+    fireEvent.change(herd.getByLabelText("URL"), { target: { value: "ftp://x" } });
+    fireEvent.click(herd.getByRole("button", { name: "Add" }));
+    expect(await screen.findByText("The URL must start with http:// or https://")).toBeInTheDocument();
+    expect(herd.getByLabelText("URL")).toHaveValue("ftp://x");
   });
 });

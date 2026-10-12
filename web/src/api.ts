@@ -468,6 +468,22 @@ export interface DomainMcpServerView {
   /** Turned off in GLOBAL, hence everywhere. */
   disabledGlobally?: boolean;
   type: string;
+  /** URL, or command and args (env and headers are never sent). */
+  target: string;
+}
+
+/** A Claude Code marketplace plugin installed for the user, turned on/off per domain. */
+export interface PluginInfo {
+  /** `name@marketplace`. */
+  id: string;
+  name: string;
+  marketplace: string;
+  version?: string;
+  description?: string;
+  skills: string[];
+  mcpServers: { name: string; type: string; target: string }[];
+  /** On in the user's own settings.json: the state when no domain decides. */
+  enabledByUser: boolean;
 }
 
 export interface SkillGroupInfo {
@@ -498,11 +514,14 @@ export interface DomainSummary {
   mcpServers: DomainMcpServerView[];
   mcpError?: string;
   skillGroupStates: Record<string, { on: boolean; own: boolean }>;
+  /** Effective state of each installed plugin, and whether it is this domain's own choice. */
+  pluginStates: Record<string, { on: boolean; own: boolean }>;
 }
 
 export interface DomainsResponse {
   root: string;
   skillGroups: SkillGroupInfo[];
+  plugins: PluginInfo[];
   domains: DomainSummary[];
 }
 
@@ -1007,6 +1026,11 @@ export const api = {
     ),
   writeDomainFile: (slug: string, name: string, content: string) =>
     put<{ ok: boolean; path: string }>(`/domains/${encodeURIComponent(slug)}/file`, { name, content }),
+  /** Add or replace one server in the domain's mcp.json: a URL (HTTP) or a command (stdio). */
+  setDomainMcpServer: (slug: string, name: string, server: { url: string } | { command: string; args?: string[] }) =>
+    put<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`, server),
+  removeDomainMcpServer: (slug: string, name: string) =>
+    del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`),
 
   /** Browsers connected to Claude in Chrome, listed by a short isolated Claude query. `force` bypasses the brief cache. */
   listChromeBrowsers: (force?: boolean) =>

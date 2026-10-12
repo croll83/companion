@@ -293,7 +293,7 @@ export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
   }
   if (patch.plugins !== undefined) {
     if (!patch.plugins || typeof patch.plugins !== "object") return { ok: false, status: 400, error: "plugins must be an object" };
-    next.plugins = sanitizePlugins(patch.plugins);
+    next.plugins = { ...(cur.plugins ?? {}), ...sanitizePlugins(patch.plugins) };
   }
   if (patch.skillGroups !== undefined) {
     if (!patch.skillGroups || typeof patch.skillGroups !== "object") return { ok: false, status: 400, error: "skillGroups must be an object" };
@@ -344,6 +344,59 @@ export function readDomainMcp(slug: string): McpConfigRead {
   } catch (err) {
     return { servers: {}, error: `Invalid JSON in ${path}: ${err instanceof Error ? err.message : String(err)}` };
   }
+}
+
+export type McpEditResult = { ok: true; servers: string[] } | { ok: false; status: 400 | 404 | 409; error: string };
+
+/** A server definition from the Domains page form: a URL (HTTP) or a command (stdio). */
+function parseServerInput(input: { url?: unknown; command?: unknown; args?: unknown }): McpServerDef | string {
+  const url = typeof input.url === "string" ? input.url.trim() : "";
+  const command = typeof input.command === "string" ? input.command.trim() : "";
+  if (!!url === !!command) return "Give either a URL or a command";
+  if (url) {
+    if (!/^https?:\/\/\S+$/.test(url)) return "The URL must start with http:// or https://";
+    return { type: "http", url };
+  }
+  if (input.args !== undefined && (!Array.isArray(input.args) || input.args.some((a) => typeof a !== "string"))) {
+    return "args must be a list of strings";
+  }
+  const args = (input.args as string[] | undefined)?.filter((a) => a.length > 0) ?? [];
+  return { type: "stdio", command, ...(args.length > 0 ? { args } : {}) };
+}
+
+/**
+ * Add or replace (`def`), or remove (`null`), one server in a domain's
+ * mcp.json, keeping everything else in the file. A file that is not valid
+ * JSON is left alone. Written 0600: server env may hold tokens.
+ */
+export function setDomainMcpServer(
+  slug: string,
+  name: unknown,
+  input: { url?: unknown; command?: unknown; args?: unknown } | null,
+): McpEditResult {
+  if (slug !== GLOBAL_DOMAIN && !getDomain(slug)) return { ok: false, status: 404, error: "Domain not found" };
+  if (typeof name !== "string" || !/^[A-Za-z0-9_-]+$/.test(name)) {
+    return { ok: false, status: 400, error: "Server name: letters, digits, \"-\" or \"_\" (Codex needs it)" };
+  }
+  const path = join(domainDir(slug), "mcp.json");
+  let doc: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    const read = readDomainMcp(slug);
+    if (read.error) return { ok: false, status: 409, error: `${read.error}: fix mcp.json first` };
+    doc = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+  }
+  const servers = { ...((doc.mcpServers as Record<string, unknown> | undefined) ?? {}) };
+  if (input === null) {
+    if (!(name in servers)) return { ok: false, status: 404, error: `No server "${name}" in mcp.json` };
+    delete servers[name];
+  } else {
+    const def = parseServerInput(input);
+    if (typeof def === "string") return { ok: false, status: 400, error: def };
+    servers[name] = def;
+  }
+  mkdirSync(domainDir(slug), { recursive: true });
+  writePrivateFile(path, `${JSON.stringify({ ...doc, mcpServers: servers }, null, 2)}\n`);
+  return { ok: true, servers: Object.keys(servers).sort() };
 }
 
 /** Skill folder names (`skills/<name>/SKILL.md`) of a domain. */

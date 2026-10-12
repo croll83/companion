@@ -42,6 +42,8 @@ import {
   domainRuntimeDir,
   effectiveMcpServers,
   linkCodexSkills,
+  mcpTargetOf,
+  mcpTypeOf,
   prepareCodexDomainHome,
   removeDomainRuntime,
   resolveDomain,
@@ -126,13 +128,13 @@ describe("MCP servers", () => {
 
   it("lists every server with its source and state for the Domains page", () => {
     expect(domainMcpView(resolveDomain("herd"))).toEqual([
-      { name: "gh", source: "global", enabled: false, type: "stdio" },
-      { name: "noisy", source: "global", enabled: false, disabledGlobally: true, type: "stdio" },
-      { name: "ping", source: "domain", enabled: true, type: "stdio" },
-      { name: "shared", source: "domain", enabled: true, type: "stdio" },
+      { name: "gh", source: "global", enabled: false, type: "stdio", target: "gh-mcp" },
+      { name: "noisy", source: "global", enabled: false, disabledGlobally: true, type: "stdio", target: "n" },
+      { name: "ping", source: "domain", enabled: true, type: "stdio", target: "node ping.js" },
+      { name: "shared", source: "domain", enabled: true, type: "stdio", target: "herd-version" },
     ]);
     expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN)).find((s) => s.name === "noisy")).toEqual({
-      name: "noisy", source: "global", enabled: false, type: "stdio",
+      name: "noisy", source: "global", enabled: false, type: "stdio", target: "n",
     });
   });
 
@@ -348,5 +350,74 @@ describe("Codex skills and home", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, ".companion-domain.json"), "{");
     expect(prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") }).mcp.remove).toEqual([]);
+  });
+});
+
+// Codex has no plugins: a plugin turned on for the domain reaches Codex
+// sessions as its MCP servers (config.toml) and its skills (links).
+describe("plugins for Codex", () => {
+  function installPlugin(id: string, opts: { skills?: string[]; mcp?: Record<string, unknown>; userOn?: boolean } = {}) {
+    const name = id.split("@")[0];
+    const root = join(tmp, "claude", "plugins", "cache", name);
+    mkdirSync(join(root, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name }));
+    for (const sk of opts.skills ?? []) addSkill(join(root, "skills"), sk);
+    if (opts.mcp) writeFileSync(join(root, ".mcp.json"), JSON.stringify(opts.mcp));
+    const regPath = join(tmp, "claude", "plugins", "installed_plugins.json");
+    const reg = existsSync(regPath) ? JSON.parse(readFileSync(regPath, "utf-8")) : { version: 2, plugins: {} };
+    reg.plugins[id] = [{ scope: "user", installPath: root }];
+    writeFileSync(regPath, JSON.stringify(reg));
+    if (opts.userOn !== undefined) writeFileSync(join(tmp, "claude", "settings.json"), JSON.stringify({ enabledPlugins: { [id]: opts.userOn } }));
+    return root;
+  }
+
+  it("adds the servers and skills of the domain's plugins, and takes them out when the plugin is turned off", () => {
+    const root = installPlugin("brain@lab", { skills: ["brain"], mcp: { brain: { type: "http", url: "http://127.0.0.1:7420/mcp" } }, userOn: false });
+    const home = join(tmp, "codex");
+    mkdirSync(home, { recursive: true });
+
+    // Off for the user and not chosen by the domain: nothing for Codex.
+    let prepared = prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") });
+    expect(prepared.mcp.names).not.toContain("brain");
+    prepared.commit();
+
+    updateDomain("herd", { plugins: { "brain@lab": true } });
+    prepared = prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") });
+    expect(prepared.mcp.names).toContain("brain");
+    const table = prepared.mcp.tables.find((t) => t.includes("[mcp_servers.brain]"));
+    expect(table).toEqual([
+      "# Managed by Companion: MCP server of domain herd (plugin brain@lab). Rewritten at every launch.",
+      "[mcp_servers.brain]",
+      'url = "http://127.0.0.1:7420/mcp"',
+    ]);
+    expect(readlinkSync(join(home, "skills", "brain"))).toBe(join(root, "skills", "brain"));
+    prepared.commit();
+
+    // Other domains (and GLOBAL) are not affected by herd's choice.
+    expect(codexDomainMcp(join(tmp, "codex2"), resolveDomain(GLOBAL_DOMAIN)).names).not.toContain("brain");
+
+    updateDomain("herd", { plugins: { "brain@lab": false } });
+    prepared = prepareCodexDomainHome(home, "herd", { userAgentsMdPath: join(tmp, "x") });
+    expect(prepared.mcp.names).not.toContain("brain");
+    expect(prepared.mcp.remove).toContain("brain");
+    expect(existsSync(join(home, "skills", "brain"))).toBe(false);
+  });
+
+  // A server the domain declares itself wins over a plugin's of the same name.
+  it("lets the domain's own mcp.json win on a name clash", () => {
+    installPlugin("brain@lab", { mcp: { brain: { url: "http://plugin/mcp" } }, userOn: true });
+    writeMcp("herd", { brain: { url: "http://domain/mcp" } });
+    const mcp = codexDomainMcp(join(tmp, "codex"), resolveDomain("herd"));
+    expect(mcp.names.filter((n) => n === "brain")).toHaveLength(1);
+    expect(mcp.tables.find((t) => t.includes("[mcp_servers.brain]"))).toContain('url = "http://domain/mcp"');
+  });
+
+  it("describes a server by its URL or command, never env or headers", () => {
+    expect(mcpTypeOf({ url: "http://x" })).toBe("http");
+    expect(mcpTypeOf({ command: "c" })).toBe("stdio");
+    expect(mcpTypeOf({ type: "sse", url: "http://x" })).toBe("sse");
+    expect(mcpTargetOf({ url: "http://x", headers: { Authorization: "secret" } })).toBe("http://x");
+    expect(mcpTargetOf({ command: "npx", args: ["-y", "srv"], env: { TOKEN: "secret" } })).toBe("npx -y srv");
+    expect(mcpTargetOf({})).toBe("");
   });
 });

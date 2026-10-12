@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useId, useState } from "react";
-import { api, type ConnectedBrowser, type DomainSummary, type DomainsResponse, type SkillGroupInfo } from "../api.js";
+import { api, type ConnectedBrowser, type DomainSummary, type DomainsResponse, type PluginInfo, type SkillGroupInfo } from "../api.js";
 import { ConfigFileEditor } from "./ConfigFileEditor.js";
+import { Toggle } from "./DomainToggle.js";
+import { DomainPlugins } from "./DomainPlugins.js";
+import { DomainMcpServers, type NewMcpServer } from "./DomainMcpServers.js";
 
 /**
  * Domains page: a domain is the unit that shares context and tools between
@@ -8,6 +11,7 @@ import { ConfigFileEditor } from "./ConfigFileEditor.js";
  * and Codex alike. GLOBAL applies to every session on top of its own domain.
  *
  * Per domain: its folder, session count, memory notes, skills, MCP servers
+ * (on/off per domain, add/remove the domain's own), marketplace plugins
  * (on/off per domain), skill groups installed outside the domain (on/off),
  * Claude in Chrome (Claude Code only), CLAUDE.md and mcp.json editing.
  * Deleting a domain removes it from the list only: files stay on disk.
@@ -27,14 +31,17 @@ export function DomainsPage() {
 
   useEffect(() => { reload(); }, [reload]);
 
-  async function run(action: () => Promise<unknown>) {
+  /** Run a change, then reload the list; resolves false (error shown) when it failed. */
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
     setError("");
     try {
       await action();
       reload();
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -50,7 +57,7 @@ export function DomainsPage() {
         </p>
         {data && <p className="mt-1 text-[11px] text-cc-muted">Domain folders live in <span className="font-mono-code">{data.root}</span>.</p>}
 
-        <CreateDomain busy={busy} onCreate={(name, description) => run(() => api.createDomain(name, description))} />
+        <CreateDomain busy={busy} onCreate={(name, description) => run(() => api.createDomain(name, description)).then(() => undefined)} />
 
         {error && <p role="alert" className="mt-3 text-[12px] text-cc-error">{error}</p>}
         {!data && !error && <p className="mt-6 text-[12px] text-cc-muted">Loading domains...</p>}
@@ -61,9 +68,12 @@ export function DomainsPage() {
               key={d.slug}
               domain={d}
               skillGroups={data.skillGroups}
+              plugins={data.plugins ?? []}
               busy={busy}
-              onUpdate={(patch) => run(() => api.updateDomain(d.slug, patch))}
-              onDelete={() => run(() => api.deleteDomain(d.slug))}
+              onUpdate={(patch) => run(() => api.updateDomain(d.slug, patch)).then(() => undefined)}
+              onAddServer={(name, server) => run(() => api.setDomainMcpServer(d.slug, name, server))}
+              onRemoveServer={(name) => run(() => api.removeDomainMcpServer(d.slug, name))}
+              onDelete={() => run(() => api.deleteDomain(d.slug)).then(() => undefined)}
               onEdit={(file) => setEditing({ slug: d.slug, file, name: d.name })}
             />
           ))}
@@ -245,22 +255,6 @@ function ChromeBrowserPicker({
   );
 }
 
-function Toggle({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={`relative shrink-0 w-8 h-[18px] rounded-full transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${checked ? "bg-cc-primary" : "bg-cc-border"}`}
-    >
-      <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-all ${checked ? "left-[16px]" : "left-[2px]"}`} />
-    </button>
-  );
-}
-
 const CODEX_NOTE: Record<SkillGroupInfo["codex"], string> = {
   linked: "Codex too (linked into its skills)",
   toggled: "Codex too (turned off in its config)",
@@ -270,17 +264,23 @@ const CODEX_NOTE: Record<SkillGroupInfo["codex"], string> = {
 function DomainCard({
   domain,
   skillGroups,
+  plugins,
   busy,
   onUpdate,
   onDelete,
   onEdit,
+  onAddServer,
+  onRemoveServer,
 }: {
   domain: DomainSummary;
   skillGroups: SkillGroupInfo[];
+  plugins: PluginInfo[];
   busy: boolean;
   onUpdate: (patch: Parameters<typeof api.updateDomain>[1]) => Promise<void>;
   onDelete: () => Promise<void>;
   onEdit: (file: "CLAUDE.md" | "mcp.json") => void;
+  onAddServer: (name: string, server: NewMcpServer) => Promise<boolean>;
+  onRemoveServer: (name: string) => Promise<boolean>;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const isGlobal = domain.slug === "global";
@@ -315,27 +315,23 @@ function DomainCard({
         <div><dt className="text-cc-muted">Skills</dt><dd className="font-medium">{domain.skills.length > 0 ? domain.skills.join(", ") : "none"}</dd></div>
       </dl>
 
-      <h3 className="mt-4 text-[11px] font-semibold uppercase tracking-wider text-cc-muted">MCP servers</h3>
-      {domain.mcpError && <p role="alert" className="text-[11px] text-cc-error">{domain.mcpError}</p>}
-      {domain.mcpServers.length === 0 ? (
-        <p className="text-[11px] text-cc-muted">None yet: add them to mcp.json.</p>
-      ) : (
-        <ul className="mt-1 space-y-1">
-          {domain.mcpServers.map((s) => (
-            <li key={s.name} className="flex items-center gap-2 text-[12px]">
-              <Toggle
-                label={`MCP server ${s.name}`}
-                checked={s.enabled}
-                disabled={busy || s.disabledGlobally}
-                onChange={(on) => setServer(s.name, on)}
-              />
-              <span className="font-mono-code">{s.name}</span>
-              <span className="text-[10px] text-cc-muted">{s.type}{s.source === "global" && !isGlobal ? " · from GLOBAL" : ""}</span>
-              {s.disabledGlobally && <span className="text-[10px] text-cc-muted">off in GLOBAL</span>}
-            </li>
-          ))}
-        </ul>
-      )}
+      <DomainMcpServers
+        servers={domain.mcpServers}
+        error={domain.mcpError}
+        isGlobal={isGlobal}
+        busy={busy}
+        onToggle={setServer}
+        onAdd={onAddServer}
+        onRemove={(name) => void onRemoveServer(name)}
+      />
+
+      <DomainPlugins
+        plugins={plugins}
+        states={domain.pluginStates ?? {}}
+        isGlobal={isGlobal}
+        busy={busy}
+        onToggle={(id, on) => void onUpdate({ plugins: { [id]: on } })}
+      />
 
       <h3 className="mt-4 text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Skills installed outside the domain</h3>
       <ul className="mt-1 space-y-1.5">

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { pluginsOn, type InstalledPlugin } from "./claude-plugins.js";
 import { ensurePrivateDir, writePrivateFile } from "./private-file.js";
 import {
   GLOBAL_DOMAIN,
@@ -46,7 +47,8 @@ import {
  *    the CLAUDE.md of both, also for a session attached to a folder outside the domain,
  *  - `--mcp-config <generated>`: global + domain mcp.json minus the servers
  *    turned off for the domain,
- *  - `--settings {autoMemoryDirectory: <domain>/memory, enabledPlugins}`,
+ *  - `--settings {autoMemoryDirectory: <domain>/memory, enabledPlugins}`: the
+ *    marketplace plugins turned on/off for the domain (claude-plugins.ts),
  *  - `--append-system-prompt-file <generated>`: where the GLOBAL memory is and
  *    its index (an `@import` in an add-dir CLAUDE.md is not resolved),
  *  - `--chrome` when the domain turns Claude in Chrome on.
@@ -56,8 +58,9 @@ import {
  *    domain CLAUDE.md, and a Memory section (both MEMORY.md indexes, and how
  *    to save notes in the format Claude's auto-memory uses, in the same
  *    folder, so both CLIs share one memory),
- *  - the same MCP servers as `[mcp_servers.*]` tables in config.toml,
- *  - the GLOBAL and domain skills linked into CODEX_HOME/skills.
+ *  - the same MCP servers as `[mcp_servers.*]` tables in config.toml, plus
+ *    those of the domain's plugins,
+ *  - the GLOBAL, domain and plugin skills linked into CODEX_HOME/skills.
  *  Codex has no equivalent of plugin commands/agents or of `--chrome`: those
  *  stay Claude-only (the UI says so).
  *
@@ -110,6 +113,8 @@ export interface DomainMcpServerView {
   /** Turned off in the GLOBAL domain itself (so off everywhere). */
   disabledGlobally?: boolean;
   type: string;
+  /** The URL, or the command and its args (never env or headers: they may hold tokens). */
+  target: string;
 }
 
 /**
@@ -129,10 +134,21 @@ export function effectiveMcpServers(r: ResolvedDomain): Record<string, McpServer
   return out;
 }
 
+/** A server's transport as the Domains page shows it. */
+export function mcpTypeOf(def: McpServerDef): string {
+  return def.type || (def.url ? "http" : "stdio");
+}
+
+/** A server's URL, or its command and args (never env or headers: they may hold tokens). */
+export function mcpTargetOf(def: McpServerDef): string {
+  return def.url ?? [def.command ?? "", ...(def.args ?? [])].join(" ").trim();
+}
+
 /** What the Domains page lists for a domain: every server it could get, with its toggle state. */
 export function domainMcpView(r: ResolvedDomain): DomainMcpServerView[] {
   const view = new Map<string, DomainMcpServerView>();
-  const typeOf = (def: McpServerDef) => def.type || (def.url ? "http" : "stdio");
+  const typeOf = mcpTypeOf;
+  const targetOf = mcpTargetOf;
   for (const [name, def] of Object.entries(readDomainMcp(GLOBAL_DOMAIN).servers)) {
     const off = r.global.mcpDisabled.includes(name);
     view.set(name, {
@@ -141,11 +157,12 @@ export function domainMcpView(r: ResolvedDomain): DomainMcpServerView[] {
       enabled: !off && (r.isGlobal || !r.domain.mcpDisabled.includes(name)),
       ...(off && !r.isGlobal ? { disabledGlobally: true } : {}),
       type: typeOf(def),
+      target: targetOf(def),
     });
   }
   if (!r.isGlobal) {
     for (const [name, def] of Object.entries(readDomainMcp(r.domain.slug).servers)) {
-      view.set(name, { name, source: "domain", enabled: !r.domain.mcpDisabled.includes(name), type: typeOf(def) });
+      view.set(name, { name, source: "domain", enabled: !r.domain.mcpDisabled.includes(name), type: typeOf(def), target: targetOf(def) });
     }
   }
   return [...view.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -280,9 +297,9 @@ function isSafeServerName(name: string): boolean {
 }
 
 /** One mcp.json server as a Codex `[mcp_servers.<name>]` block, or null when Codex cannot express it. */
-export function codexMcpTable(name: string, def: McpServerDef, slug: string): string[] | null {
+export function codexMcpTable(name: string, def: McpServerDef, slug: string, plugin?: string): string[] | null {
   const lines = [
-    `# Managed by Companion: MCP server of domain ${slug}. Rewritten at every launch.`,
+    `# Managed by Companion: MCP server of domain ${slug}${plugin ? ` (plugin ${plugin})` : ""}. Rewritten at every launch.`,
     `[mcp_servers.${tomlKey(name)}]`,
   ];
   if (def.url) {
@@ -306,21 +323,33 @@ export interface CodexDomainMcp {
   names: string[];
 }
 
-/** The domain's MCP servers as config.toml tables, plus what to remove first. */
-export function codexDomainMcp(codexHome: string, r: ResolvedDomain): CodexDomainMcp {
+/** The plugins turned on for sessions of `r.domain` (see claude-plugins.ts). */
+export function domainPlugins(r: ResolvedDomain): InstalledPlugin[] {
+  return pluginsOn(r.isGlobal ? undefined : r.domain, r.global);
+}
+
+/**
+ * The domain's MCP servers as config.toml tables, plus what to remove first.
+ * Servers of the domain's plugins come too (Codex has no plugins); a server
+ * of mcp.json with the same name wins.
+ */
+export function codexDomainMcp(codexHome: string, r: ResolvedDomain, plugins: InstalledPlugin[] = domainPlugins(r)): CodexDomainMcp {
   const previous = readCodexState(codexHome).mcpServers;
   const tables: string[][] = [];
   const names: string[] = [];
-  for (const [name, def] of Object.entries(effectiveMcpServers(r))) {
+  const add = (name: string, def: McpServerDef, plugin?: string) => {
+    if (names.includes(name)) return;
     if (!isSafeServerName(name)) {
       console.warn(`[domain-runtime] MCP server "${name}" skipped for Codex: use letters, digits, "-" or "_" in its name`);
-      continue;
+      return;
     }
-    const table = codexMcpTable(name, def, r.domain.slug);
-    if (!table) continue;
+    const table = codexMcpTable(name, def, r.domain.slug, plugin);
+    if (!table) return;
     tables.push(table);
     names.push(name);
-  }
+  };
+  for (const [name, def] of Object.entries(effectiveMcpServers(r))) add(name, def);
+  for (const p of plugins) for (const [name, def] of Object.entries(p.mcpServers)) add(name, def, p.id);
   return { remove: [...new Set([...previous, ...names])], tables, names };
 }
 
@@ -405,12 +434,15 @@ export function linkCodexSkills(
   r: ResolvedDomain,
   previous: string[],
   off: ReadonlySet<SkillGroupId> = disabledSkillGroups(r),
+  plugins: InstalledPlugin[] = domainPlugins(r),
 ): string[] {
   const skillsDir = join(codexHome, "skills");
   const wanted = new Map<string, string>();
   // The user's ~/.claude/skills, which Codex never reads by itself: linked
   // while their group is on, so Codex sessions get what Claude sessions get.
   if (!off.has("user")) for (const [name, dir] of userSkillDirs()) wanted.set(name, dir);
+  // The skills of the domain's plugins (Claude gets them through the plugin).
+  for (const p of plugins) for (const name of p.skills) wanted.set(name, join(p.installPath, "skills", name));
   for (const name of listDomainSkills(GLOBAL_DOMAIN)) wanted.set(name, join(r.globalDir, "skills", name));
   if (!r.isGlobal) for (const name of listDomainSkills(r.domain.slug)) wanted.set(name, join(r.dir, "skills", name));
 
@@ -468,8 +500,9 @@ export function prepareCodexDomainHome(
   const state = readCodexState(codexHome);
   const groups = listSkillGroups();
   const off = disabledSkillGroups(r, groups);
-  const skills = linkCodexSkills(codexHome, r, state.skills, off);
-  const mcp = codexDomainMcp(codexHome, r);
+  const plugins = domainPlugins(r);
+  const skills = linkCodexSkills(codexHome, r, state.skills, off, plugins);
+  const mcp = codexDomainMcp(codexHome, r, plugins);
   // Skills Codex finds by itself (repository ones, like the design group)
   // are turned off in config.toml; written in the same pass as the servers.
   mcp.tables.push(...codexSkillToggles(groups, off));

@@ -161,3 +161,63 @@ describe("domain files", () => {
     expect((await app.request("/domains/global/file?name=CLAUDE.md")).status).toBe(200);
   });
 });
+
+// Plugins: the installed ones are listed once (without server env/headers),
+// and each domain reports whether it has them on and whether by its own choice.
+describe("plugins", () => {
+  function installPlugin() {
+    const root = join(tmp, "claude", "plugins", "cache", "brain");
+    mkdirSync(join(root, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "brain", version: "0.1.4", description: "KB" }));
+    mkdirSync(join(root, "skills", "brain"), { recursive: true });
+    writeFileSync(join(root, "skills", "brain", "SKILL.md"), "x");
+    writeFileSync(join(root, ".mcp.json"), JSON.stringify({ brain: { type: "http", url: "http://127.0.0.1:7420/mcp", headers: { Authorization: "secret" } } }));
+    writeFileSync(join(tmp, "claude", "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "brain@lab": [{ scope: "user", installPath: root }] } }));
+    writeFileSync(join(tmp, "claude", "settings.json"), JSON.stringify({ enabledPlugins: { "brain@lab": false } }));
+  }
+
+  it("lists installed plugins and each domain's state, and turns one on for a domain only", async () => {
+    installPlugin();
+    await app.request("/domains", json({ name: "Hercle" }));
+    let body = await (await app.request("/domains")).json();
+    expect(body.plugins).toEqual([{
+      id: "brain@lab", name: "brain", marketplace: "lab", version: "0.1.4", description: "KB",
+      skills: ["brain"], mcpServers: [{ name: "brain", type: "http", target: "http://127.0.0.1:7420/mcp" }], enabledByUser: false,
+    }]);
+    expect(JSON.stringify(body)).not.toContain("secret");
+    const hercle = (b: { domains: { slug: string; pluginStates: unknown }[] }) => b.domains.find((d) => d.slug === "hercle")!;
+    expect(hercle(body).pluginStates).toEqual({ "brain@lab": { on: false, own: false } });
+
+    const res = await app.request("/domains/hercle", patch({ plugins: { "brain@lab": true } }));
+    expect((await res.json()).pluginStates).toEqual({ "brain@lab": { on: true, own: true } });
+    body = await (await app.request("/domains")).json();
+    expect(body.domains.find((d: { slug: string }) => d.slug === "global").pluginStates).toEqual({ "brain@lab": { on: false, own: false } });
+  });
+});
+
+// The MCP form of the Domains page: add (URL or command) and remove one server.
+describe("domain MCP servers", () => {
+  const del = { method: "DELETE" };
+
+  it("adds, lists and removes a server of the domain's mcp.json", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    let res = await app.request("/domains/herd/mcp/brain", put({ url: "http://100.1.2.3:7421/mcp" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).mcpServers).toEqual([
+      { name: "brain", source: "domain", enabled: true, type: "http", target: "http://100.1.2.3:7421/mcp" },
+    ]);
+    res = await app.request("/domains/herd/mcp/brain", del);
+    expect((await res.json()).mcpServers).toEqual([]);
+  });
+
+  it("works on GLOBAL and reports errors with their status", async () => {
+    await app.request("/domains");
+    expect((await app.request("/domains/global/mcp/g", put({ command: "g" }))).status).toBe(200);
+    expect((await app.request("/domains/global/mcp/g", del)).status).toBe(200);
+    expect((await app.request("/domains/nope/mcp/a", put({ command: "a" }))).status).toBe(404);
+    expect((await app.request("/domains/global/mcp/bad.name", put({ command: "a" }))).status).toBe(400);
+    expect((await app.request("/domains/global/mcp/missing", del)).status).toBe(404);
+    const bad = await app.request("/domains/global/mcp/a", { method: "PUT", body: "not json" });
+    expect(bad.status).toBe(400);
+  });
+});
