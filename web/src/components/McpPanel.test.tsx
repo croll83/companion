@@ -15,12 +15,15 @@ const mockSendMcpGetStatus = vi.fn();
 const mockSendMcpToggle = vi.fn();
 const mockSendMcpReconnect = vi.fn();
 const mockSendMcpSetServers = vi.fn();
+const mockSendMcpAuthenticate = vi.fn();
 
 vi.mock("../ws.js", () => ({
   sendMcpGetStatus: (...args: unknown[]) => mockSendMcpGetStatus(...args),
   sendMcpToggle: (...args: unknown[]) => mockSendMcpToggle(...args),
   sendMcpReconnect: (...args: unknown[]) => mockSendMcpReconnect(...args),
   sendMcpSetServers: (...args: unknown[]) => mockSendMcpSetServers(...args),
+  sendMcpAuthenticate: (...args: unknown[]) => mockSendMcpAuthenticate(...args),
+  sendMcpOAuthCallback: vi.fn(),
 }));
 
 // ---- Mock Store ----
@@ -28,6 +31,8 @@ interface MockStoreState {
   mcpServers: Map<string, McpServerDetail[]>;
   cliConnected: Map<string, boolean>;
   sessions: Map<string, { mcp_servers?: { name: string; status: string }[] }>;
+  mcpAuth: Map<string, Record<string, { pending?: boolean; authUrl?: string; error?: string }>>;
+  setMcpAuth?: (...args: unknown[]) => void;
 }
 
 let mockState: MockStoreState;
@@ -37,6 +42,8 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     mcpServers: new Map(),
     cliConnected: new Map([["s1", true]]),
     sessions: new Map([["s1", { mcp_servers: [] }]]),
+    mcpAuth: new Map(),
+    setMcpAuth: vi.fn(),
     ...overrides,
   };
 }
@@ -172,6 +179,33 @@ describe("McpSection", () => {
     render(<McpSection sessionId="s1" />);
 
     expect(screen.queryByTitle("Reconnect server")).not.toBeInTheDocument();
+  });
+});
+
+// OAuth servers waiting for a login (Claude reports "needs-auth"; Codex
+// "notLoggedIn" is mapped to it) get a sign-in entry point in their row.
+describe("McpSection sign-in", () => {
+  it("shows the sign-in badge and button for a server that needs a login, and starts the login", () => {
+    resetStore({ mcpServers: new Map([["s1", [makeServer({ name: "brain", status: "needs-auth", config: { type: "http", url: "https://b/mcp" } })]]]) });
+    render(<McpSection sessionId="s1" />);
+    expect(screen.getByText("Sign-in needed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(mockSendMcpAuthenticate).toHaveBeenCalledWith("s1", "brain");
+  });
+
+  it("keeps the login visible while it runs, even once the status changed", () => {
+    resetStore({
+      mcpServers: new Map([["s1", [makeServer({ name: "brain", status: "connecting" })]]]),
+      mcpAuth: new Map([["s1", { brain: { authUrl: "https://login" } }]]),
+    });
+    render(<McpSection sessionId="s1" />);
+    expect(screen.getByRole("link", { name: "Open the sign-in page" })).toHaveAttribute("href", "https://login");
+  });
+
+  it("shows no sign-in for connected servers", () => {
+    resetStore({ mcpServers: new Map([["s1", [makeServer()]]]) });
+    render(<McpSection sessionId="s1" />);
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
   });
 });
 

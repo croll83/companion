@@ -261,7 +261,7 @@ describe("IDEMPOTENT_BROWSER_MESSAGE_TYPES", () => {
     const expected = [
       "user_message", "permission_response", "interrupt", "set_model", "set_effort",
       "set_permission_mode", "mcp_get_status", "mcp_toggle", "mcp_reconnect",
-      "mcp_set_servers", "set_ai_validation",
+      "mcp_set_servers", "mcp_authenticate", "mcp_oauth_callback", "set_ai_validation",
     ];
     for (const type of expected) {
       expect(IDEMPOTENT_BROWSER_MESSAGE_TYPES.has(type)).toBe(true);

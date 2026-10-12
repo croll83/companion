@@ -1814,6 +1814,33 @@ describe("MCP status messages", () => {
     expect(stored![1].status).toBe("disabled");
   });
 
+  // MCP OAuth login: the sign-in URL or an error is kept per server; "done"
+  // clears it and refreshes the status.
+  it("mcp_auth: stores the sign-in URL or error, and on done clears it and asks for the status", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({ type: "mcp_auth", serverName: "brain", authUrl: "https://login" });
+    expect(useStore.getState().mcpAuth.get("s1")?.brain).toEqual({ authUrl: "https://login", error: undefined });
+    fireMessage({ type: "mcp_auth", serverName: "brain", error: "denied" });
+    expect(useStore.getState().mcpAuth.get("s1")?.brain).toEqual({ authUrl: undefined, error: "denied" });
+    lastWs.send.mockClear();
+    fireMessage({ type: "mcp_auth", serverName: "brain", done: true });
+    expect(useStore.getState().mcpAuth.get("s1")?.brain).toBeUndefined();
+    expect(lastWs.send.mock.calls.map((c: unknown[]) => JSON.parse(String(c[0])).type)).toContain("mcp_get_status");
+  });
+
+  it("sendMcpAuthenticate marks the login pending and sends it; sendMcpOAuthCallback sends the pasted URL", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    lastWs.send.mockClear();
+    wsModule.sendMcpAuthenticate("s1", "brain");
+    expect(useStore.getState().mcpAuth.get("s1")?.brain).toEqual({ pending: true });
+    wsModule.sendMcpOAuthCallback("s1", "brain", "http://localhost:7498/callback?code=c");
+    const sentMsgs = lastWs.send.mock.calls.map((c: unknown[]) => JSON.parse(String(c[0])));
+    expect(sentMsgs.find((m: { type: string }) => m.type === "mcp_authenticate")).toMatchObject({ serverName: "brain" });
+    expect(sentMsgs.find((m: { type: string }) => m.type === "mcp_oauth_callback")).toMatchObject({ serverName: "brain", callbackUrl: "http://localhost:7498/callback?code=c" });
+  });
+
   it("sendMcpGetStatus: sends mcp_get_status message", () => {
     wsModule.connectSession("s1");
     lastWs.send.mockClear();

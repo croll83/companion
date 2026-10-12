@@ -412,6 +412,47 @@ describe("plugins for Codex", () => {
     expect(mcp.tables.find((t) => t.includes("[mcp_servers.brain]"))).toContain('url = "http://domain/mcp"');
   });
 
+  // Claude expands ${VAR} in headers and handles OAuth itself; Codex needs
+  // its own keys (verified with `codex mcp list/get` on Codex 0.161.0).
+  it("maps OAuth clients and env-based headers to Codex keys", () => {
+    expect(codexMcpTable("brain", { type: "http", url: "https://b/mcp", oauth: { clientId: "cid", callbackPort: 7498 } }, "hercle", "brain@lab")).toEqual([
+      "# Managed by Companion: MCP server of domain hercle (plugin brain@lab). Rewritten at every launch.",
+      "[mcp_servers.brain]",
+      'url = "https://b/mcp"',
+      "",
+      "[mcp_servers.brain.oauth]",
+      'client_id = "cid"',
+    ]);
+    expect(codexMcpTable("t", {
+      url: "https://t/mcp",
+      headers: { Authorization: "Bearer ${MY_TOKEN}", "X-Api-Key": "${MY_KEY}", "X-Team": "ops", "X-Mixed": "a ${B}" },
+    }, "herd")).toEqual([
+      "# Managed by Companion: MCP server of domain herd. Rewritten at every launch.",
+      "[mcp_servers.t]",
+      'url = "https://t/mcp"',
+      'bearer_token_env_var = "MY_TOKEN"',
+      'env_http_headers = { X-Api-Key = "MY_KEY" }',
+      'http_headers = { X-Team = "ops", X-Mixed = "a ${B}" }',
+    ]);
+    // A literal bearer token stays a literal header; an empty OAuth client is ignored.
+    expect(codexMcpTable("l", { url: "https://l", headers: { Authorization: "Bearer abc" }, oauth: { clientId: "" } }, "herd")).toEqual([
+      "# Managed by Companion: MCP server of domain herd. Rewritten at every launch.",
+      "[mcp_servers.l]",
+      'url = "https://l"',
+      'http_headers = { Authorization = "Bearer abc" }',
+    ]);
+  });
+
+  // The [mcp_servers.x.oauth] sub-table goes with its server when the server is removed.
+  it("removes a server's OAuth sub-table with the server", () => {
+    const path = join(tmp, "config.toml");
+    const table = codexMcpTable("brain", { url: "https://b/mcp", oauth: { clientId: "cid" } }, "hercle")!;
+    rewriteCodexMcpServers(path, ["brain"], [table]);
+    expect(readFileSync(path, "utf-8")).toContain("[mcp_servers.brain.oauth]");
+    rewriteCodexMcpServers(path, ["brain"], []);
+    expect(readFileSync(path, "utf-8")).not.toContain("brain");
+  });
+
   it("describes a server by its URL or command, never env or headers", () => {
     expect(mcpTypeOf({ url: "http://x" })).toBe("http");
     expect(mcpTypeOf({ command: "c" })).toBe("stdio");

@@ -304,7 +304,14 @@ export function codexMcpTable(name: string, def: McpServerDef, slug: string, plu
   ];
   if (def.url) {
     lines.push(`url = ${tomlString(def.url)}`);
-    if (def.headers && Object.keys(def.headers).length > 0) lines.push(`http_headers = ${tomlInlineTable(def.headers)}`);
+    lines.push(...codexHttpAuth(def));
+    // A pre-registered OAuth client (Entra-style, no dynamic registration).
+    // Codex picks its own callback port: providers like Entra ignore the port
+    // of a loopback redirect, and Codex's port is one setting for all servers.
+    const clientId = def.oauth?.clientId;
+    if (typeof clientId === "string" && clientId) {
+      lines.push("", `[mcp_servers.${tomlKey(name)}.oauth]`, `client_id = ${tomlString(clientId)}`);
+    }
   } else if (def.command) {
     lines.push(`command = ${tomlString(def.command)}`);
     if (def.args?.length) lines.push(`args = [${def.args.map((a) => tomlString(String(a))).join(", ")}]`);
@@ -314,6 +321,30 @@ export function codexMcpTable(name: string, def: McpServerDef, slug: string, plu
     return null;
   }
   return lines;
+}
+
+/**
+ * HTTP headers in Codex form. Claude expands `${VAR}` in headers, Codex does
+ * not: `Authorization: Bearer ${VAR}` becomes `bearer_token_env_var`, a
+ * header that is exactly `${VAR}` becomes `env_http_headers` (Codex reads the
+ * variable), anything else stays a literal `http_headers` value.
+ */
+function codexHttpAuth(def: McpServerDef): string[] {
+  const literal: Record<string, string> = {};
+  const fromEnv: Record<string, string> = {};
+  let bearer: string | undefined;
+  for (const [header, value] of Object.entries(def.headers ?? {})) {
+    const b = /^Bearer \$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(value);
+    const v = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(value);
+    if (b && header.toLowerCase() === "authorization" && !bearer) bearer = b[1];
+    else if (v) fromEnv[header] = v[1];
+    else literal[header] = value;
+  }
+  const out: string[] = [];
+  if (bearer) out.push(`bearer_token_env_var = ${tomlString(bearer)}`);
+  if (Object.keys(fromEnv).length > 0) out.push(`env_http_headers = ${tomlInlineTable(fromEnv)}`);
+  if (Object.keys(literal).length > 0) out.push(`http_headers = ${tomlInlineTable(literal)}`);
+  return out;
 }
 
 export interface CodexDomainMcp {

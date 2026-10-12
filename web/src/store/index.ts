@@ -44,6 +44,7 @@ export const useStore = create<AppState>((...args) => ({
       sessionNames: new Map(),
       recentlyRenamed: new Set(),
       mcpServers: new Map(),
+      mcpAuth: new Map(),
       prStatus: new Map(),
       linkedLinearIssues: new Map(),
       // Chat

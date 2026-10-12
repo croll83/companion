@@ -27,6 +27,13 @@ function getInitialCollapsedProjects(): Set<string> {
   }
 }
 
+/** An MCP OAuth login started from Companion: waiting for the URL, the sign-in URL, or an error. */
+export interface McpAuthState {
+  pending?: boolean;
+  authUrl?: string;
+  error?: string;
+}
+
 export interface SessionsSlice {
   sessions: Map<string, SessionState>;
   sdkSessions: SdkSessionInfo[];
@@ -41,6 +48,8 @@ export interface SessionsSlice {
   prStatus: Map<string, PRStatusResponse>;
   linkedLinearIssues: Map<string, LinearIssue>;
   mcpServers: Map<string, McpServerDetail[]>;
+  /** MCP OAuth logins in progress, per session then server name. */
+  mcpAuth: Map<string, Record<string, McpAuthState>>;
   collapsedProjects: Set<string>;
 
   setCurrentSession: (id: string | null) => void;
@@ -59,6 +68,8 @@ export interface SessionsSlice {
   setPRStatus: (sessionId: string, status: PRStatusResponse) => void;
   setLinkedLinearIssue: (sessionId: string, issue: LinearIssue | null) => void;
   setMcpServers: (sessionId: string, servers: McpServerDetail[]) => void;
+  /** Set (or with null clear) the OAuth login state of one MCP server. */
+  setMcpAuth: (sessionId: string, serverName: string, state: McpAuthState | null) => void;
   toggleProjectCollapse: (projectKey: string) => void;
   setSessionAiValidation: (sessionId: string, settings: { aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null }) => void;
 }
@@ -77,6 +88,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
   prStatus: new Map(),
   linkedLinearIssues: new Map(),
   mcpServers: new Map(),
+  mcpAuth: new Map(),
   collapsedProjects: getInitialCollapsedProjects(),
 
   setCurrentSession: (id) => {
@@ -125,6 +137,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         sessionNames,
         recentlyRenamed: deleteFromSet(s.recentlyRenamed, sessionId),
         mcpServers: deleteFromMap(s.mcpServers, sessionId),
+        mcpAuth: deleteFromMap(s.mcpAuth, sessionId),
         prStatus: deleteFromMap(s.prStatus, sessionId),
         linkedLinearIssues: deleteFromMap(s.linkedLinearIssues, sessionId),
         sdkSessions: s.sdkSessions.filter((sdk) => sdk.sessionId !== sessionId),
@@ -236,6 +249,16 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       const mcpServers = new Map(s.mcpServers);
       mcpServers.set(sessionId, servers);
       return { mcpServers };
+    }),
+
+  setMcpAuth: (sessionId, serverName, state) =>
+    set((s) => {
+      const forSession = { ...(s.mcpAuth.get(sessionId) ?? {}) };
+      if (state) forSession[serverName] = state;
+      else delete forSession[serverName];
+      const mcpAuth = new Map(s.mcpAuth);
+      mcpAuth.set(sessionId, forSession);
+      return { mcpAuth };
     }),
 
   toggleProjectCollapse: (projectKey) =>

@@ -332,6 +332,10 @@ export type BrowserOutgoingMessage =
   | { type: "mcp_toggle"; serverName: string; enabled: boolean; client_msg_id?: string }
   | { type: "mcp_reconnect"; serverName: string; client_msg_id?: string }
   | { type: "mcp_set_servers"; servers: Record<string, McpServerConfig>; client_msg_id?: string }
+  /** Start the OAuth login of an MCP server: the answer is an `mcp_auth` with the sign-in URL. */
+  | { type: "mcp_authenticate"; serverName: string; client_msg_id?: string }
+  /** The URL the sign-in page redirected to, pasted when the browser is not on Companion's machine. */
+  | { type: "mcp_oauth_callback"; serverName: string; callbackUrl: string; client_msg_id?: string }
   | { type: "set_ai_validation"; aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null; client_msg_id?: string }
   | { type: "end_session"; reason?: string; client_msg_id?: string }
   | { type: "stop_task"; task_id: string; client_msg_id?: string }
@@ -390,6 +394,8 @@ export type BrowserIncomingMessageBase =
   | { type: "session_name_update"; name: string }
   | { type: "pr_status_update"; pr: import("./github-pr.js").GitHubPRInfo | null; available: boolean }
   | { type: "mcp_status"; servers: McpServerDetail[] }
+  /** Progress of an MCP OAuth login: the sign-in URL, then done or an error. */
+  | { type: "mcp_auth"; serverName: string; authUrl?: string; done?: boolean; error?: string }
   | { type: "session_phase"; phase: SessionPhase; previousPhase: SessionPhase }
   | { type: "prompt_suggestion"; suggestions: string[] }
   | { type: "streamlined_text"; text: string }
@@ -490,7 +496,8 @@ export interface McpServerConfig {
 
 export interface McpServerDetail {
   name: string;
-  status: "connected" | "failed" | "disabled" | "connecting";
+  /** "needs-auth": an OAuth server waiting for a login (see McpServerAuth). */
+  status: "connected" | "failed" | "disabled" | "connecting" | "needs-auth";
   serverInfo?: unknown;
   error?: string;
   config: { type: string; url?: string; command?: string; args?: string[] };

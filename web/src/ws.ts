@@ -450,6 +450,8 @@ const IDEMPOTENT_OUTGOING_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "mcp_toggle",
   "mcp_reconnect",
   "mcp_set_servers",
+  "mcp_authenticate",
+  "mcp_oauth_callback",
   "set_ai_validation",
 ]);
 
@@ -1086,6 +1088,12 @@ function handleParsedMessage(
       break;
     }
 
+    case "mcp_auth": {
+      store.setMcpAuth(sessionId, data.serverName, data.done ? null : { authUrl: data.authUrl, error: data.error });
+      if (data.done) sendMcpGetStatus(sessionId);
+      break;
+    }
+
     case "message_history": {
       const isOlderPage = data.prepend === true;
       if (typeof data.startIndex === "number" && typeof data.total === "number") {
@@ -1492,6 +1500,8 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
       case "mcp_toggle":
       case "mcp_reconnect":
       case "mcp_set_servers":
+      case "mcp_authenticate":
+      case "mcp_oauth_callback":
       case "set_ai_validation":
         if (!msg.client_msg_id) {
           outgoing = { ...msg, client_msg_id: nextClientMsgId() };
@@ -1559,6 +1569,17 @@ export function sendMcpToggle(sessionId: string, serverName: string, enabled: bo
 
 export function sendMcpReconnect(sessionId: string, serverName: string) {
   sendToSession(sessionId, { type: "mcp_reconnect", serverName });
+}
+
+/** Start the OAuth login of an MCP server; the sign-in URL comes back as `mcp_auth`. */
+export function sendMcpAuthenticate(sessionId: string, serverName: string) {
+  useStore.getState().setMcpAuth(sessionId, serverName, { pending: true });
+  sendToSession(sessionId, { type: "mcp_authenticate", serverName });
+}
+
+/** Hand over the address the sign-in page redirected to (browser on another machine). */
+export function sendMcpOAuthCallback(sessionId: string, serverName: string, callbackUrl: string) {
+  sendToSession(sessionId, { type: "mcp_oauth_callback", serverName, callbackUrl });
 }
 
 export function sendMcpSetServers(sessionId: string, servers: Record<string, McpServerConfig>) {

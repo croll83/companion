@@ -59,6 +59,8 @@ export interface McpServerDef {
   cwd?: string;
   url?: string;
   headers?: Record<string, string>;
+  /** Claude's pre-registered OAuth client for an HTTP server (`{"clientId", "callbackPort"}`). */
+  oauth?: { clientId?: string; callbackPort?: number };
 }
 
 // ── Paths ───────────────────────────────────────────────────────────────────

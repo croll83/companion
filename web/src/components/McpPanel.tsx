@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "../store.js";
 import { sendMcpGetStatus, sendMcpToggle, sendMcpReconnect, sendMcpSetServers } from "../ws.js";
 import type { McpServerDetail, McpServerConfig } from "../types.js";
+import { McpServerAuth } from "./McpServerAuth.js";
 
 const EMPTY_SERVERS: McpServerDetail[] = [];
 const EMPTY_MCP_INIT: { name: string; status: string }[] = [];
@@ -10,6 +11,7 @@ const STATUS_STYLES: Record<string, { label: string; badge: string; dot: string 
   connected:  { label: "Connected",  badge: "text-cc-success bg-cc-success/10", dot: "bg-cc-success" },
   connecting: { label: "Connecting", badge: "text-cc-warning bg-cc-warning/10", dot: "bg-cc-warning animate-pulse" },
   failed:     { label: "Failed",     badge: "text-cc-error bg-cc-error/10",     dot: "bg-cc-error" },
+  "needs-auth": { label: "Sign-in needed", badge: "text-cc-warning bg-cc-warning/10", dot: "bg-cc-warning" },
   disabled:   { label: "Disabled",   badge: "text-cc-muted bg-cc-hover",        dot: "bg-cc-muted opacity-40" },
 };
 const DEFAULT_STATUS = { label: "Unknown", badge: "text-cc-muted bg-cc-hover", dot: "bg-cc-muted opacity-40" };
@@ -25,6 +27,7 @@ function McpServerRow({
   const style = STATUS_STYLES[server.status] || DEFAULT_STATUS;
   const isEnabled = server.status !== "disabled";
   const toolCount = server.tools?.length ?? 0;
+  const hasAuth = useStore((s) => !!s.mcpAuth.get(sessionId)?.[server.name]);
 
   return (
     <div className="rounded-lg border border-cc-border bg-cc-bg">
@@ -86,6 +89,13 @@ function McpServerRow({
           )}
         </div>
       </div>
+
+      {/* OAuth sign-in (Claude Code and Codex) */}
+      {(server.status === "needs-auth" || hasAuth) && (
+        <div className="px-2.5 pb-2">
+          <McpServerAuth sessionId={sessionId} serverName={server.name} />
+        </div>
+      )}
 
       {/* Expanded details */}
       {expanded && (
