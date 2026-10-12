@@ -463,13 +463,16 @@ export interface SessionFolderPreview {
 
 export interface DomainMcpServerView {
   name: string;
-  source: "global" | "domain";
+  /** "account": the user's own Claude config or a claude.ai connector (Claude-only). */
+  source: "global" | "domain" | "account";
   enabled: boolean;
   /** Turned off in GLOBAL, hence everywhere. */
   disabledGlobally?: boolean;
   type: string;
   /** URL, or command and args (env and headers are never sent). */
   target: string;
+  /** Account servers: health from the last `claude mcp list`. */
+  health?: string;
 }
 
 /** A Claude Code marketplace plugin installed for the user, turned on/off per domain. */
@@ -522,6 +525,8 @@ export interface DomainsResponse {
   root: string;
   skillGroups: SkillGroupInfo[];
   plugins: PluginInfo[];
+  /** The cached list of account MCP servers: when it was read, and whether it is being refreshed. */
+  accountMcp?: { at: number; stale: boolean; error?: string };
   domains: DomainSummary[];
 }
 
@@ -1029,6 +1034,8 @@ export const api = {
   /** Add or replace one server in the domain's mcp.json: a URL (HTTP) or a command (stdio). */
   setDomainMcpServer: (slug: string, name: string, server: { url: string } | { command: string; args?: string[] }) =>
     put<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`, server),
+  /** Re-read the MCP servers of the user's Claude config and claude.ai account (`claude mcp list`, ~10 s). */
+  refreshAccountMcp: () => post<{ at: number; servers: number; error?: string }>("/account-mcp-servers/refresh", {}),
   removeDomainMcpServer: (slug: string, name: string) =>
     del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`),
 

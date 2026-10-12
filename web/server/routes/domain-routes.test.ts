@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,11 +18,13 @@ vi.mock("../paths.js", () => ({
 }));
 
 import { registerDomainRoutes } from "./domain-routes.js";
+import type { AccountMcpList } from "../account-mcp.js";
 import { domainDir, getDomain } from "../domain-store.js";
 
 let tmp: string;
 let sessions: { domain?: string; archived?: boolean }[];
 let app: Hono;
+let refreshAccountMcp: Mock<() => Promise<AccountMcpList>>;
 const saved = { root: process.env.COMPANION_DOMAINS_ROOT, claude: process.env.CLAUDE_CONFIG_DIR };
 
 const json = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -36,7 +38,9 @@ beforeEach(() => {
   process.env.CLAUDE_CONFIG_DIR = join(tmp, "claude");
   sessions = [];
   app = new Hono();
-  registerDomainRoutes(app, { listSessions: () => sessions });
+  // Never run the real `claude mcp list` from tests.
+  refreshAccountMcp = vi.fn(async (): Promise<AccountMcpList> => ({ servers: [], at: Date.now() }));
+  registerDomainRoutes(app, { listSessions: () => sessions }, { refreshAccountMcp });
 });
 
 afterEach(() => {
@@ -219,5 +223,42 @@ describe("domain MCP servers", () => {
     expect((await app.request("/domains/global/mcp/missing", del)).status).toBe(404);
     const bad = await app.request("/domains/global/mcp/a", { method: "PUT", body: "not json" });
     expect(bad.status).toBe(400);
+  });
+});
+
+// The account's MCP servers come from a cache: GET never waits for the CLI,
+// a stale cache is refreshed in the background, and the page can force a read.
+describe("account MCP servers", () => {
+  const writeCache = (at: number, extra: Record<string, unknown> = {}) => {
+    mkdirSync(h.home, { recursive: true });
+    writeFileSync(join(h.home, "account-mcp-servers.json"), JSON.stringify({
+      at,
+      servers: [{ name: "claude.ai Gmail", target: "https://gmail/mcp", health: "connected", connector: true }],
+      ...extra,
+    }));
+  };
+
+  it("refreshes a stale list in the background and says so", async () => {
+    const body = await (await app.request("/domains")).json();
+    expect(body.accountMcp).toEqual({ at: 0, stale: true });
+    expect(refreshAccountMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves a fresh list from the cache, listed in every domain, without running the CLI", async () => {
+    writeCache(Date.now(), { error: "last read failed" });
+    await app.request("/domains", json({ name: "Herd" }));
+    const body = await (await app.request("/domains")).json();
+    expect(body.accountMcp).toMatchObject({ stale: false, error: "last read failed" });
+    expect(refreshAccountMcp).not.toHaveBeenCalled();
+    const herd = body.domains.find((d: { slug: string }) => d.slug === "herd");
+    expect(herd.mcpServers).toContainEqual(expect.objectContaining({ name: "claude.ai Gmail", source: "account", enabled: true }));
+  });
+
+  it("forces a read on request", async () => {
+    refreshAccountMcp.mockResolvedValueOnce({ servers: [{ name: "github", target: "npx gh", health: "connected", connector: false }], at: 5, error: "partial" });
+    const res = await app.request("/account-mcp-servers/refresh", { method: "POST" });
+    expect(await res.json()).toEqual({ at: 5, servers: 1, error: "partial" });
+    refreshAccountMcp.mockResolvedValueOnce({ servers: [], at: 6 });
+    expect(await (await app.request("/account-mcp-servers/refresh", { method: "POST" })).json()).toEqual({ at: 6, servers: 0 });
   });
 });

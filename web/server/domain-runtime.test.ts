@@ -138,6 +138,28 @@ describe("MCP servers", () => {
     });
   });
 
+  // The account's servers (cached `claude mcp list`) are listed for every
+  // domain with their own toggle state; a mcp.json server of the same name wins.
+  it("lists the account's servers after the declared ones, with their state", () => {
+    const account = [
+      { name: "claude.ai Gmail", target: "https://gmail/mcp", health: "connected", connector: true },
+      { name: "github", target: "npx gh", health: "connected", connector: false },
+      { name: "remote", target: "https://r/mcp", health: "needs-auth", connector: false },
+      { name: "gh", target: "dup", health: "connected", connector: false },
+    ];
+    updateDomain(GLOBAL_DOMAIN, { mcpDisabled: ["noisy", "remote"] });
+    updateDomain("herd", { mcpDisabled: ["gh", "github"] });
+    const herd = domainMcpView(resolveDomain("herd"), account).filter((v) => v.source === "account");
+    expect(herd).toEqual([
+      { name: "claude.ai Gmail", source: "account", enabled: true, type: "claude.ai", target: "https://gmail/mcp", health: "connected" },
+      { name: "github", source: "account", enabled: false, type: "stdio", target: "npx gh", health: "connected" },
+      { name: "remote", source: "account", enabled: false, disabledGlobally: true, type: "http", target: "https://r/mcp", health: "needs-auth" },
+    ]);
+    // In GLOBAL a server off in GLOBAL is simply off (not "off in GLOBAL").
+    expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN), account).find((v) => v.name === "remote")).toMatchObject({ enabled: false });
+    expect(domainMcpView(resolveDomain(GLOBAL_DOMAIN), account).find((v) => v.name === "remote")?.disabledGlobally).toBeUndefined();
+  });
+
   it("converts servers to Codex config.toml tables", () => {
     expect(codexMcpTable("ping", { command: "node", args: ["a b"], env: { K: "v" }, cwd: "/w" }, "herd")).toEqual([
       "# Managed by Companion: MCP server of domain herd. Rewritten at every launch.",
@@ -222,6 +244,23 @@ describe("Claude spawn", () => {
       enabledPlugins: { "a@m": true, "b@m": false },
       skillOverrides: { "foundry-poc": "off" },
     });
+  });
+
+  // Servers the CLI loads by itself (user config, claude.ai connectors) are
+  // turned off by name with deniedMcpServers (verified on CLI 2.1.293):
+  // GLOBAL's choices for every domain, plus the domain's own. Companion's own
+  // server is never denied.
+  it("denies the servers turned off by GLOBAL and by the domain, never companion", () => {
+    updateDomain(GLOBAL_DOMAIN, { mcpDisabled: ["claude.ai Gmail", "companion"] });
+    updateDomain("herd", { mcpDisabled: ["github", "claude.ai Gmail"] });
+    expect(buildClaudeDomainSpawn("sess-1", "herd").settings.deniedMcpServers).toEqual([
+      { serverName: "claude.ai Gmail" },
+      { serverName: "github" },
+    ]);
+    expect(buildClaudeDomainSpawn("sess-2", GLOBAL_DOMAIN).settings.deniedMcpServers).toEqual([{ serverName: "claude.ai Gmail" }]);
+    updateDomain(GLOBAL_DOMAIN, { mcpDisabled: [] });
+    updateDomain("herd", { mcpDisabled: [] });
+    expect(buildClaudeDomainSpawn("sess-1", "herd").settings.deniedMcpServers).toBeUndefined();
   });
 
   it("removes a session's generated files", () => {

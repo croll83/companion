@@ -12,6 +12,7 @@ import {
 import { join, resolve } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { pluginsOn, type InstalledPlugin } from "./claude-plugins.js";
+import { cachedAccountMcpServers, type AccountMcpServer } from "./account-mcp.js";
 import { ensurePrivateDir, writePrivateFile } from "./private-file.js";
 import {
   GLOBAL_DOMAIN,
@@ -47,8 +48,10 @@ import {
  *    the CLAUDE.md of both, also for a session attached to a folder outside the domain,
  *  - `--mcp-config <generated>`: global + domain mcp.json minus the servers
  *    turned off for the domain,
- *  - `--settings {autoMemoryDirectory: <domain>/memory, enabledPlugins}`: the
- *    marketplace plugins turned on/off for the domain (claude-plugins.ts),
+ *  - `--settings {autoMemoryDirectory: <domain>/memory, enabledPlugins,
+ *    deniedMcpServers}`: the marketplace plugins turned on/off for the domain
+ *    (claude-plugins.ts), and the servers it turns off by name, including the
+ *    ones the CLI loads by itself (account-mcp.ts),
  *  - `--append-system-prompt-file <generated>`: where the GLOBAL memory is and
  *    its index (an `@import` in an add-dir CLAUDE.md is not resolved),
  *  - `--chrome` when the domain turns Claude in Chrome on.
@@ -106,8 +109,11 @@ export function resolveDomain(slug: string | undefined): ResolvedDomain {
 
 export interface DomainMcpServerView {
   name: string;
-  /** Where it is declared: the GLOBAL mcp.json or this domain's own. */
-  source: "global" | "domain";
+  /**
+   * Where it is declared: the GLOBAL mcp.json, this domain's own, or the
+   * user's Claude config / claude.ai account ("account", Claude-only).
+   */
+  source: "global" | "domain" | "account";
   /** Whether sessions of this domain get it. */
   enabled: boolean;
   /** Turned off in the GLOBAL domain itself (so off everywhere). */
@@ -115,6 +121,8 @@ export interface DomainMcpServerView {
   type: string;
   /** The URL, or the command and its args (never env or headers: they may hold tokens). */
   target: string;
+  /** Account servers: health from the last `claude mcp list`. */
+  health?: string;
 }
 
 /**
@@ -144,8 +152,12 @@ export function mcpTargetOf(def: McpServerDef): string {
   return def.url ?? [def.command ?? "", ...(def.args ?? [])].join(" ").trim();
 }
 
-/** What the Domains page lists for a domain: every server it could get, with its toggle state. */
-export function domainMcpView(r: ResolvedDomain): DomainMcpServerView[] {
+/**
+ * What the Domains page lists for a domain: every server it could get, with
+ * its toggle state. Account servers (account-mcp.ts) come last, unless a
+ * mcp.json declares the same name.
+ */
+export function domainMcpView(r: ResolvedDomain, account: AccountMcpServer[] = cachedAccountMcpServers().servers): DomainMcpServerView[] {
   const view = new Map<string, DomainMcpServerView>();
   const typeOf = mcpTypeOf;
   const targetOf = mcpTargetOf;
@@ -164,6 +176,19 @@ export function domainMcpView(r: ResolvedDomain): DomainMcpServerView[] {
     for (const [name, def] of Object.entries(readDomainMcp(r.domain.slug).servers)) {
       view.set(name, { name, source: "domain", enabled: !r.domain.mcpDisabled.includes(name), type: typeOf(def), target: targetOf(def) });
     }
+  }
+  for (const a of account) {
+    if (view.has(a.name)) continue;
+    const off = r.global.mcpDisabled.includes(a.name);
+    view.set(a.name, {
+      name: a.name,
+      source: "account",
+      enabled: !off && (r.isGlobal || !r.domain.mcpDisabled.includes(a.name)),
+      ...(off && !r.isGlobal ? { disabledGlobally: true } : {}),
+      type: a.connector ? "claude.ai" : (/^https?:/.test(a.target) ? "http" : "stdio"),
+      target: a.target,
+      health: a.health,
+    });
   }
   return [...view.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -262,6 +287,11 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   const plugins = { ...(r.global.plugins ?? {}), ...(r.isGlobal ? {} : r.domain.plugins ?? {}) };
   const settings: Record<string, unknown> = { autoMemoryDirectory: r.memoryDir };
   if (Object.keys(plugins).length > 0) settings.enabledPlugins = plugins;
+  // Servers the CLI loads by itself (the user's own, claude.ai connectors)
+  // are turned off by name; a name from a mcp.json is already left out of
+  // --mcp-config, denying it too is harmless. Companion's own server never.
+  const denied = [...new Set([...r.global.mcpDisabled, ...(r.isGlobal ? [] : r.domain.mcpDisabled)])].filter((n) => n !== "companion");
+  if (denied.length > 0) settings.deniedMcpServers = denied.map((serverName) => ({ serverName }));
   const groups = listSkillGroups();
   const skillOverrides = claudeSkillOverrides(disabledSkillGroups(r, groups), groups);
   if (Object.keys(skillOverrides).length > 0) settings.skillOverrides = skillOverrides;

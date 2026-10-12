@@ -6,7 +6,7 @@
  * removes one only when no session uses it (files stay on disk).
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const mockApi = vi.hoisted(() => ({
@@ -19,6 +19,7 @@ const mockApi = vi.hoisted(() => ({
   listChromeBrowsers: vi.fn(),
   setDomainMcpServer: vi.fn(),
   removeDomainMcpServer: vi.fn(),
+  refreshAccountMcp: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
@@ -61,6 +62,7 @@ beforeEach(() => {
   mockApi.writeDomainFile.mockResolvedValue({ ok: true });
   mockApi.setDomainMcpServer.mockResolvedValue({});
   mockApi.removeDomainMcpServer.mockResolvedValue({});
+  mockApi.refreshAccountMcp.mockResolvedValue({ at: Date.now(), servers: 3 });
   mockApi.listChromeBrowsers.mockResolvedValue({
     browsers: [
       { deviceId: "dev-linux", name: "Chrome", osPlatform: "Linux", isLocal: true, inUse: true },
@@ -254,5 +256,31 @@ describe("DomainsPage", () => {
     fireEvent.click(herd.getByRole("button", { name: "Add" }));
     expect(await screen.findByText("The URL must start with http:// or https://")).toBeInTheDocument();
     expect(herd.getByLabelText("URL")).toHaveValue("ftp://x");
+  });
+
+  // The account's MCP servers come from a cached `claude mcp list`: its age
+  // is shown with a Refresh button, and a stale list is refreshed on open.
+  it("shows when the account's servers were read and refreshes them on request", async () => {
+    mockApi.listDomains.mockResolvedValue({ ...response(), accountMcp: { at: Date.now() - 5 * 60_000, stale: false } });
+    render(<DomainsPage />);
+    expect(await screen.findByText(/claude\.ai account: read 5 min ago/)).toBeInTheDocument();
+    expect(mockApi.refreshAccountMcp).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(mockApi.refreshAccountMcp).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockApi.listDomains).toHaveBeenCalledTimes(2));
+  });
+
+  it("refreshes a stale list once when the page opens, and shows a read error", async () => {
+    mockApi.listDomains.mockResolvedValue({ ...response(), accountMcp: { at: 0, stale: true, error: "claude mcp list failed: timed out" } });
+    let finish!: (v: unknown) => void;
+    mockApi.refreshAccountMcp.mockReturnValue(new Promise((r) => { finish = r; }));
+    render(<DomainsPage />);
+    expect(await screen.findByText(/claude\.ai account: reading\.\.\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeDisabled();
+    await act(async () => { finish({ at: 1, servers: 0 }); });
+    await waitFor(() => expect(screen.getByText("claude mcp list failed: timed out")).toBeInTheDocument());
+    expect(screen.getByText(/not read yet/)).toBeInTheDocument();
+    // Still stale after the reload: not asked again (no loop).
+    expect(mockApi.refreshAccountMcp).toHaveBeenCalledTimes(1);
   });
 });

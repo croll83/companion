@@ -5,8 +5,9 @@ import { Toggle } from "./DomainToggle.js";
 export type NewMcpServer = { url: string } | { command: string; args?: string[] };
 
 /**
- * A domain's MCP servers: GLOBAL's and its own, each on or off for the
- * domain, with what it connects to. Servers of the domain's own mcp.json can
+ * A domain's MCP servers: GLOBAL's, its own, and the ones every Claude
+ * session loads by itself (the user's own config, claude.ai connectors:
+ * "Claude only"), each on or off for the domain, with what it connects to. Servers of the domain's own mcp.json can
  * be removed, and new ones added: a URL (HTTP) or a command (stdio). Env and
  * headers (tokens) are set in mcp.json directly ("Edit mcp.json"). Claude and
  * Codex sessions get the same servers.
@@ -55,6 +56,7 @@ export function DomainMcpServers({
               <span className="font-mono-code shrink-0">{s.name}</span>
               <span className="text-[10px] text-cc-muted truncate min-w-0" title={s.target}>
                 {s.type}{s.target ? ` · ${s.target}` : ""}{s.source === "global" && !isGlobal ? " · from GLOBAL" : ""}
+                {s.source === "account" ? ` · Claude only${s.health && s.health !== "connected" ? ` · ${s.health}` : ""}` : ""}
               </span>
               {s.disabledGlobally && <span className="shrink-0 text-[10px] text-cc-muted">off in GLOBAL</span>}
               {s.source === "domain" && (

@@ -103,6 +103,20 @@ describe("DomainMcpServers", () => {
     expect(p.onAdd).not.toHaveBeenCalled();
   });
 
+  // Servers every Claude session loads by itself (user config, claude.ai
+  // connectors): toggled per domain, marked Claude-only, never removable here.
+  it("lists account servers as Claude-only, with their health when not connected, and no Remove", () => {
+    const p = setup({ servers: [
+      { name: "claude.ai Gmail", source: "account", enabled: true, type: "claude.ai", target: "https://gmail/mcp", health: "connected" },
+      { name: "claude.ai Blockscout", source: "account", enabled: false, type: "claude.ai", target: "https://bs/mcp", health: "needs-auth" },
+    ] });
+    expect(screen.getByText(/claude\.ai · https:\/\/gmail\/mcp · Claude only$/)).toBeInTheDocument();
+    expect(screen.getByText(/Claude only · needs-auth/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove MCP server/ })).toBeNull();
+    fireEvent.click(screen.getByRole("switch", { name: "MCP server claude.ai Gmail" }));
+    expect(p.onToggle).toHaveBeenCalledWith("claude.ai Gmail", false);
+  });
+
   it("shows a broken mcp.json and disables adding", () => {
     setup({ error: "Invalid JSON in mcp.json" });
     expect(screen.getByRole("alert")).toHaveTextContent("Invalid JSON");

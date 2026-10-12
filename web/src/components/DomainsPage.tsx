@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api, type ConnectedBrowser, type DomainSummary, type DomainsResponse, type PluginInfo, type SkillGroupInfo } from "../api.js";
 import { ConfigFileEditor } from "./ConfigFileEditor.js";
 import { Toggle } from "./DomainToggle.js";
@@ -31,6 +31,22 @@ export function DomainsPage() {
 
   useEffect(() => { reload(); }, [reload]);
 
+  // The account's MCP servers (user config, claude.ai connectors) come from a
+  // cached `claude mcp list`. When the cache is stale the server refreshes it
+  // in the background; the page asks once and reloads when it is done.
+  const [refreshingAccount, setRefreshingAccount] = useState(false);
+  const refreshAccount = useCallback(() => {
+    setRefreshingAccount(true);
+    api.refreshAccountMcp().catch(() => {}).finally(() => { setRefreshingAccount(false); reload(); });
+  }, [reload]);
+  const askedForStale = useRef(false);
+  useEffect(() => {
+    if (data?.accountMcp?.stale && !askedForStale.current) {
+      askedForStale.current = true;
+      refreshAccount();
+    }
+  }, [data?.accountMcp?.stale, refreshAccount]);
+
   /** Run a change, then reload the list; resolves false (error shown) when it failed. */
   async function run(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
@@ -56,6 +72,7 @@ export function DomainsPage() {
           GLOBAL applies to every session in addition to its own domain. Changes apply when a session starts or reloads.
         </p>
         {data && <p className="mt-1 text-[11px] text-cc-muted">Domain folders live in <span className="font-mono-code">{data.root}</span>.</p>}
+        {data && <AccountMcpStatus info={data.accountMcp} refreshing={refreshingAccount} onRefresh={refreshAccount} />}
 
         <CreateDomain busy={busy} onCreate={(name, description) => run(() => api.createDomain(name, description)).then(() => undefined)} />
 
@@ -92,6 +109,36 @@ export function DomainsPage() {
           onSaved={reload}
         />
       )}
+    </div>
+  );
+}
+
+/** Age of the account's MCP server list, with a button to read it again. */
+function AccountMcpStatus({
+  info,
+  refreshing,
+  onRefresh,
+}: {
+  info?: DomainsResponse["accountMcp"];
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const minutes = info?.at ? Math.max(0, Math.round((Date.now() - info.at) / 60_000)) : null;
+  return (
+    <div className="mt-1 flex items-center gap-2 text-[11px] text-cc-muted">
+      <span>
+        MCP servers of your Claude config and claude.ai account:{" "}
+        {refreshing ? "reading..." : minutes === null ? "not read yet" : `read ${minutes === 0 ? "just now" : `${minutes} min ago`}`}
+      </span>
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={refreshing}
+        className="px-1.5 py-0.5 rounded text-cc-primary hover:bg-cc-primary/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        Refresh
+      </button>
+      {info?.error && !refreshing && <span role="alert" className="text-cc-error">{info.error}</span>}
     </div>
   );
 }

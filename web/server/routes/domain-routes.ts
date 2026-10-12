@@ -22,6 +22,7 @@ import {
 import { domainMcpView, mcpTargetOf, mcpTypeOf, resolveDomain, type DomainMcpServerView } from "../domain-runtime.js";
 import { isSkillGroupOn, listSkillGroups, type SkillGroup } from "../skill-groups.js";
 import { isPluginOn, listInstalledPlugins, type InstalledPlugin } from "../claude-plugins.js";
+import { cachedAccountMcpServers, isAccountMcpStale, refreshAccountMcpServers, type AccountMcpList } from "../account-mcp.js";
 
 /** An installed plugin as the Domains page lists it (server env and headers left out). */
 export interface PluginView {
@@ -126,17 +127,36 @@ function validateDomainFile(name: string, content: string): string | null {
   }
 }
 
-export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource): void {
+export interface DomainRouteDeps {
+  /** Re-read the account's MCP servers (`claude mcp list`); injected in tests. */
+  refreshAccountMcp?: () => Promise<AccountMcpList>;
+}
+
+export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, deps: DomainRouteDeps = {}): void {
+  const refreshAccountMcp = deps.refreshAccountMcp ?? (() => refreshAccountMcpServers());
+
   api.get("/domains", (c) => {
     const global = ensureGlobalDomain();
     const groups = listSkillGroups();
     const plugins = listInstalledPlugins();
+    // The account's servers come from a cache; a stale one is refreshed in
+    // the background (the page asks again when told it is stale).
+    const account = cachedAccountMcpServers();
+    const stale = isAccountMcpStale(account);
+    if (stale) void refreshAccountMcp().catch(() => {});
     return c.json({
       root: domainsRoot(),
       skillGroups: groups,
       plugins: plugins.map(pluginView),
+      accountMcp: { at: account.at, stale, ...(account.error ? { error: account.error } : {}) },
       domains: listDomains().map((d) => summarize(d, global, sessions, groups, plugins)),
     });
+  });
+
+  // Re-read the MCP servers of the user's Claude config and claude.ai account (~10 s).
+  api.post("/account-mcp-servers/refresh", async (c) => {
+    const list = await refreshAccountMcp();
+    return c.json({ at: list.at, servers: list.servers.length, ...(list.error ? { error: list.error } : {}) });
   });
 
   // One MCP server of the domain's mcp.json: add or replace (URL or command), or remove.
