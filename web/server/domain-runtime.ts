@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
-import { pluginsOn, type InstalledPlugin } from "./claude-plugins.js";
+import { listInstalledPlugins, pluginsOn, type InstalledPlugin } from "./claude-plugins.js";
 import { cachedAccountMcpServers, type AccountMcpServer } from "./account-mcp.js";
 import { ensurePrivateDir, writePrivateFile } from "./private-file.js";
 import {
@@ -29,6 +29,15 @@ import {
   type McpServerDef,
 } from "./domain-store.js";
 import { SKILL_TOGGLE_MARKER, tomlInlineTable, tomlKey, tomlString } from "./companion-mcp-config.js";
+import {
+  brainForDomain,
+  claudeBrainServer,
+  codexBrainAgentsLine,
+  codexBrainEnv,
+  codexBrainServer,
+  collidingPlugins,
+  type DomainBrain,
+} from "./brain/brain-runtime.js";
 import {
   claudeSkillOverrides,
   disabledSkills,
@@ -55,7 +64,10 @@ import {
  *    ones the CLI loads by itself (account-mcp.ts),
  *  - `--append-system-prompt-file <generated>`: where the GLOBAL memory is and
  *    its index (an `@import` in an add-dir CLAUDE.md is not resolved),
- *  - `--chrome` when the domain turns Claude in Chrome on.
+ *  - `--chrome` when the domain turns Claude in Chrome on,
+ *  - the domain's brain (brain/brain-runtime.ts): its server last in
+ *    --mcp-config, its plugin (skill) as one more `--plugin-dir`, and any
+ *    plugin serving the same URL forced off in `enabledPlugins`.
  *
  * Codex (its own CODEX_HOME per session):
  *  - a generated AGENTS.md: the user's ~/.codex/AGENTS.md, the GLOBAL and
@@ -64,7 +76,10 @@ import {
  *    folder, so both CLIs share one memory),
  *  - the same MCP servers as `[mcp_servers.*]` tables in config.toml, plus
  *    those of the domain's plugins,
- *  - the GLOBAL, domain and plugin skills linked into CODEX_HOME/skills.
+ *  - the GLOBAL, domain and plugin skills linked into CODEX_HOME/skills,
+ *  - the domain's brain: its server table last, its skill linked last, one
+ *    line in AGENTS.md, and its token in the env of the Codex process
+ *    (never in config.toml); colliding plugins are skipped.
  *  Codex has no equivalent of plugin commands/agents or of `--chrome`: those
  *  stay Claude-only (the UI says so).
  *
@@ -264,14 +279,16 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   const runtime = domainRuntimeDir(sessionId);
   ensurePrivateDir(runtime);
 
+  const brain = brainForDomain(r);
   const args: string[] = ["--plugin-dir", r.globalDir];
   if (!r.isGlobal) args.push("--plugin-dir", r.dir);
+  if (brain) args.push("--plugin-dir", brain.pluginDir);
   // One directory per flag: --add-dir is variadic.
   args.push("--add-dir", r.globalDir);
   if (!r.isGlobal) args.push("--add-dir", r.dir);
 
   const mcpPath = join(runtime, "mcp.json");
-  const servers = effectiveMcpServers(r);
+  const servers = withBrainLast(effectiveMcpServers(r), brain, claudeBrainServer);
   if (Object.keys(servers).length > 0) {
     // 0600: server env may hold tokens.
     writePrivateFile(mcpPath, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`);
@@ -293,6 +310,8 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   const chromeBrowser = r.domain.chromeBrowser || "local";
 
   const plugins = { ...(r.global.plugins ?? {}), ...(r.isGlobal ? {} : r.domain.plugins ?? {}) };
+  // The brain wins over a plugin serving the same MCP URL (no tool twice).
+  if (brain) for (const p of collidingPlugins(brain.brain, listInstalledPlugins())) plugins[p.id] = false;
   const settings: Record<string, unknown> = { autoMemoryDirectory: r.memoryDir };
   if (Object.keys(plugins).length > 0) settings.enabledPlugins = plugins;
   // Servers the CLI loads by itself (the user's own, claude.ai connectors)
@@ -334,10 +353,20 @@ function isSafeServerName(name: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(name);
 }
 
-/** One mcp.json server as a Codex `[mcp_servers.<name>]` block, or null when Codex cannot express it. */
-export function codexMcpTable(name: string, def: McpServerDef, slug: string, plugin?: string): string[] | null {
+/**
+ * One mcp.json server as a Codex `[mcp_servers.<name>]` block, or null when
+ * Codex cannot express it. `origin` names where it comes from when not the
+ * domain's mcp.json: `{plugin}` or `{brain}`.
+ */
+export function codexMcpTable(
+  name: string,
+  def: McpServerDef,
+  slug: string,
+  origin?: string | { brain: string },
+): string[] | null {
+  const from = typeof origin === "string" ? ` (plugin ${origin})` : origin ? ` (brain ${origin.brain})` : "";
   const lines = [
-    `# Managed by Companion: MCP server of domain ${slug}${plugin ? ` (plugin ${plugin})` : ""}. Rewritten at every launch.`,
+    `# Managed by Companion: MCP server of domain ${slug}${from}. Rewritten at every launch.`,
     `[mcp_servers.${tomlKey(name)}]`,
   ];
   if (def.url) {
@@ -392,33 +421,65 @@ export interface CodexDomainMcp {
   names: string[];
 }
 
-/** The plugins turned on for sessions of `r.domain` (see claude-plugins.ts). */
-export function domainPlugins(r: ResolvedDomain): InstalledPlugin[] {
-  return pluginsOn(r.isGlobal ? undefined : r.domain, r.global);
+/**
+ * The brain's server added last (a server of the same name is replaced and
+ * moved to the end), so both CLIs get it in the same, fixed position.
+ */
+function withBrainLast(
+  servers: Record<string, McpServerDef>,
+  brain: DomainBrain | null,
+  def: (b: DomainBrain) => McpServerDef,
+): Record<string, McpServerDef> {
+  if (!brain) return servers;
+  const out = { ...servers };
+  delete out[brain.serverName];
+  out[brain.serverName] = def(brain);
+  return out;
+}
+
+/**
+ * The plugins turned on for sessions of `r.domain` (see claude-plugins.ts),
+ * minus the ones serving the domain's brain URL: the brain wins.
+ */
+export function domainPlugins(r: ResolvedDomain, brain: DomainBrain | null = brainForDomain(r)): InstalledPlugin[] {
+  const on = pluginsOn(r.isGlobal ? undefined : r.domain, r.global);
+  if (!brain) return on;
+  const colliding = new Set(collidingPlugins(brain.brain, on).map((p) => p.id));
+  return on.filter((p) => !colliding.has(p.id));
 }
 
 /**
  * The domain's MCP servers as config.toml tables, plus what to remove first.
  * Servers of the domain's plugins come too (Codex has no plugins); a server
- * of mcp.json with the same name wins.
+ * of mcp.json with the same name wins. The brain's server comes last and
+ * wins over any server of the same name.
  */
-export function codexDomainMcp(codexHome: string, r: ResolvedDomain, plugins: InstalledPlugin[] = domainPlugins(r)): CodexDomainMcp {
+export function codexDomainMcp(
+  codexHome: string,
+  r: ResolvedDomain,
+  plugins?: InstalledPlugin[],
+  brain: DomainBrain | null = brainForDomain(r),
+): CodexDomainMcp {
+  const domainPluginList = plugins ?? domainPlugins(r, brain);
   const previous = readCodexState(codexHome).mcpServers;
   const tables: string[][] = [];
   const names: string[] = [];
-  const add = (name: string, def: McpServerDef, plugin?: string) => {
+  const add = (name: string, def: McpServerDef, origin?: string | { brain: string }) => {
     if (names.includes(name)) return;
+    // The brain's name is kept for it: added last, it wins over a namesake.
+    if (brain && name === brain.serverName && !(typeof origin === "object")) return;
     if (!isSafeServerName(name)) {
       console.warn(`[domain-runtime] MCP server "${name}" skipped for Codex: use letters, digits, "-" or "_" in its name`);
       return;
     }
-    const table = codexMcpTable(name, def, r.domain.slug, plugin);
+    const table = codexMcpTable(name, def, r.domain.slug, origin);
     if (!table) return;
     tables.push(table);
     names.push(name);
   };
   for (const [name, def] of Object.entries(effectiveMcpServers(r))) add(name, def);
-  for (const p of plugins) for (const [name, def] of Object.entries(p.mcpServers)) add(name, def, p.id);
+  for (const p of domainPluginList) for (const [name, def] of Object.entries(p.mcpServers)) add(name, def, p.id);
+  if (brain) add(brain.serverName, codexBrainServer(brain), { brain: brain.brain.slug });
   return { remove: [...new Set([...previous, ...names])], tables, names };
 }
 
@@ -431,7 +492,11 @@ function readOptional(path: string): string {
 }
 
 /** The generated AGENTS.md of a Codex session in a domain. */
-export function buildCodexAgentsMd(r: ResolvedDomain, userAgentsMdPath: string): string {
+export function buildCodexAgentsMd(
+  r: ResolvedDomain,
+  userAgentsMdPath: string,
+  brain: DomainBrain | null = brainForDomain(r),
+): string {
   const parts: string[] = [
     `<!-- Generated by Companion at every launch of this session (domain "${r.domain.slug}"). Edits here are lost: edit the source files named below. -->`,
     "",
@@ -445,6 +510,8 @@ export function buildCodexAgentsMd(r: ResolvedDomain, userAgentsMdPath: string):
     const domainMd = readOptional(join(r.dir, "CLAUDE.md"));
     if (domainMd) parts.push(`<!-- Source: ${join(r.dir, "CLAUDE.md")} (Companion domain "${r.domain.name}") -->`, domainMd, "");
   }
+  // Codex does not show MCP server instructions to the model: say it here.
+  if (brain) parts.push("# Brain", "", codexBrainAgentsLine(brain), "");
 
   const mem = r.memoryDir;
   parts.push(
@@ -503,8 +570,10 @@ export function linkCodexSkills(
   r: ResolvedDomain,
   previous: string[],
   off: ReadonlySet<string> = disabledDomainSkills(r),
-  plugins: InstalledPlugin[] = domainPlugins(r),
+  plugins?: InstalledPlugin[],
+  brain: DomainBrain | null = brainForDomain(r),
 ): string[] {
+  plugins ??= domainPlugins(r, brain);
   const skillsDir = join(codexHome, "skills");
   const wanted = new Map<string, string>();
   // The user's ~/.claude/skills, which Codex never reads by itself: linked
@@ -514,6 +583,8 @@ export function linkCodexSkills(
   for (const p of plugins) for (const name of p.skills) wanted.set(name, join(p.installPath, "skills", name));
   for (const name of listDomainSkills(GLOBAL_DOMAIN)) wanted.set(name, join(r.globalDir, "skills", name));
   if (!r.isGlobal) for (const name of listDomainSkills(r.domain.slug)) wanted.set(name, join(r.dir, "skills", name));
+  // The brain's skill last: it wins a name clash, like its MCP server.
+  if (brain) wanted.set(brain.serverName, brain.skillDir);
 
   const linked: string[] = [];
   const isLink = (p: string) => {
@@ -549,35 +620,38 @@ export function linkCodexSkills(
 /**
  * Make a Codex session's CODEX_HOME carry its domain: generated AGENTS.md and
  * linked skills. MCP servers are returned (not written) so the caller writes
- * config.toml once, together with the companion server.
+ * config.toml once, together with the companion server. `env` goes on the
+ * Codex process: the brain's token, which config.toml only names.
  */
 export function prepareCodexDomainHome(
   codexHome: string,
   slug: string | undefined,
   opts: { userAgentsMdPath: string },
-): { resolved: ResolvedDomain; mcp: CodexDomainMcp; commit: () => void } {
+): { resolved: ResolvedDomain; mcp: CodexDomainMcp; env: Record<string, string>; commit: () => void } {
   const r = resolveDomain(slug);
+  const brain = brainForDomain(r);
   const agentsPath = join(codexHome, "AGENTS.md");
   try {
     // A link (to ~/.codex/AGENTS.md, from before the session had a domain) is
     // replaced; the user's text is included in the generated file.
     if (isSymlink(agentsPath)) unlinkSync(agentsPath);
-    writeFileSync(agentsPath, buildCodexAgentsMd(r, opts.userAgentsMdPath), "utf-8");
+    writeFileSync(agentsPath, buildCodexAgentsMd(r, opts.userAgentsMdPath, brain), "utf-8");
   } catch (err) {
     console.warn(`[domain-runtime] Could not write ${agentsPath}:`, err);
   }
   const state = readCodexState(codexHome);
   const groups = listSkillGroups();
   const off = disabledDomainSkills(r, groups);
-  const plugins = domainPlugins(r);
-  const skills = linkCodexSkills(codexHome, r, state.skills, off, plugins);
-  const mcp = codexDomainMcp(codexHome, r, plugins);
+  const plugins = domainPlugins(r, brain);
+  const skills = linkCodexSkills(codexHome, r, state.skills, off, plugins, brain);
+  const mcp = codexDomainMcp(codexHome, r, plugins, brain);
   // Skills Codex finds by itself (repository ones, like the design group)
   // are turned off in config.toml; written in the same pass as the servers.
   mcp.tables.push(...codexSkillToggles(groups, off));
   return {
     resolved: r,
     mcp,
+    env: codexBrainEnv(brain),
     // Called once config.toml has been written, so a failed write keeps the
     // old bookkeeping and the next spawn still knows what to remove.
     commit: () => {
