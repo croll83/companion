@@ -6,6 +6,7 @@ import {
   navigateToSession,
   navigateHome,
   domainsHash,
+  brainsHash,
   isDomainTab,
 } from "./routing.js";
 
@@ -172,5 +173,20 @@ describe("domain routes", () => {
     expect(domainsHash("my d", "plugins")).toBe("#/domains/my%20d/plugins");
     expect(isDomainTab("mcp")).toBe(true);
     expect(isDomainTab("files")).toBe(false);
+  });
+});
+
+describe("brains routes", () => {
+  // #/brains lists the brains; #/brains/<slug> opens one (slug decoded).
+  it("parses the Brains page and one brain", () => {
+    expect(parseHash("#/brains")).toEqual({ page: "brains" });
+    expect(parseHash("#/brains/jarvis")).toEqual({ page: "brains", slug: "jarvis" });
+    expect(parseHash("#/brains/my%20b/extra?x=1")).toEqual({ page: "brains", slug: "my b" });
+    expect(parseHash("#/brains/")).toEqual({ page: "brains" });
+  });
+
+  it("builds Brains hashes", () => {
+    expect(brainsHash()).toBe("#/brains");
+    expect(brainsHash("a b")).toBe("#/brains/a%20b");
   });
 });
