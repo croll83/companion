@@ -16,6 +16,11 @@ jobs:
         with:
           bun-version: latest
 
+      # vitest runs under Node: the brain core's tests need node:sqlite (Node >= 22.13).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Install web dependencies
         working-directory: web
         run: bun install
