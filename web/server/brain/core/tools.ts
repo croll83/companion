@@ -9,7 +9,7 @@ import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/
 import { extractLinks, resolvePage, type WikiSnapshot } from "./wiki.js";
 import type { SearchIndex } from "./search.js";
 import { envelope, redactor } from "./redact.js";
-import { Inbox, NOTE_KINDS, NOTE_STATUSES, LIMITS, SOURCE_TYPES } from "./inbox.js";
+import { Inbox, ACCEPTED_NOTE_KINDS, NOTE_STATUSES, LIMITS, SOURCE_TYPES } from "./inbox.js";
 import type { Audit } from "./audit.js";
 import { buildInstructions, type Persona } from "./instructions.js";
 
@@ -279,7 +279,9 @@ export function registerAll(server: McpServer, ctx: ToolContext): string[] {
         `Accepted sources: ${SOURCE_TYPES.join("; ")}. No secrets and no personal data: the note would be rejected.`,
       inputSchema: z
         .object({
-          kind: z.enum(NOTE_KINDS).describe("new_fact | correction | contradiction | question | source_pointer"),
+          kind: z
+            .enum(ACCEPTED_NOTE_KINDS)
+            .describe("new_fact (a fact missing from the wiki; \"fact\" is accepted too) | correction | contradiction | question | source_pointer"),
           statement: z.string().describe(`The fact, self-contained and verifiable, dates in full (${LIMITS.statementMin}-${LIMITS.statementMax} characters)`),
           pages: z.array(z.string()).max(LIMITS.pagesMax).optional().describe("Slugs of the pages it affects"),
           new_page_hint: z.string().optional().describe("Proposed slug if no page covers the topic yet"),

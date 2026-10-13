@@ -28,14 +28,70 @@ const MAX_TOPIC_SECTIONS = 20;
 const MAX_TOPIC_TITLES = 100;
 const MAX_TOPIC_TAGS = 60;
 
-/** The description when the operator wrote none: from the title, owner and about text. */
-export function defaultSkillDescription(p: Persona): string {
+/**
+ * Room kept for the wiki-derived topics (index.md sections and titles, tags)
+ * when the wiki has any: the about text is cut to leave it.
+ */
+const TOPICS_BUDGET = 450;
+
+function clipText(s: string, max: number): string {
+  return s.length > max ? s.slice(0, Math.max(0, max - 1)).trimEnd() + "…" : s;
+}
+
+/**
+ * The description when the operator wrote none: from the title, owner and
+ * about text, then (with `topics`) the sections and page titles of index.md
+ * and the taxonomy tags, each already sanitized and cut to MAX_TOPIC_CHARS.
+ * An empty wiki (a new one) has no topics: the about text alone says what
+ * the brain covers.
+ */
+export function defaultSkillDescription(p: Persona, topics: WikiTopics | null = null): string {
   const about = p.about.replace(/\s+/g, " ").trim();
   const head = `Use ${p.title}, the knowledge base of ${p.owner}, whenever the work touches its topics`;
   const tail = "Read it before answering or changing anything, cite pages and sources, and record new facts or corrections in the brain inbox as they come up.";
-  const room = MAX_SKILL_DESCRIPTION - head.length - tail.length - 4;
-  const what = about ? `: ${about.length > room ? about.slice(0, Math.max(0, room - 1)).trimEnd() + "…" : about}` : "";
-  return `${head}${what}. ${tail}`;
+  const extra = topicsText(topics, TOPICS_BUDGET);
+  const room = MAX_SKILL_DESCRIPTION - head.length - tail.length - extra.length - 5;
+  const what = about ? `: ${clipText(about, room)}` : "";
+  return `${head}${what}${/[.!?…]$/.test(what) ? "" : "."} ${tail}${extra ? ` ${extra}` : ""}`;
+}
+
+/**
+ * "Wiki sections: Start Here (Deploy pipeline, Billing service); Systems
+ * (Office network). Tags: billing, deploy." in at most `max` characters:
+ * a section whose titles do not fit is named alone, and items that do not
+ * fit are left out. "" when the wiki has no topics.
+ */
+export function topicsText(t: WikiTopics | null, max: number): string {
+  if (!t) return "";
+  const parts: string[] = [];
+  let used = 0;
+  const add = (label: string, items: string[][]): void => {
+    let out = "";
+    for (const options of items) {
+      for (const item of options) {
+        const next = out ? `${out}; ${item}` : `${label} ${item}`;
+        if (used + next.length + 2 <= max) {
+          out = next;
+          break;
+        }
+      }
+    }
+    if (out) {
+      parts.push(`${out}.`);
+      used += out.length + 2;
+    }
+  };
+  add("Wiki sections:", t.sections.map((s) => (s.titles.length ? [`${s.heading} (${s.titles.join(", ")})`, s.heading] : [s.heading])));
+  if (t.tags.length) {
+    let tags = "";
+    for (const tag of t.tags) {
+      const next = tags ? `${tags}, ${tag}` : `Tags: ${tag}`;
+      if (used + next.length + 2 > max) break;
+      tags = next;
+    }
+    if (tags) parts.push(`${tags}.`);
+  }
+  return parts.join(" ");
 }
 
 export interface SkillOptions {
@@ -147,17 +203,11 @@ export function yamlScalar(s: string): string {
   return plain ? s : JSON.stringify(s);
 }
 
+/** An operator's description, followed by the wiki topics when they fit in the limit. */
 function withTopics(description: string, t: WikiTopics | null): string {
-  if (!t || t.sections.length === 0) return description;
-  let out = description.replace(/\.?$/, ".") + " Wiki sections:";
-  let added = 0;
-  for (const s of t.sections) {
-    const next = `${out}${added ? ";" : ""} ${s.heading}`;
-    if (next.length + 1 > MAX_SKILL_DESCRIPTION) break;
-    out = next;
-    added++;
-  }
-  return added ? out + "." : description;
+  const base = description.replace(/\.?$/, ".");
+  const extra = topicsText(t, MAX_SKILL_DESCRIPTION - base.length - 1);
+  return extra ? `${base} ${extra}` : description;
 }
 
 function skillMarkdown(description: string, opts: SkillOptions, topics: WikiTopics | null, tools: { name: string; summary: string }[]): string {
@@ -248,7 +298,7 @@ function skillMarkdown(description: string, opts: SkillOptions, topics: WikiTopi
 export function buildSkill(w: WikiSnapshot | null, opts: SkillOptions): SkillDoc {
   const topics = opts.topics === "index" && w ? wikiTopics(w) : null;
   const tools = toolCatalog();
-  const description = withTopics(opts.description ?? defaultSkillDescription(opts.persona), topics);
+  const description = opts.description ? withTopics(opts.description, topics) : defaultSkillDescription(opts.persona, topics);
   return {
     skill_api: SKILL_API,
     name: opts.name,
