@@ -486,6 +486,9 @@ export class BrainSupervisor {
     if (e.readyTimer) clearTimeout(e.readyTimer);
     e.readyTimer = undefined;
     e.port = port;
+    // Up again: an earlier crash's explanation no longer applies (the crash count still shows).
+    e.cause = undefined;
+    e.action = undefined;
     setChildPort(e.slug, port);
     this.log(e.slug, `[supervisor] ready on port ${port}`);
     this.setState(e, "running");
@@ -530,6 +533,7 @@ export class BrainSupervisor {
     e.child = undefined;
     e.pid = undefined;
     e.port = undefined;
+    e.startedAt = undefined;
     e.lastExitCode = code;
     setChildPort(e.slug, null);
     rmSync(join(brainDataDir(e.slug), "brain.pid"), { force: true });

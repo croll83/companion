@@ -135,12 +135,22 @@ describe("BrainSupervisor", () => {
     expect(st.action).toMatch(/press Start/);
     expect(st.lastExitCode).toBe(1);
     expect(sup.logTail("beta").filter((l) => l.includes("[supervisor] started")).length).toBe(3);
+    expect(st.startedAt).toBeUndefined();
     expect(await sup.waitRunning("beta", 100)).toBe(false);
     // Start again after fixing the cause: the crash count starts over.
     writeFileSync(join(getBrain("beta")!.embedded!.wikiDir, "FAKE_MODE"), "ok");
     sup.start("beta");
     expect(await sup.waitRunning("beta", 5000)).toBe(true);
     expect(sup.status("beta").cause).toBeUndefined();
+  });
+
+  // Back up after a crash: the old explanation goes away, the crash stays counted.
+  it("recovers from a single crash and clears its cause", async () => {
+    makeBrain("delta", "crash-once");
+    sup.start("delta");
+    expect(await sup.waitRunning("delta", 5000)).toBe(true);
+    expect(sup.status("delta")).toMatchObject({ state: "running", crashes: 1, lastExitCode: 1 });
+    expect(sup.status("delta").cause).toBeUndefined();
   });
 
   it("fails at once on a configuration error (exit 2), with a readable cause", async () => {

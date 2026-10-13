@@ -4,11 +4,12 @@
 //   ok        listen, print the ready line, answer /healthz 200
 //   unhealthy listen, print the ready line, answer /healthz 500
 //   crash     print an error on stderr, exit 1
+//   crash-once  crash the first time (leaves a CRASHED marker), then ok
 //   protocol  print a BRAIN_PROTOCOL mismatch on stderr, exit 2
 //   hang      never print the ready line
 // It also prints one line with the env it received (names only for keys).
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const mode = (() => {
@@ -25,7 +26,9 @@ for (const [k, v] of Object.entries(process.env)) {
 }
 process.stdout.write(`${JSON.stringify({ fake_env: env, argv: process.argv.slice(2) })}\n`);
 
-if (mode === "crash") {
+const marker = join(process.env.BRAIN_WIKI_DIR ?? "", "CRASHED");
+if (mode === "crash" || (mode === "crash-once" && !existsSync(marker))) {
+  if (mode === "crash-once") writeFileSync(marker, "1");
   process.stderr.write("brain: something broke at startup\n");
   process.exit(1);
 }
