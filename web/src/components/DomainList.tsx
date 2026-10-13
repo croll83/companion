@@ -57,6 +57,7 @@ export function DomainList({
                 {d.description && <p className="text-[11px] text-cc-muted truncate">{d.description}</p>}
                 <p className="text-[10px] text-cc-muted">
                   MCP {c.mcpOn.length}/{c.mcpTotal} · Skills {c.skillOn}/{c.skillTotal} · Plugins {c.pluginsOn.length}
+                  {d.effectiveBrain ? ` · Brain ${d.effectiveBrain.name}` : ""}
                 </p>
               </a>
             </li>

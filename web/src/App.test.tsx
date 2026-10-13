@@ -167,6 +167,10 @@ vi.mock("./components/DomainsPage.js", () => ({
   DomainsPage: () => <div data-testid="domains-page">DomainsPage</div>,
 }));
 
+vi.mock("./components/BrainsPage.js", () => ({
+  BrainsPage: ({ slug }: { slug?: string }) => <div data-testid="brains-page">BrainsPage {slug}</div>,
+}));
+
 
 vi.mock("./components/AgentsPage.js", () => ({
   AgentsPage: () => <div data-testid="agents-page">AgentsPage</div>,
@@ -343,6 +347,15 @@ describe("App", () => {
       render(<App />);
       await waitFor(() => {
         expect(screen.getByTestId("domains-page")).toBeInTheDocument();
+      });
+    });
+
+    // #/brains/<slug> opens the Brains page on that brain.
+    it("renders BrainsPage for brains route", async () => {
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "brains", slug: "jarvis" });
+      render(<App />);
+      await waitFor(() => {
+        expect(screen.getByTestId("brains-page")).toHaveTextContent("BrainsPage jarvis");
       });
     });
 

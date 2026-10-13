@@ -1834,4 +1834,12 @@ describe("Sidebar domains", () => {
     fireEvent.click(screen.getByTitle("Domains"));
     expect(window.location.hash).toBe("#/domains");
   });
+
+  // Brains sit next to Domains in the Workspace section.
+  it("links to the Brains page from the navigation", () => {
+    mockState = createMockState();
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("Brains"));
+    expect(window.location.hash).toBe("#/brains");
+  });
 });

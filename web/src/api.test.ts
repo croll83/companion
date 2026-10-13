@@ -2132,3 +2132,27 @@ describe("system and integration endpoints", () => {
   });
 
 });
+
+// ===========================================================================
+// brains API
+// ===========================================================================
+describe("brains API", () => {
+  // Each method hits its /api/brains route with the right verb and body;
+  // brain slugs are URL-encoded like domain slugs.
+  it.each([
+    ["listBrains", () => api.listBrains(), "/api/brains", "GET", undefined],
+    ["createBrain", () => api.createBrain({ name: "Jarvis", baseUrl: "http://b" }), "/api/brains", "POST", { name: "Jarvis", baseUrl: "http://b" }],
+    ["updateBrain", () => api.updateBrain("a b", { token: null }), "/api/brains/a%20b", "PATCH", { token: null }],
+    ["deleteBrain", () => api.deleteBrain("jarvis"), "/api/brains/jarvis", "DELETE", undefined],
+    ["brainHealth", () => api.brainHealth("jarvis"), "/api/brains/jarvis/health", "GET", undefined],
+    ["testBrain", () => api.testBrain("jarvis"), "/api/brains/jarvis/test", "POST", {}],
+    ["adoptPluginAsBrain", () => api.adoptPluginAsBrain("jarvis", "jarvis-brain@lab"), "/api/brains/jarvis/adopt-plugin", "POST", { pluginId: "jarvis-brain@lab" }],
+  ])("%s", async (_name, call, url, method, body) => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await call();
+    const [calledUrl, opts] = mockFetch.mock.calls[0];
+    expect(calledUrl).toBe(url);
+    expect(opts?.method ?? "GET").toBe(method);
+    if (body !== undefined) expect(JSON.parse(opts.body)).toEqual(body);
+  });
+});

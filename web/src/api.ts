@@ -530,6 +530,10 @@ export interface DomainSummary {
   skillStates: Record<string, { on: boolean; own: boolean }>;
   /** Effective state of each installed plugin, and whether it is this domain's own choice. */
   pluginStates: Record<string, { on: boolean; own: boolean }>;
+  /** The domain's brain choice: a slug, null (none), absent (GLOBAL's default). */
+  brain?: string | null;
+  /** The brain its sessions use (own choice, else GLOBAL's); null when none. */
+  effectiveBrain?: { slug: string; name: string; own: boolean } | null;
 }
 
 type Choices = Record<string, boolean | null>;
@@ -544,6 +548,8 @@ export interface DomainPatch {
   plugins?: Choices;
   skillGroups?: Choices;
   skillChoices?: Choices;
+  /** One brain per domain: a slug replaces the current one, null = none, "inherit" = GLOBAL's (not for GLOBAL). */
+  brain?: string | null;
 }
 
 export interface DomainsResponse {
@@ -553,6 +559,70 @@ export interface DomainsResponse {
   /** The cached list of account MCP servers: when it was read, and whether it is being refreshed. */
   accountMcp?: { at: number; stale: boolean; error?: string };
   domains: DomainSummary[];
+  /** Every brain, for the Brain select of a domain. */
+  brains?: { slug: string; name: string }[];
+}
+
+export type BrainAuthMode = "none" | "bearer";
+
+/** A brain (phase 1: remote only), as GET /brains returns it. Never carries the token. */
+export interface BrainInfo {
+  slug: string;
+  name: string;
+  kind: "embedded" | "remote";
+  createdAt: number;
+  about: string;
+  remote?: { baseUrl: string; mcpUrl?: string; healthUrl?: string; auth: { mode: BrainAuthMode } };
+  skill: { source: "generated" | "custom"; custom?: string };
+  urls: { mcpUrl: string; healthUrl: string; apiUrl: string };
+  hasToken: boolean;
+  /** MCP server and skill name (`<slug>-brain`). */
+  serverName: string;
+  tokenEnvVar: string;
+  /** The SKILL.md sessions get. */
+  skillText: string;
+  /** Domains whose sessions use it; own = chosen by the domain (else GLOBAL's default). */
+  domains: { slug: string; name: string; own: boolean }[];
+  /** Installed plugins serving the same MCP URL, and where each is on. */
+  collisions: { pluginId: string; pluginName: string; servers: string[]; domains: string[] }[];
+}
+
+export interface BrainHealth {
+  reachable: boolean;
+  status?: number;
+  healthStatus?: string;
+  version?: string;
+  pages?: number;
+  content_hash?: string;
+  error?: string;
+  checkedAt: number;
+}
+
+export interface BrainTestResult {
+  health: BrainHealth;
+  mcp: {
+    ok: boolean;
+    status?: number;
+    serverName?: string;
+    serverVersion?: string;
+    protocolVersion?: string;
+    hasInstructions?: boolean;
+    transport?: "json" | "sse";
+    sessionClosed?: boolean;
+    error?: string;
+  };
+}
+
+/** Fields of the connect / edit form. `token`: a string sets it, null removes it, absent keeps it. */
+export interface BrainInput {
+  name?: string;
+  about?: string;
+  baseUrl?: string;
+  mcpUrl?: string | null;
+  healthUrl?: string | null;
+  auth?: { mode: BrainAuthMode };
+  token?: string | null;
+  skill?: { source: "generated" } | { source: "custom"; custom: string };
 }
 
 /** A browser connected to Claude in Chrome (from `list_connected_browsers`). */
@@ -1068,6 +1138,17 @@ export const api = {
     put<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`, server),
   /** Re-read the MCP servers of the user's Claude config and claude.ai account (`claude mcp list`, ~10 s). */
   refreshAccountMcp: () => post<{ at: number; servers: number; error?: string }>("/account-mcp-servers/refresh", {}),
+
+  // Brains (phase 1: remote). Assigned to domains with updateDomain(slug, { brain }).
+  listBrains: () => get<{ brains: BrainInfo[] }>("/brains"),
+  createBrain: (input: BrainInput) => post<BrainInfo>("/brains", input),
+  updateBrain: (slug: string, input: BrainInput) => patch<BrainInfo>(`/brains/${encodeURIComponent(slug)}`, input),
+  deleteBrain: (slug: string) => del<{ ok: true; clearedFrom: string[] }>(`/brains/${encodeURIComponent(slug)}`),
+  brainHealth: (slug: string) => get<BrainHealth>(`/brains/${encodeURIComponent(slug)}/health`),
+  testBrain: (slug: string) => post<BrainTestResult>(`/brains/${encodeURIComponent(slug)}/test`, {}),
+  /** Where the plugin is on, the brain replaces it (plugin turned off there). */
+  adoptPluginAsBrain: (slug: string, pluginId: string) =>
+    post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),
   removeDomainMcpServer: (slug: string, name: string) =>
     del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`),
 

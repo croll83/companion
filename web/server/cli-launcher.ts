@@ -9,6 +9,7 @@ import {
   unlinkSync,
   lstatSync,
   readlinkSync,
+  readFileSync,
   symlinkSync,
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -39,6 +40,7 @@ import {
   type CompanionMcpEntry,
 } from "./companion-mcp-config.js";
 import { GLOBAL_DOMAIN } from "./domain-store.js";
+import { codexShellExcludeOverride } from "./brain/brain-runtime.js";
 import {
   buildClaudeDomainSpawn,
   prepareCodexDomainHome,
@@ -1085,7 +1087,26 @@ export class CliLauncher {
    * Make a session's own CODEX_HOME ready before every Codex spawn: seed it
    * from ~/.codex, then (re)write the `companion` MCP server entry.
    */
-  private prepareCodexHome(codexHome: string, sessionId: string, info: SdkSessionInfo): { writableRoots: string[] } {
+  /**
+   * Brain tokens reach Codex as env vars for its MCP header; keep them out of
+   * the shell commands it runs (see codexShellExcludeOverride).
+   */
+  private hideBrainTokensFromShell(args: string[], codexHome: string, env: Record<string, string> | undefined): void {
+    if (!env || !Object.keys(env).some((k) => k.startsWith("COMPANION_BRAIN_"))) return;
+    let toml = "";
+    try {
+      toml = readFileSync(join(codexHome, "config.toml"), "utf-8");
+    } catch {
+      /* no config yet: only our pattern */
+    }
+    args.push("-c", codexShellExcludeOverride(toml));
+  }
+
+  private prepareCodexHome(
+    codexHome: string,
+    sessionId: string,
+    info: SdkSessionInfo,
+  ): { writableRoots: string[]; env: Record<string, string> } {
     mkdirSync(codexHome, { recursive: true });
     const withDomain = usesDomain(info);
     // A domain session gets a generated AGENTS.md (which includes the user's
@@ -1094,7 +1115,7 @@ export class CliLauncher {
     // After seeding: config.toml may just have been copied from ~/.codex.
     if (!withDomain) {
       this.syncCodexMcp(sessionId, codexHome);
-      return { writableRoots: [] };
+      return { writableRoots: [], env: {} };
     }
     try {
       const prepared = prepareCodexDomainHome(codexHome, info.domain, {
@@ -1102,11 +1123,13 @@ export class CliLauncher {
       });
       if (this.syncCodexMcp(sessionId, codexHome, prepared.mcp)) prepared.commit();
       // A sandboxed (workspace-write) session must still be able to save notes.
-      return { writableRoots: [prepared.resolved.memoryDir] };
+      // env: the brain's bearer token, which config.toml only names
+      // (bearer_token_env_var): CODEX_HOME is not a private folder.
+      return { writableRoots: [prepared.resolved.memoryDir], env: prepared.env };
     } catch (err) {
       console.warn(`[cli-launcher] Could not prepare domain "${info.domain}" in ${codexHome}; starting without it:`, err);
       this.syncCodexMcp(sessionId, codexHome);
-      return { writableRoots: [] };
+      return { writableRoots: [], env: {} };
     }
   }
 
@@ -1316,9 +1339,10 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    const { writableRoots } = this.prepareCodexHome(codexHome, sessionId, info);
+    const { writableRoots, env: domainEnv } = this.prepareCodexHome(codexHome, sessionId, info);
+    this.hideBrainTokensFromShell(args, codexHome, domainEnv);
 
-    const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
+    const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, { ...options.env, ...domainEnv }, codexHome);
 
     console.log(
       `[cli-launcher] Spawning Codex WS session ${sessionId}: ` +
@@ -1493,9 +1517,10 @@ export class CliLauncher {
       sessionId,
       options.codexHome,
     );
-    const { writableRoots } = this.prepareCodexHome(codexHome, sessionId, info);
+    const { writableRoots, env: domainEnv } = this.prepareCodexHome(codexHome, sessionId, info);
+    this.hideBrainTokensFromShell(args, codexHome, domainEnv);
 
-    const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, options.env, codexHome);
+    const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, { ...options.env, ...domainEnv }, codexHome);
 
     console.log(
       `[cli-launcher] Spawning Codex session ${sessionId}: ` +

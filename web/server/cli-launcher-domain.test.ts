@@ -327,3 +327,50 @@ describe("migrating legacy sessions", () => {
     expect(launcher.migrateToDomain("missing", "herd")).toBe(false);
   });
 });
+
+describe("domain brain (both CLIs)", () => {
+  // A bearer brain through the real launcher: Claude gets the header in its
+  // per-session MCP config, Codex the token in the process env and only the
+  // variable name in config.toml (CODEX_HOME is not private).
+  it("passes the brain's token to Claude's config and Codex's env, never to config.toml", async () => {
+    const { createRemoteBrain, brainPluginDir } = await import("./brain/brain-store.js");
+    createRemoteBrain({ name: "Team", baseUrl: "https://team.example", auth: { mode: "bearer" }, token: "tok-launch" });
+    updateDomain("herd", { brain: "team" });
+    const launcher = wiredLauncher();
+
+    const claude = launcher.launch({ cwd: "/work", domain: "herd" });
+    const args = spawnArgs(0);
+    expect(args).toContain(brainPluginDir("team"));
+    const mcp = JSON.parse(readFileSync(join(domainRuntimeDir(claude.sessionId), "mcp.json"), "utf-8"));
+    expect(mcp.mcpServers["team-brain"].headers).toEqual({ Authorization: "Bearer tok-launch" });
+    expect(spawnEnv(0).COMPANION_BRAIN_TEAM_TOKEN).toBeUndefined();
+
+    const codex = launcher.launch({ cwd: "/work", backendType: "codex", domain: "herd" });
+    expect(spawnEnv(1).COMPANION_BRAIN_TEAM_TOKEN).toBe("tok-launch");
+    const toml = readFileSync(join(h.home, "codex", codex.sessionId, "config.toml"), "utf-8");
+    expect(toml).toContain('bearer_token_env_var = "COMPANION_BRAIN_TEAM_TOKEN"');
+    expect(toml).not.toContain("tok-launch");
+    // Codex passes its env to the shell commands it runs (verified: an echo
+    // printed the token): the brain variables are excluded from them.
+    const codexArgs = spawnArgs(1);
+    const i = codexArgs.indexOf('shell_environment_policy.exclude=["COMPANION_BRAIN_*"]');
+    expect(i).toBeGreaterThan(0);
+    expect(codexArgs[i - 1]).toBe("-c");
+    // Without a token there is nothing to hide: no override.
+    updateDomain("herd", { brain: null });
+    launcher.launch({ cwd: "/work", backendType: "codex", domain: "herd" });
+    expect(spawnArgs(2).join(" ")).not.toContain("shell_environment_policy");
+  });
+
+  // Legacy sessions (from before domains) never get a brain, even GLOBAL's.
+  it("gives legacy sessions nothing", async () => {
+    const { createRemoteBrain } = await import("./brain/brain-store.js");
+    createRemoteBrain({ name: "Team", baseUrl: "https://team.example", auth: { mode: "bearer" }, token: "tok-launch" });
+    updateDomain(GLOBAL_DOMAIN, { brain: "team" });
+    const launcher = wiredLauncher();
+    launcher.launch({ cwd: "/work" });
+    expect(spawnArgs(0).join(" ")).not.toContain("brains");
+    launcher.launch({ cwd: "/work", backendType: "codex" });
+    expect(spawnEnv(1).COMPANION_BRAIN_TEAM_TOKEN).toBeUndefined();
+  });
+});

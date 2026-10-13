@@ -16,6 +16,7 @@ import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
 import { registerDomainRoutes } from "./routes/domain-routes.js";
+import { registerBrainRoutes } from "./routes/brain-routes.js";
 import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
@@ -889,6 +890,7 @@ export function createRoutes(
   registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
   registerEnvRoutes(api);
   registerDomainRoutes(api, launcher);
+  registerBrainRoutes(api);
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api, {

@@ -11,6 +11,8 @@ export type Route =
   | { page: "environments" }
   /** The Domains page; with a slug, that domain; with a tab, its MCP / skills / plugins view. */
   | { page: "domains"; slug?: string; tab?: DomainTab }
+  /** The Brains page; with a slug, that brain. */
+  | { page: "brains"; slug?: string }
   | { page: "agents" }
   | { page: "agent-detail"; agentId: string }
   | { page: "runs" }
@@ -41,6 +43,11 @@ export function domainsHash(slug?: string, tab?: DomainTab): string {
   return `#/domains/${encodeURIComponent(slug)}${tab ? `/${tab}` : ""}`;
 }
 
+/** Hash of the Brains page, or of one brain. */
+export function brainsHash(slug?: string): string {
+  return slug ? `#/brains/${encodeURIComponent(slug)}` : "#/brains";
+}
+
 /**
  * Parse a window.location.hash string into a typed Route.
  */
@@ -60,6 +67,11 @@ export function parseHash(hash: string): Route {
       return { page: "domains", slug: decodeURIComponent(slug), ...(isDomainTab(tab) ? { tab } : {}) };
     }
     return { page: "domains" };
+  }
+  if (hash === "#/brains") return { page: "brains" };
+  if (hash.startsWith("#/brains/")) {
+    const slug = hash.slice("#/brains/".length).split("?")[0].split("/")[0];
+    return slug ? { page: "brains", slug: decodeURIComponent(slug) } : { page: "brains" };
   }
   // #/scheduled (the removed "Scheduled Runs" page) opens #/agents, where
   // schedules now live as agent triggers.

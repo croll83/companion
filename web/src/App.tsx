@@ -28,6 +28,7 @@ const LinearOAuthSettingsPage = lazy(() => import("./components/LinearOAuthSetti
 const PromptsPage = lazy(() => import("./components/PromptsPage.js").then((m) => ({ default: m.PromptsPage })));
 const EnvManager = lazy(() => import("./components/EnvManager.js").then((m) => ({ default: m.EnvManager })));
 const DomainsPage = lazy(() => import("./components/DomainsPage.js").then((m) => ({ default: m.DomainsPage })));
+const BrainsPage = lazy(() => import("./components/BrainsPage.js").then((m) => ({ default: m.BrainsPage })));
 const AgentsPage = lazy(() => import("./components/AgentsPage.js").then((m) => ({ default: m.AgentsPage })));
 const RunsPage = lazy(() => import("./components/RunsPage.js").then((m) => ({ default: m.RunsPage })));
 
@@ -69,6 +70,7 @@ export default function App() {
   const isLinearOAuthIntegrationPage = route.page === "integration-linear-oauth";
   const isEnvironmentsPage = route.page === "environments";
   const isDomainsPage = route.page === "domains";
+  const isBrainsPage = route.page === "brains";
   const isAgentsPage = route.page === "agents" || route.page === "agent-detail";
   const isRunsPage = route.page === "runs";
   const isSessionView = route.page === "session" || route.page === "home";
@@ -248,6 +250,12 @@ export default function App() {
           {isDomainsPage && (
             <div className="absolute inset-0">
               <Suspense fallback={<LazyFallback />}><DomainsPage slug={route.page === "domains" ? route.slug : undefined} tab={route.page === "domains" ? route.tab : undefined} /></Suspense>
+            </div>
+          )}
+
+          {isBrainsPage && (
+            <div className="absolute inset-0">
+              <Suspense fallback={<LazyFallback />}><BrainsPage slug={route.page === "brains" ? route.slug : undefined} /></Suspense>
             </div>
           )}
 

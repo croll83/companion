@@ -70,6 +70,14 @@ const NAV_ITEMS: NavItem[] = [
     activePages: ["domains"],
   },
   {
+    id: "brains",
+    label: "Brains",
+    hash: "#/brains",
+    viewBox: "0 0 16 16",
+    iconPath: "M8 1.5a4.5 4.5 0 00-2.6 8.17v1.83a1 1 0 001 1h3.2a1 1 0 001-1V9.67A4.5 4.5 0 008 1.5zm0 1a3.5 3.5 0 012 6.37.5.5 0 00-.2.4v2.23H6.2V9.27a.5.5 0 00-.2-.4A3.5 3.5 0 018 2.5zM6.5 13.5a.5.5 0 000 1h3a.5.5 0 000-1h-3z",
+    activePages: ["brains"],
+  },
+  {
     id: "environments",
     label: "Environments",
     hash: "#/environments",
@@ -105,7 +113,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const NAV_SECTIONS = [
   { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"] },
-  { id: "workspace", label: "Workspace", itemIds: ["domains", "environments", "agents", "runs", "settings"] },
+  { id: "workspace", label: "Workspace", itemIds: ["domains", "brains", "environments", "agents", "runs", "settings"] },
 ] as const;
 
 const NAV_ITEMS_BY_ID = new Map(NAV_ITEMS.map((item) => [item.id, item]));

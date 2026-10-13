@@ -19,8 +19,10 @@ import {
   createDomainSkill,
   removeDomainSkill,
   updateDomain,
+  effectiveBrainSlug,
   type DomainInfo,
 } from "../domain-store.js";
+import { getBrain, listBrains } from "../brain/brain-store.js";
 import { domainMcpView, mcpTargetOf, mcpTypeOf, resolveDomain, type DomainMcpServerView } from "../domain-runtime.js";
 import { isSkillGroupOn, isSkillOn, listSkillGroups, skillDescription, skillKey, type SkillGroup } from "../skill-groups.js";
 import { isPluginOn, listInstalledPlugins, type InstalledPlugin } from "../claude-plugins.js";
@@ -77,6 +79,17 @@ export interface DomainSummary extends DomainInfo {
   skillStates: Record<string, { on: boolean; own: boolean }>;
   /** Effective state of each installed plugin, and whether it is this domain's own choice. */
   pluginStates: Record<string, { on: boolean; own: boolean }>;
+  /** The brain sessions of the domain use (own choice, else GLOBAL's), null when none. */
+  effectiveBrain: { slug: string; name: string; own: boolean } | null;
+}
+
+/** The domain's brain as the Domains page shows it (a brain that no longer exists counts as none). */
+function effectiveBrainView(domain: DomainInfo, global: DomainInfo): DomainSummary["effectiveBrain"] {
+  const isGlobal = domain.slug === GLOBAL_DOMAIN;
+  const slug = effectiveBrainSlug(isGlobal ? undefined : domain, global);
+  const brain = slug ? getBrain(slug) : undefined;
+  if (!brain) return null;
+  return { slug: brain.slug, name: brain.name, own: isGlobal || domain.brain !== undefined };
 }
 
 /** Files of a domain editable from the Domains page, with their format. */
@@ -132,6 +145,7 @@ function summarize(
     skillGroupStates,
     skillStates,
     pluginStates,
+    effectiveBrain: effectiveBrainView(domain, global),
   };
 }
 
@@ -172,6 +186,8 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
       skillGroups: groups,
       plugins: plugins.map(pluginView),
       accountMcp: { at: account.at, stale, ...(account.error ? { error: account.error } : {}) },
+      // For the Brain select of each domain (the Brains page has the details).
+      brains: listBrains().map((b) => ({ slug: b.slug, name: b.name })),
       domains: listDomains().map((d) => summarize(d, global, sessions, groups, plugins)),
     });
   });
@@ -224,7 +240,11 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
   });
 
   api.patch("/domains/:slug", async (c) => {
-    const body = await c.req.json().catch(() => ({}));
+    const body = (await c.req.json().catch(() => ({}))) as { brain?: unknown };
+    // One brain per domain: a slug replaces the current one, and must exist.
+    if (typeof body.brain === "string" && body.brain !== "inherit" && !getBrain(body.brain)) {
+      return c.json({ error: `No brain "${body.brain}"` }, 400);
+    }
     const result = updateDomain(c.req.param("slug"), body as Record<string, unknown>);
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json(summarize(result.domain, ensureGlobalDomain(), sessions, listSkillGroups()));
