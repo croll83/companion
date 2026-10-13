@@ -62,6 +62,15 @@ describe("DocsPage", () => {
     expect(within(nav).getByRole("link", { name: "Agents" })).toHaveAttribute("aria-current", "page");
   });
 
+  // The Brains page is listed under Guides and renders its own heading.
+  it("lists and renders the Brains doc", () => {
+    render(<DocsPage docPath="brains" />);
+    const nav = screen.getByRole("navigation", { name: "Documentation" });
+    expect(within(nav).getByRole("link", { name: "Brains" })).toHaveAttribute("href", "#/docs/brains");
+    expect(screen.getByRole("heading", { level: 1, name: "Brains" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "One brain per domain, off by default" })).toBeInTheDocument();
+  });
+
   // Not-found: an unknown doc path shows a "Page not found" message while the
   // navigation remains visible so the user can recover.
   it("shows a not-found message for an unknown path but keeps nav", () => {
