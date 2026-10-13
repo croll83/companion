@@ -40,6 +40,12 @@ export const DEFAULT_TAGS = ["overview", "procedure", "decision", "reference"];
 const MAX_TAGS = 40;
 const PAGE_DIRS = ["entities", "concepts", "comparisons", "queries"];
 
+/** The local date (YYYY-MM-DD) of `now`: the user's day, not UTC's. */
+export function localDate(now: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
+
 /** The default folder of a new brain's wiki: ~/companion_brain_<slug>. */
 export function defaultWikiDir(slug: string): string {
   return join(homedir(), `companion_brain_${slug}`);
@@ -204,7 +210,7 @@ export async function scaffoldWiki(input: ScaffoldInput): Promise<ScaffoldResult
   const created = !existsSync(dir);
   try {
     mkdirSync(dir, { recursive: true });
-    for (const [rel, text] of Object.entries(wikiTemplate({ name: input.name, about: input.about, tags, date: now.toISOString().slice(0, 10) }))) {
+    for (const [rel, text] of Object.entries(wikiTemplate({ name: input.name, about: input.about, tags, date: localDate(now) }))) {
       mkdirSync(join(dir, rel, ".."), { recursive: true });
       writeFileSync(join(dir, rel), text, { flag: "wx" });
     }

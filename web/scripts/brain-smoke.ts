@@ -9,8 +9,9 @@
  *
  * Steps: generate a wiki in a temp folder, start the bundle on an ephemeral
  * port, read the ready line, then healthz, MCP initialize with a stock SDK
- * client and a brn_ token, brain_search, brain_inbox_add, a consolidation run
- * (start + finalize) with X-Brain-Key; finally a wrong BRAIN_PROTOCOL must be
+ * client and a brn_ token, brain_search, brain_inbox_add (also with the "fact"
+ * alias), a consolidation run (start + finalize) with X-Brain-Key, Add source
+ * and the pages API; finally a wrong BRAIN_PROTOCOL must be
  * refused. Exits non-zero on the first failure. Writes only to temp folders.
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -95,14 +96,25 @@ async function main(): Promise<void> {
     check(hits.results[0]?.slug === "billing-service", "brain_search");
     const add = await client.callTool({ name: "brain_inbox_add", arguments: { kind: "new_fact", statement: "The smoke test recorded this note through the bundle.", pages: ["billing-service"], sources: ["person:self"] } });
     check(add.isError !== true, "brain_inbox_add with a brn_ token (SQLite write)");
+    const alias = await client.callTool({ name: "brain_inbox_add", arguments: { kind: "fact", statement: "The smoke test used the fact alias of new_fact.", pages: ["deploy-pipeline"], sources: ["person:self"] } });
+    check(alias.isError !== true, "brain_inbox_add accepts kind \"fact\"");
     await client.close();
 
     const api = (path: string, body: unknown) => fetch(`${base}/api/v1${path}`, { method: "POST", headers: { "content-type": "application/json", "x-brain-key": CURATOR_KEY }, body: JSON.stringify(body) });
     check((await fetch(`${base}/api/v1/consolidation/runs`, { method: "POST", body: "{}" })).status === 401, "curator API without X-Brain-Key is refused");
     const started = (await (await api("/consolidation/runs", { run_id: "smoke-run" })).json()) as { run_id: string; counts: { notes: number } };
-    check(started.run_id === "smoke-run" && started.counts.notes === 1, "consolidation run started with the note");
+    check(started.run_id === "smoke-run" && started.counts.notes === 2, "consolidation run started with the two notes");
     const fin = await api("/consolidation/runs/smoke-run/finalize", { summary: "smoke" });
     check(fin.status === 200, "consolidation run finalized");
+
+    // Phase 2b: Add source writes raw/sources/ under Bun, and the Pages API searches and reads.
+    const source = (await (await api("/sources", { name: "Smoke source", text: "# Smoke\n\nA source added by the smoke test." })).json()) as { path?: string; note_id?: string };
+    check(!!source.path && existsSync(resolve(wikiDir, source.path)) && !!source.note_id, `add source (${source.path})`);
+    const key = { headers: { "x-brain-key": CURATOR_KEY } };
+    const pages = (await (await fetch(`${base}/api/v1/wiki/pages?q=invoices`, key)).json()) as { pages: { slug: string }[] };
+    check(pages.pages[0]?.slug === "billing-service", "pages search");
+    const index = (await (await fetch(`${base}/api/v1/wiki/pages/index`, key)).json()) as { path: string };
+    check(index.path === "index.md", "read a navigation file");
 
     const skill = await fetch(`${base}/skill`);
     check(skill.status === 200 && ((await skill.json()) as { name: string }).name === "smoke-brain", "public skill");

@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { absoluteDir } from "./brain-store.js";
-import { DEFAULT_TAGS, normalizeTags, wikiTemplate } from "./wiki-scaffold.js";
+import { DEFAULT_TAGS, localDate, normalizeTags, wikiTemplate } from "./wiki-scaffold.js";
 
 /**
  * Guided lint for a wiki adopted by an embedded brain: the findings of the
@@ -234,7 +234,7 @@ function appendBlock(dir: string, name: string, block: string): void {
  * sentence. Only creates files or adds text.
  */
 export function applyLintFix(dir: string, fix: LintFixId, ctx: FixContext = {}): string {
-  const date = (ctx.now ?? new Date()).toISOString().slice(0, 10);
+  const date = localDate(ctx.now ?? new Date());
   const pageTags = normalizeTags((ctx.pages ?? []).flatMap((p) => p.tags));
   switch (fix) {
     case "create-schema": {

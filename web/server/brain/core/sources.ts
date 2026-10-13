@@ -49,8 +49,10 @@ export function hintFromUrl(url: string): string {
   }
 }
 
+/** The local date (YYYY-MM-DD): the user's day, not UTC's. */
 function today(now: Date): string {
-  return now.toISOString().slice(0, 10);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 
 /** Write `text` as a new file of raw/sources/; returns its wiki path (raw/sources/...). Never overwrites. */
