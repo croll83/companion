@@ -5,10 +5,10 @@
  * plugin as brain", the skill, editing and removal with confirmation.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { BrainDetail, type BrainActions } from "./BrainDetail.js";
-import { jarvisBrain, teamBrain } from "../test-fixtures/brains.js";
+import { jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
 import type { BrainInfo, BrainTestResult } from "../api.js";
 
 const okTest: BrainTestResult = {
@@ -23,6 +23,7 @@ function actions(over: Partial<BrainActions> = {}): BrainActions {
     onAdopt: vi.fn(async () => true),
     onTest: vi.fn(async () => okTest),
     onCheckHealth: vi.fn(),
+    onRefreshSkill: vi.fn(async () => true),
     ...over,
   };
 }
@@ -122,5 +123,35 @@ describe("BrainDetail", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove brain…" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove brain" }));
     expect(a.onDelete).toHaveBeenCalledWith("jarvis");
+  });
+
+  // OAuth: the auth line names the client, a section explains the per-CLI
+  // sign-in from a session's MCP panel and links to a domain using the brain,
+  // and a 401 challenge is "sign-in required", not a failure.
+  it("explains the OAuth sign-in and shows a sign-in-required test as reachable", async () => {
+    const signIn: BrainTestResult = { health: { reachable: true, checkedAt: 0 }, mcp: { ok: false, status: 401, signInRequired: true } };
+    const a = setup(oauthBrain(), { a: actions({ onTest: vi.fn(async () => signIn) }) });
+    expect(screen.getByText("OAuth · client 11111111-2222-3333-4444-555555555555 · callback port 8765")).toBeInTheDocument();
+    const section = screen.getByRole("region", { name: "Sign-in" });
+    expect(section).toHaveTextContent("Sign in once per CLI");
+    expect(section).toHaveTextContent("hercle-brain");
+    expect(within(section).getByRole("link", { name: "Work" })).toHaveAttribute("href", "#/domains/work");
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    const status = await screen.findByText(/reachable, sign-in required/);
+    expect(status).toHaveClass("text-cc-success");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh skill" }));
+    expect(a.onRefreshSkill).toHaveBeenCalledWith("hercle");
+  });
+
+  it("asks to choose an OAuth brain in a domain before signing in", () => {
+    setup(oauthBrain({ domains: [], remote: { baseUrl: "https://b", auth: { mode: "oauth", clientId: "app" } } }));
+    expect(screen.getByText("OAuth · client app")).toBeInTheDocument();
+    expect(screen.getByText(/Choose this brain in a domain first/)).toBeInTheDocument();
+  });
+
+  it("passes axe accessibility scan for an OAuth brain", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<BrainDetail brain={oauthBrain()} health={{ reachable: true, checkedAt: 0 }} desktop busy={false} actions={actions()} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

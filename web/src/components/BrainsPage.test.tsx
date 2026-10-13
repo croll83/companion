@@ -3,7 +3,8 @@
  * The Brains page container: list on phones, list + brain on desktop, a
  * health check per brain when the page opens, "Connect remote brain" in a
  * sheet, and every action through the API followed by a reload. Errors are
- * shown; an unknown brain in the URL is reported.
+ * shown; an unknown brain in the URL is reported. A health check that
+ * refetched a server skill reloads the list; "Refresh skill" goes to the API.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -17,11 +18,12 @@ const mockApi = vi.hoisted(() => ({
   brainHealth: vi.fn(),
   testBrain: vi.fn(),
   adoptPluginAsBrain: vi.fn(),
+  refreshBrainSkill: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
 import { BrainsPage } from "./BrainsPage.js";
-import { jarvisBrain, teamBrain } from "../test-fixtures/brains.js";
+import { jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
 
 const originalMatchMedia = window.matchMedia;
 function desktop(on: boolean) {
@@ -145,5 +147,19 @@ describe("BrainsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove brain" }));
     expect(await screen.findByText("nope")).toBeInTheDocument();
     expect(window.location.hash).toBe("#/brains/team");
+  });
+
+  // The server reported a new wiki version and the server fetched the skill
+  // again: the page reloads to show it. "Refresh skill" calls the API.
+  it("reloads after a skill refetch and refreshes the skill on demand", async () => {
+    mockApi.listBrains.mockResolvedValue({ brains: [oauthBrain()] });
+    mockApi.brainHealth.mockResolvedValue({ reachable: true, checkedAt: 0, skillRefresh: "updated" });
+    mockApi.refreshBrainSkill.mockResolvedValue({ outcome: "unchanged", brain: oauthBrain() });
+    render(<BrainsPage slug="hercle" />);
+    await screen.findByRole("article", { name: "Brain Hercle" });
+    await waitFor(() => expect(mockApi.listBrains).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh skill" }));
+    await waitFor(() => expect(mockApi.refreshBrainSkill).toHaveBeenCalledWith("hercle"));
+    await waitFor(() => expect(mockApi.listBrains).toHaveBeenCalledTimes(3));
   });
 });

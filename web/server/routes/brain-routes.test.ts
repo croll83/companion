@@ -191,3 +191,90 @@ describe("domains and collisions", () => {
     expect(existsSync(join(h.home, "brains", "jarvis"))).toBe(true);
   });
 });
+
+describe("skill from the server", () => {
+  const skillDoc = (hash: string | null, heading = "Server skill") => ({
+    skill_api: 1, name: "jarvis-brain", description: "Use the Jarvis wiki.", server_version: "0.2.0", content_hash: hash, tools: ["brain_search"],
+    skill_md: `---\nname: jarvis-brain\ndescription: Use the Jarvis wiki.\n---\n\n# ${heading}\n`,
+  });
+  /** A fake brain that publishes `doc` on /skill (ETag "e1", 304 on a match) and reports `health` as its content hash. */
+  function publish(doc: Record<string, unknown> | null, health = "h1") {
+    fakeFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/healthz")) return new Response(JSON.stringify({ status: "ok", content_hash: health }));
+      if (url.endsWith("/skill")) {
+        if (!doc) return new Response("not found", { status: 404 });
+        const inm = (init?.headers as Record<string, string> | undefined)?.["If-None-Match"];
+        if (inm === '"e1"') return new Response(null, { status: 304, headers: { etag: '"e1"' } });
+        return new Response(JSON.stringify(doc), { headers: { "content-type": "application/json", etag: '"e1"' } });
+      }
+      return new Response("{}");
+    });
+  }
+
+  // Default for a new brain: try the server's skill.
+  it("uses the server's skill for a new brain when it publishes one", async () => {
+    publish(skillDoc("h1"));
+    const created = await createJarvis();
+    expect(created.skill).toMatchObject({ source: "server", server: { contentHash: "h1", serverVersion: "0.2.0" } });
+    expect(created.skillText).toContain("# Server skill");
+    expect(created.urls.skillUrl).toBe("http://100.116.99.9:7421/skill");
+  });
+
+  // No /skill (404): the generated skill, with a note the page shows.
+  it("falls back to the generated skill with a note", async () => {
+    publish(null);
+    const created = await createJarvis();
+    expect(created.skill).toMatchObject({ source: "generated", note: expect.stringContaining("HTTP 404") });
+    expect(created.skillText).toContain('description: "Infra wiki"');
+  });
+
+  // An explicit generated or custom skill is kept: no fetch at all.
+  it("does not fetch when the new brain's skill is chosen", async () => {
+    publish(skillDoc("h1"));
+    await createJarvis({ skill: { source: "custom", custom: "Mine" } });
+    expect(fakeFetch.mock.calls.some(([u]) => String(u).endsWith("/skill"))).toBe(false);
+  });
+
+  it("switches to the server's skill, refreshes it, and goes back", async () => {
+    publish(null);
+    await createJarvis();
+    publish(skillDoc("h1"));
+    let res = await app.request("/brains/jarvis", send("PATCH", { skill: { source: "server" } }));
+    expect((await res.json()).skill.source).toBe("server");
+    res = await app.request("/brains/jarvis/skill/refresh", send("POST"));
+    expect(await res.json()).toMatchObject({ outcome: "unchanged", brain: { skill: { source: "server" } } });
+    publish(skillDoc("h1", "Version two"), "h1");
+    fakeFetch.mockClear();
+    res = await app.request("/brains/jarvis", send("PATCH", { baseUrl: "http://100.116.99.9:7422" }));
+    // A new URL: fetched again, without If-None-Match (the old ETag belongs to another server).
+    const skillCall = fakeFetch.mock.calls.find(([u]) => String(u).endsWith("/skill"));
+    expect(skillCall?.[0]).toBe("http://100.116.99.9:7422/skill");
+    expect((await res.json()).skillText).toContain("# Version two");
+    res = await app.request("/brains/jarvis", send("PATCH", { skill: { source: "generated" } }));
+    expect((await res.json()).skill).toEqual({ source: "generated" });
+    expect((await app.request("/brains/nope/skill/refresh", send("POST"))).status).toBe(404);
+  });
+
+  // A health check that reports another wiki version refetches the skill.
+  it("refetches a server skill when health reports a new content hash", async () => {
+    publish(skillDoc("h1"));
+    await createJarvis();
+    let health = await (await app.request("/brains/jarvis/health")).json();
+    expect(health.skillRefresh).toBeUndefined();
+    publish(skillDoc("h2", "Newer"), "h2");
+    health = await (await app.request("/brains/jarvis/health")).json();
+    expect(health).toMatchObject({ reachable: true, content_hash: "h2" });
+    // Same ETag "e1" on the fake: a 304 just records the new version.
+    expect(health.skillRefresh).toBe("unchanged");
+    expect((await (await app.request("/brains/jarvis")).json()).skill.server.contentHash).toBe("h2");
+  });
+
+  // OAuth: the client id is stored and shown, no token is ever needed or kept.
+  it("connects an OAuth brain with a pre-registered client", async () => {
+    publish(null);
+    const created = await createJarvis({ auth: { mode: "oauth", clientId: "11111111-2222-3333-4444-555555555555", callbackPort: 8765 }, token: "ignored" });
+    expect(created).toMatchObject({ remote: { auth: { mode: "oauth", clientId: "11111111-2222-3333-4444-555555555555", callbackPort: 8765 } }, hasToken: false });
+    const skillCall = fakeFetch.mock.calls.find(([u]) => String(u).endsWith("/skill"));
+    expect(JSON.stringify(skillCall?.[1])).not.toContain("Authorization");
+  });
+});

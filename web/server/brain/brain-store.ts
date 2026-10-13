@@ -17,6 +17,8 @@ import { isValidSlug, slugify, updateDomainsAtomically } from "../domain-store.j
  * On disk, COMPANION_HOME/brains/<slug>/:
  *  - brain.json: the configuration (never a token),
  *  - secret: the bearer token, 0600, never returned by the API,
+ *  - server-skill.md: the skill fetched from the brain's server (`<base>/skill`,
+ *    brain-skill-fetch.ts), when the skill's source is "server",
  *  - plugin/: generated at every change, a Claude plugin
  *    (`.claude-plugin/plugin.json` named companion-brain-<slug>) whose only
  *    content is the skill `skills/<slug>-brain/SKILL.md`, which Codex sessions
@@ -25,8 +27,16 @@ import { isValidSlug, slugify, updateDomainsAtomically } from "../domain-store.j
 
 export type BrainKind = "embedded" | "remote";
 
-/** How Companion and the CLIs authenticate to a remote brain. OAuth (Entra) comes later. */
-export type BrainAuth = { mode: "none" } | { mode: "bearer" };
+/**
+ * How the CLIs authenticate to a remote brain.
+ *  - bearer: a token Companion stores (`secret`) and hands to each spawn;
+ *  - oauth: a pre-registered OAuth client (no dynamic registration, e.g.
+ *    Microsoft Entra). Companion never sees the tokens: each CLI signs in once
+ *    from a session (MCP panel → Sign in) and keeps them in its own store
+ *    (Claude's credentials, Codex's keyring), shared by all its sessions.
+ *    `callbackPort` is Claude's fixed loopback redirect port (Codex picks its own).
+ */
+export type BrainAuth = { mode: "none" } | { mode: "bearer" } | { mode: "oauth"; clientId: string; callbackPort?: number };
 export type BrainAuthMode = BrainAuth["mode"];
 
 export interface RemoteBrainConfig {
@@ -38,11 +48,30 @@ export interface RemoteBrainConfig {
   auth: BrainAuth;
 }
 
+/** What the last good fetch of `<base>/skill` returned (the text itself is in server-skill.md). */
+export interface ServerSkillMeta {
+  fetchedAt: number;
+  /** The server's ETag, sent back as If-None-Match. */
+  etag?: string;
+  /** The wiki content hash the skill was built from; null when it does not depend on the wiki. */
+  contentHash: string | null;
+  serverVersion?: string;
+  /** The skill's name on the server (Companion names it `<slug>-brain`). */
+  name?: string;
+}
+
 export interface BrainSkillConfig {
-  /** "generated": built from the name and the about text; "custom": the user's text. */
-  source: "generated" | "custom";
+  /**
+   * "generated": built from the name and the about text; "custom": the user's
+   * text; "server": fetched from the brain's server (`<base>/skill`).
+   */
+  source: "generated" | "custom" | "server";
   /** A SKILL.md body, or a full SKILL.md (frontmatter included). */
   custom?: string;
+  /** source "server": the last good fetch. */
+  server?: ServerSkillMeta;
+  /** Why the server's skill is not (or not freshly) in use: the last fetch failed. Shown in the page. */
+  note?: string;
 }
 
 export interface BrainConfig {
@@ -60,6 +89,8 @@ export interface BrainUrls {
   mcpUrl: string;
   healthUrl: string;
   apiUrl: string;
+  /** The brain's published skill (JSON), `<base>/skill`. */
+  skillUrl: string;
 }
 
 const MAX_DESCRIPTION = 1000;
@@ -98,6 +129,10 @@ function secretPath(slug: string): string {
   return join(brainDir(slug), "secret");
 }
 
+function serverSkillPath(slug: string): string {
+  return join(brainDir(slug), "server-skill.md");
+}
+
 // ── URLs ────────────────────────────────────────────────────────────────────
 
 /** An http(s) URL, trimmed, without trailing slashes; null when invalid. */
@@ -129,7 +164,7 @@ export function sameUrl(a: string | undefined, b: string | undefined): boolean {
   return canon(a) === canon(b);
 }
 
-/** The URLs of a brain: <base>/mcp, <base>/healthz, <base>/api/v1, unless overridden. */
+/** The URLs of a brain: <base>/mcp, <base>/healthz, <base>/api/v1, <base>/skill, unless overridden. */
 export function brainUrls(brain: Pick<BrainConfig, "remote">): BrainUrls {
   const r = brain.remote;
   const base = r?.baseUrl ?? "";
@@ -137,10 +172,56 @@ export function brainUrls(brain: Pick<BrainConfig, "remote">): BrainUrls {
     mcpUrl: r?.mcpUrl ?? `${base}/mcp`,
     healthUrl: r?.healthUrl ?? `${base}/healthz`,
     apiUrl: `${base}/api/v1`,
+    skillUrl: `${base}/skill`,
   };
 }
 
 // ── Read ────────────────────────────────────────────────────────────────────
+
+const MAX_CLIENT_ID = 256;
+
+function parseOAuth(clientId: unknown, callbackPort: unknown): BrainAuth | string {
+  if (typeof clientId !== "string" || !clientId.trim()) return "OAuth needs the client id of the pre-registered app";
+  const id = clientId.trim();
+  if (id.length > MAX_CLIENT_ID || !/^[\x21-\x7e]+$/.test(id)) return "The OAuth client id must be printable characters without spaces";
+  if (callbackPort === undefined || callbackPort === null || callbackPort === "") return { mode: "oauth", clientId: id };
+  const port = typeof callbackPort === "string" ? Number(callbackPort) : callbackPort;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return "The OAuth callback port must be a number from 1 to 65535";
+  return { mode: "oauth", clientId: id, callbackPort: port };
+}
+
+function normalizeAuth(raw: unknown): BrainAuth {
+  const a = raw as { mode?: unknown; clientId?: unknown; callbackPort?: unknown } | undefined;
+  if (a?.mode === "bearer") return { mode: "bearer" };
+  if (a?.mode === "oauth") {
+    const parsed = parseOAuth(a.clientId, a.callbackPort);
+    if (typeof parsed !== "string") return parsed;
+  }
+  return { mode: "none" };
+}
+
+function normalizeServerMeta(raw: unknown): ServerSkillMeta | undefined {
+  const m = raw as Partial<ServerSkillMeta> | undefined;
+  if (!m || typeof m !== "object" || typeof m.fetchedAt !== "number") return undefined;
+  return {
+    fetchedAt: m.fetchedAt,
+    ...(typeof m.etag === "string" ? { etag: m.etag } : {}),
+    contentHash: typeof m.contentHash === "string" ? m.contentHash : null,
+    ...(typeof m.serverVersion === "string" ? { serverVersion: m.serverVersion } : {}),
+    ...(typeof m.name === "string" ? { name: m.name } : {}),
+  };
+}
+
+function normalizeSkill(raw: unknown): BrainSkillConfig {
+  const skill = raw as Partial<BrainSkillConfig> | undefined;
+  const note = typeof skill?.note === "string" && skill.note ? { note: skill.note } : {};
+  if (skill?.source === "custom" && typeof skill.custom === "string" && skill.custom.trim()) {
+    return { source: "custom", custom: skill.custom, ...note };
+  }
+  const server = normalizeServerMeta(skill?.server);
+  if (skill?.source === "server" && server) return { source: "server", server, ...note };
+  return { source: "generated", ...note };
+}
 
 function normalize(raw: unknown, slug: string): BrainConfig | null {
   if (!raw || typeof raw !== "object") return null;
@@ -151,7 +232,6 @@ function normalize(raw: unknown, slug: string): BrainConfig | null {
   if (kind === "remote" && !baseUrl) return null;
   const mcpUrl = normalizeHttpUrl(r?.mcpUrl);
   const healthUrl = normalizeHttpUrl(r?.healthUrl);
-  const skill = b.skill as Partial<BrainSkillConfig> | undefined;
   return {
     slug,
     name: typeof b.name === "string" && b.name.trim() ? b.name.trim() : slug,
@@ -163,12 +243,10 @@ function normalize(raw: unknown, slug: string): BrainConfig | null {
         baseUrl,
         ...(mcpUrl ? { mcpUrl } : {}),
         ...(healthUrl ? { healthUrl } : {}),
-        auth: r?.auth?.mode === "bearer" ? { mode: "bearer" } : { mode: "none" },
+        auth: normalizeAuth(r?.auth),
       },
     } : {}),
-    skill: skill?.source === "custom" && typeof skill.custom === "string" && skill.custom.trim()
-      ? { source: "custom", custom: skill.custom }
-      : { source: "generated" },
+    skill: normalizeSkill(b.skill),
   };
 }
 
@@ -262,8 +340,26 @@ function generatedSkillBody(brain: Pick<BrainConfig, "slug" | "name" | "about">)
   ].join("\n");
 }
 
-/** The SKILL.md of a brain: the custom text (frontmatter added when it has none) or the generated one. */
+/** The skill fetched from the brain's server, as sessions get it; undefined when none is stored. */
+export function readServerSkill(slug: string): string | undefined {
+  try {
+    const text = readFileSync(serverSkillPath(slug), "utf-8");
+    return text.trim() ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The SKILL.md of a brain: the server's (as fetched), the custom text
+ * (frontmatter added when it has none) or the generated one. A "server"
+ * brain whose fetched file is gone gets the generated skill.
+ */
 export function brainSkillMarkdown(brain: Pick<BrainConfig, "slug" | "name" | "about" | "skill">): string {
+  if (brain.skill.source === "server") {
+    const fetched = readServerSkill(brain.slug);
+    if (fetched) return fetched;
+  }
   const custom = brain.skill.source === "custom" ? brain.skill.custom?.trim() : undefined;
   if (custom) {
     if (hasFrontmatter(custom)) return `${custom}\n`;
@@ -313,12 +409,17 @@ function saveBrain(brain: BrainConfig): void {
   writeBrainPlugin(brain);
 }
 
-/** Validate a skill choice from the API. */
+/**
+ * Validate a skill choice from the API. "server" is not set here: the routes
+ * fetch the skill first (brain-skill-fetch.ts) and store it with
+ * applyServerSkill.
+ */
 function parseSkill(value: unknown): BrainSkillConfig | string {
-  if (!value || typeof value !== "object") return "skill must be {source: \"generated\" | \"custom\", custom?}";
+  if (!value || typeof value !== "object") return "skill must be {source: \"generated\" | \"custom\" | \"server\", custom?}";
   const v = value as { source?: unknown; custom?: unknown };
   if (v.source === "generated") return { source: "generated" };
-  if (v.source !== "custom") return "skill.source must be \"generated\" or \"custom\"";
+  if (v.source === "server") return "The server's skill is set by fetching it (Refresh skill)";
+  if (v.source !== "custom") return "skill.source must be \"generated\", \"custom\" or \"server\"";
   if (typeof v.custom !== "string" || !v.custom.trim()) return "A custom skill needs its text";
   if (v.custom.length > MAX_CUSTOM_SKILL) return "The custom skill is too long";
   if (hasFrontmatter(v.custom) && !/^description:\s*\S/m.test(v.custom.trimStart().split(/\r?\n---/)[0])) {
@@ -327,9 +428,12 @@ function parseSkill(value: unknown): BrainSkillConfig | string {
   return { source: "custom", custom: v.custom.trim() };
 }
 
-function parseAuthMode(value: unknown): BrainAuthMode | string {
-  if (value === "none" || value === "bearer") return value;
-  return "auth must be \"none\" or \"bearer\"";
+/** Validate an auth choice from the API: {mode: "none" | "bearer"} or {mode: "oauth", clientId, callbackPort?}. */
+function parseAuth(value: unknown): BrainAuth | string {
+  const v = value as { mode?: unknown; clientId?: unknown; callbackPort?: unknown } | null | undefined;
+  if (v?.mode === "none" || v?.mode === "bearer") return { mode: v.mode };
+  if (v?.mode === "oauth") return parseOAuth(v.clientId, v.callbackPort);
+  return "auth must be {mode: \"none\" | \"bearer\" | \"oauth\"}";
 }
 
 function parseToken(value: unknown): string | null | undefined | Error {
@@ -374,8 +478,9 @@ export function createRemoteBrain(input: CreateBrainInput): BrainResult {
   if (mcpUrl instanceof Error) return fail(400, mcpUrl.message);
   const healthUrl = parseOverride(input.healthUrl, "The health URL");
   if (healthUrl instanceof Error) return fail(400, healthUrl.message);
-  const mode = parseAuthMode((input.auth as { mode?: unknown } | undefined)?.mode ?? "none");
-  if (mode !== "none" && mode !== "bearer") return fail(400, mode);
+  const auth = parseAuth(input.auth ?? { mode: "none" });
+  if (typeof auth === "string") return fail(400, auth);
+  const mode = auth.mode;
   const token = parseToken(input.token);
   if (token instanceof Error) return fail(400, token.message);
   if (mode === "bearer" && !token) return fail(400, "Bearer authentication needs a token");
@@ -392,7 +497,7 @@ export function createRemoteBrain(input: CreateBrainInput): BrainResult {
       baseUrl,
       ...(mcpUrl ? { mcpUrl } : {}),
       ...(healthUrl ? { healthUrl } : {}),
-      auth: { mode },
+      auth,
     },
     skill,
   };
@@ -405,7 +510,8 @@ export type BrainPatch = Omit<CreateBrainInput, "slug">;
 
 /**
  * Change a brain: name, about, URLs, auth mode, token (a string sets it, null
- * removes it, absent keeps it) and skill. Switching to "none" removes the token.
+ * removes it, absent keeps it) and skill. Switching to "none" or "oauth"
+ * removes the token; choosing a generated or custom skill drops the fetched one.
  */
 export function updateBrain(slug: string, patch: BrainPatch): BrainResult {
   const cur = getBrain(slug);
@@ -423,6 +529,7 @@ export function updateBrain(slug: string, patch: BrainPatch): BrainResult {
     const skill = parseSkill(patch.skill);
     if (typeof skill === "string") return fail(400, skill);
     next.skill = skill;
+    rmSync(serverSkillPath(slug), { force: true });
   }
   const token = parseToken(patch.token);
   if (token instanceof Error) return fail(400, token.message);
@@ -440,17 +547,52 @@ export function updateBrain(slug: string, patch: BrainPatch): BrainResult {
       else if (v) remote[key] = v;
     }
     if (patch.auth !== undefined) {
-      const mode = parseAuthMode((patch.auth as { mode?: unknown } | null)?.mode);
-      if (mode !== "none" && mode !== "bearer") return fail(400, mode);
-      remote.auth = { mode };
+      const auth = parseAuth(patch.auth);
+      if (typeof auth === "string") return fail(400, auth);
+      remote.auth = auth;
     }
     const tokenAfter = token === undefined ? hasBrainToken(slug) : token !== null;
     if (remote.auth.mode === "bearer" && !tokenAfter) return fail(400, "Bearer authentication needs a token");
   }
   saveBrain(next);
-  if (next.remote?.auth.mode === "none") writeBrainToken(slug, null);
+  if (next.remote?.auth.mode !== "bearer") writeBrainToken(slug, null);
   else if (token !== undefined) writeBrainToken(slug, token);
   return { ok: true, brain: next };
+}
+
+/** The outcome of a fetch of `<base>/skill`, as brain-skill-fetch.ts hands it to the store. */
+export type ServerSkillUpdate =
+  /** A new skill (already validated and renamed `<slug>-brain`). */
+  | { kind: "fetched"; meta: ServerSkillMeta; text: string }
+  /** 304: the stored skill is current; `contentHash` is the wiki version it now stands for. */
+  | { kind: "unchanged"; fetchedAt: number; contentHash?: string | null }
+  /** The fetch failed: why, for the page. */
+  | { kind: "failed"; note: string };
+
+/**
+ * Store the result of a skill fetch. A failure never loses a skill: a
+ * "server" brain keeps its last fetched skill (with the note), one without
+ * a stored copy falls back to the generated skill, and a generated or custom
+ * skill stays as it is (the user asked for the server's and gets a note).
+ */
+export function applyServerSkill(slug: string, update: ServerSkillUpdate): BrainConfig | undefined {
+  const cur = getBrain(slug);
+  if (!cur) return undefined;
+  let skill: BrainSkillConfig;
+  if (update.kind === "fetched") {
+    writePrivateFile(serverSkillPath(slug), update.text);
+    skill = { source: "server", server: update.meta };
+  } else if (update.kind === "unchanged" && cur.skill.source === "server" && cur.skill.server && readServerSkill(slug)) {
+    const contentHash = update.contentHash !== undefined ? update.contentHash : cur.skill.server.contentHash;
+    skill = { source: "server", server: { ...cur.skill.server, fetchedAt: update.fetchedAt, contentHash } };
+  } else {
+    const note = update.kind === "failed" ? update.note : "The server answered 304 but no stored skill was found";
+    const usable = cur.skill.source !== "server" || !!readServerSkill(slug);
+    skill = usable ? { ...cur.skill, note } : { source: "generated", note };
+  }
+  const next = { ...cur, skill };
+  saveBrain(next);
+  return next;
 }
 
 /**

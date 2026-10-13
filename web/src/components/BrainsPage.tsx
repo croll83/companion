@@ -10,8 +10,9 @@ import { Sheet } from "./Sheet.js";
 /**
  * Brains page (#/brains): knowledge bases with an MCP server that the
  * sessions of a domain can search and read. Phase 1 connects REMOTE brains
- * (an URL, no auth or a bearer token). One brain per domain, chosen on the
- * domain's page; a new brain is on nowhere.
+ * (an URL, no auth, a bearer token or OAuth with a pre-registered client).
+ * One brain per domain, chosen on the domain's page; a new brain is on
+ * nowhere. A health check that refetched the server's skill reloads the list.
  *
  * Phones: the list, then one brain (#/brains/<slug>); desktop: both side by
  * side. "Connect remote brain" opens a sheet. Health is checked once per
@@ -37,9 +38,13 @@ export function BrainsPage({ slug }: { slug?: string } = {}) {
   const checkHealth = useCallback((s: string) => {
     setHealth((h) => ({ ...h, [s]: "checking" }));
     api.brainHealth(s)
-      .then((res) => setHealth((h) => ({ ...h, [s]: res })))
+      .then((res) => {
+        setHealth((h) => ({ ...h, [s]: res }));
+        // The server reported another wiki version and its skill was fetched again.
+        if (res.skillRefresh === "updated" || res.skillRefresh === "failed") reload();
+      })
       .catch((e: unknown) => setHealth((h) => ({ ...h, [s]: { reachable: false, error: e instanceof Error ? e.message : String(e), checkedAt: Date.now() } })));
-  }, []);
+  }, [reload]);
 
   useEffect(() => {
     for (const b of brains ?? []) {
@@ -87,6 +92,7 @@ export function BrainsPage({ slug }: { slug?: string } = {}) {
       return null;
     }),
     onCheckHealth: checkHealth,
+    onRefreshSkill: (s) => run(() => api.refreshBrainSkill(s)),
   };
 
   const selected = brains?.find((b) => b.slug === slug) ?? (desktop ? brains?.[0] : undefined);

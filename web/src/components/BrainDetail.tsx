@@ -12,6 +12,43 @@ export interface BrainActions {
   /** Health plus an MCP initialize; null when the request itself failed (error shown by the page). */
   onTest: (slug: string) => Promise<BrainTestResult | null>;
   onCheckHealth: (slug: string) => void;
+  /** Fetch the brain's skill from its server again. */
+  onRefreshSkill: (slug: string) => Promise<boolean>;
+}
+
+/** "None", "Bearer token (set)", "OAuth · client <id> · callback port 8765". */
+function authText(brain: BrainInfo): string {
+  const auth = brain.remote?.auth;
+  if (auth?.mode === "bearer") return `Bearer token (${brain.hasToken ? "set" : "missing"})`;
+  if (auth?.mode === "oauth") return `OAuth · client ${auth.clientId}${auth.callbackPort ? ` · callback port ${auth.callbackPort}` : ""}`;
+  return "None";
+}
+
+/**
+ * OAuth brains: Companion holds no token. Each CLI (Claude Code, Codex) signs
+ * in once, from any session of a domain that uses the brain, through the
+ * session's MCP panel; the tokens stay in that CLI's own store and serve all
+ * its sessions.
+ */
+function OAuthSignIn({ brain }: { brain: BrainInfo }) {
+  const domain = brain.domains.find((d) => d.slug !== "global") ?? brain.domains[0];
+  return (
+    <section aria-label="Sign-in" className="p-2.5 rounded-lg border border-cc-border text-[12px] space-y-1">
+      <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Sign-in</h3>
+      <p>
+        Sign in once per CLI (Claude Code and Codex each keep their own tokens, shared by all their sessions): open a session of a
+        domain that uses this brain, then its MCP panel → <strong>{brain.serverName}</strong> → <strong>Sign in</strong>. Companion never
+        sees the tokens.
+      </p>
+      {domain ? (
+        <p>
+          For example from <a href={domainsHash(domain.slug)} className="text-cc-primary hover:underline">{domain.slug === "global" ? "GLOBAL" : domain.name}</a>.
+        </p>
+      ) : (
+        <p className="text-cc-muted">Choose this brain in a domain first: its sessions get the server and the Sign in button.</p>
+      )}
+    </section>
+  );
 }
 
 function TestResult({ result }: { result: BrainTestResult }) {
@@ -19,10 +56,12 @@ function TestResult({ result }: { result: BrainTestResult }) {
   return (
     <div role="status" className="mt-2 rounded-md border border-cc-border p-2 text-[11px] space-y-0.5">
       <p>Health: {healthText(result.health)}</p>
-      <p className={mcp.ok ? "text-cc-success" : "text-cc-error"}>
+      <p className={mcp.ok || mcp.signInRequired ? "text-cc-success" : "text-cc-error"}>
         MCP: {mcp.ok
           ? `connected to ${mcp.serverName ?? "the server"}${mcp.serverVersion ? ` ${mcp.serverVersion}` : ""} (${mcp.transport === "sse" ? "SSE" : "JSON"}, protocol ${mcp.protocolVersion ?? "?"})`
-          : mcp.error ?? "failed"}
+          : mcp.signInRequired
+            ? "reachable, sign-in required (sign in from a session's MCP panel)"
+            : mcp.error ?? "failed"}
       </p>
       {mcp.ok && (
         <p className="text-cc-muted">
@@ -75,7 +114,7 @@ export function BrainDetail({
           <dt>MCP</dt><dd className="font-mono-code break-all">{brain.urls.mcpUrl}</dd>
           <dt>Health</dt><dd className="font-mono-code break-all">{brain.urls.healthUrl}</dd>
           <dt>Auth</dt>
-          <dd>{brain.remote?.auth.mode === "bearer" ? `Bearer token (${brain.hasToken ? "set" : "missing"})` : "None"}</dd>
+          <dd className="break-all">{authText(brain)}</dd>
         </dl>
       </header>
 
@@ -95,6 +134,8 @@ export function BrainDetail({
         </div>
         {test && <TestResult result={test} />}
       </section>
+
+      {brain.remote?.auth.mode === "oauth" && <OAuthSignIn brain={brain} />}
 
       {collisions.map((c) => (
         <div key={c.pluginId} role="alert" className="p-2.5 rounded-lg border border-cc-warning/40 bg-cc-warning/10 text-[12px] space-y-1.5">
@@ -136,7 +177,13 @@ export function BrainDetail({
         </p>
       </section>
 
-      <BrainSkill key={`${brain.skill.source}:${brain.skill.custom ?? ""}`} brain={brain} busy={busy} onSave={(skill) => actions.onUpdate(brain.slug, { skill })} />
+      <BrainSkill
+        key={`${brain.skill.source}:${brain.skill.custom ?? ""}:${brain.skill.server?.fetchedAt ?? ""}`}
+        brain={brain}
+        busy={busy}
+        onSave={(skill) => actions.onUpdate(brain.slug, { skill })}
+        onRefresh={() => actions.onRefreshSkill(brain.slug)}
+      />
 
       <section aria-label="Settings" className="space-y-2">
         {editing ? (

@@ -186,6 +186,34 @@ describe("checkBrainMcp", () => {
   });
 });
 
+describe("OAuth brains", () => {
+  // Companion holds no OAuth token: a 401 with a WWW-Authenticate challenge
+  // means "up, sign in from a session", not a failure; health goes unauthenticated.
+  it("reports reachable, sign-in required", async () => {
+    handler = (req, res) => {
+      if (req.url === "/healthz") { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ status: "ok" })); return; }
+      res.statusCode = 401;
+      res.setHeader("www-authenticate", 'Bearer resource_metadata="http://x/.well-known/oauth-protected-resource"');
+      res.end();
+    };
+    const b = brain({ auth: { mode: "oauth", clientId: "app-1" } });
+    const { health, mcp } = await testBrainConnection(b);
+    expect(health).toMatchObject({ reachable: true });
+    expect(mcp).toEqual({ ok: false, status: 401, signInRequired: true });
+    expect(seen.every((s) => s.auth === undefined)).toBe(true);
+  });
+
+  // The same challenge on a brain set to "none" tells the user to pick OAuth;
+  // a 401 without a challenge stays a refusal.
+  it("explains a challenge on a brain without auth", async () => {
+    handler = (_req, res) => { res.statusCode = 401; res.setHeader("www-authenticate", "Bearer"); res.end(); };
+    expect((await checkBrainMcp(brain())).error).toContain("requires sign-in");
+    handler = (_req, res) => { res.statusCode = 401; res.end(); };
+    const oauth = { ...brain({ name: "O" }), remote: { baseUrl: base, auth: { mode: "oauth" as const, clientId: "a" } } };
+    expect(await checkBrainMcp(oauth)).toMatchObject({ ok: false, error: expect.stringContaining("refused the credentials") });
+  });
+});
+
 describe("testBrainConnection", () => {
   it("returns health and MCP side by side", async () => {
     handler = (req, res) => {

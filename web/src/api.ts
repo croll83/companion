@@ -563,7 +563,20 @@ export interface DomainsResponse {
   brains?: { slug: string; name: string }[];
 }
 
-export type BrainAuthMode = "none" | "bearer";
+export type BrainAuthMode = "none" | "bearer" | "oauth";
+
+/** How sessions authenticate to a remote brain. OAuth: a pre-registered client; each CLI signs in from a session. */
+export type BrainAuth = { mode: "none" } | { mode: "bearer" } | { mode: "oauth"; clientId: string; callbackPort?: number };
+
+/** Where a brain's skill comes from; "server" = fetched from `<base>/skill`. */
+export interface BrainSkillInfo {
+  source: "generated" | "custom" | "server";
+  custom?: string;
+  /** The last good fetch of the server's skill. */
+  server?: { fetchedAt: number; etag?: string; contentHash: string | null; serverVersion?: string; name?: string };
+  /** Why the server's skill is not (or not freshly) in use. */
+  note?: string;
+}
 
 /** A brain (phase 1: remote only), as GET /brains returns it. Never carries the token. */
 export interface BrainInfo {
@@ -572,14 +585,14 @@ export interface BrainInfo {
   kind: "embedded" | "remote";
   createdAt: number;
   about: string;
-  remote?: { baseUrl: string; mcpUrl?: string; healthUrl?: string; auth: { mode: BrainAuthMode } };
-  skill: { source: "generated" | "custom"; custom?: string };
-  urls: { mcpUrl: string; healthUrl: string; apiUrl: string };
+  remote?: { baseUrl: string; mcpUrl?: string; healthUrl?: string; auth: BrainAuth };
+  skill: BrainSkillInfo;
+  urls: { mcpUrl: string; healthUrl: string; apiUrl: string; skillUrl: string };
   hasToken: boolean;
   /** MCP server and skill name (`<slug>-brain`). */
   serverName: string;
   tokenEnvVar: string;
-  /** The SKILL.md sessions get. */
+  /** The SKILL.md sessions get. Plain text from a server: never render it as HTML. */
   skillText: string;
   /** Domains whose sessions use it; own = chosen by the domain (else GLOBAL's default). */
   domains: { slug: string; name: string; own: boolean }[];
@@ -596,6 +609,8 @@ export interface BrainHealth {
   content_hash?: string;
   error?: string;
   checkedAt: number;
+  /** The server reported another wiki version, so its skill was fetched again. */
+  skillRefresh?: "updated" | "unchanged" | "failed";
 }
 
 export interface BrainTestResult {
@@ -609,6 +624,8 @@ export interface BrainTestResult {
     hasInstructions?: boolean;
     transport?: "json" | "sse";
     sessionClosed?: boolean;
+    /** OAuth brain answering 401 with a challenge: up, waiting for a sign-in. */
+    signInRequired?: boolean;
     error?: string;
   };
 }
@@ -620,9 +637,10 @@ export interface BrainInput {
   baseUrl?: string;
   mcpUrl?: string | null;
   healthUrl?: string | null;
-  auth?: { mode: BrainAuthMode };
+  auth?: BrainAuth;
   token?: string | null;
-  skill?: { source: "generated" } | { source: "custom"; custom: string };
+  /** "server": fetch `<base>/skill` (a failure keeps the current skill, with a note). Absent on create: try the server first. */
+  skill?: { source: "generated" } | { source: "server" } | { source: "custom"; custom: string };
 }
 
 /** A browser connected to Claude in Chrome (from `list_connected_browsers`). */
@@ -1146,6 +1164,9 @@ export const api = {
   deleteBrain: (slug: string) => del<{ ok: true; clearedFrom: string[] }>(`/brains/${encodeURIComponent(slug)}`),
   brainHealth: (slug: string) => get<BrainHealth>(`/brains/${encodeURIComponent(slug)}/health`),
   testBrain: (slug: string) => post<BrainTestResult>(`/brains/${encodeURIComponent(slug)}/test`, {}),
+  /** Fetch the brain's skill from its server again. */
+  refreshBrainSkill: (slug: string) =>
+    post<{ outcome: "updated" | "unchanged" | "failed"; error?: string; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/skill/refresh`, {}),
   /** Where the plugin is on, the brain replaces it (plugin turned off there). */
   adoptPluginAsBrain: (slug: string, pluginId: string) =>
     post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),

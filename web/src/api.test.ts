@@ -2146,6 +2146,7 @@ describe("brains API", () => {
     ["deleteBrain", () => api.deleteBrain("jarvis"), "/api/brains/jarvis", "DELETE", undefined],
     ["brainHealth", () => api.brainHealth("jarvis"), "/api/brains/jarvis/health", "GET", undefined],
     ["testBrain", () => api.testBrain("jarvis"), "/api/brains/jarvis/test", "POST", {}],
+    ["refreshBrainSkill", () => api.refreshBrainSkill("jarvis"), "/api/brains/jarvis/skill/refresh", "POST", {}],
     ["adoptPluginAsBrain", () => api.adoptPluginAsBrain("jarvis", "jarvis-brain@lab"), "/api/brains/jarvis/adopt-plugin", "POST", { pluginId: "jarvis-brain@lab" }],
   ])("%s", async (_name, call, url, method, body) => {
     mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
