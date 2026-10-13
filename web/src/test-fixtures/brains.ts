@@ -3,8 +3,9 @@ import type { BrainInfo } from "../api.js";
 /**
  * Brains page fixtures shared by its component tests, shaped like GET
  * /brains: jarvis (no auth, on GLOBAL, with a colliding plugin), a team
- * brain with a bearer token, used by no domain, and an OAuth brain (a
- * pre-registered client) whose skill comes from its server.
+ * brain with a bearer token, used by no domain, an OAuth brain (a
+ * pre-registered client) whose skill comes from its server, and an embedded
+ * brain run by Companion on a wiki folder.
  */
 
 export function jarvisBrain(over: Partial<BrainInfo> = {}): BrainInfo {
@@ -57,6 +58,26 @@ export function oauthBrain(over: Partial<BrainInfo> = {}): BrainInfo {
     serverName: "hercle-brain",
     tokenEnvVar: "COMPANION_BRAIN_HERCLE_TOKEN",
     domains: [{ slug: "work", name: "Work", own: true }],
+    collisions: [],
+    ...over,
+  };
+}
+
+export function embeddedBrain(over: Partial<BrainInfo> = {}): BrainInfo {
+  return {
+    ...jarvisBrain(),
+    slug: "work",
+    name: "Work",
+    kind: "embedded",
+    about: "Team wiki",
+    remote: undefined,
+    embedded: { wikiDir: "/home/me/wiki", autostart: true, redactSecrets: true, language: "auto" },
+    runtime: { state: "running", pid: 4242, port: 45999, startedAt: 0, crashes: 0 },
+    urls: { mcpUrl: "http://127.0.0.1:3456/brains/work/mcp", healthUrl: "http://127.0.0.1:45999/healthz", apiUrl: "http://127.0.0.1:45999/api/v1", skillUrl: "http://127.0.0.1:45999/skill" },
+    skill: { source: "server", server: { fetchedAt: 0, contentHash: "h1", name: "work-brain" } },
+    serverName: "work-brain",
+    tokenEnvVar: "COMPANION_BRAIN_WORK_TOKEN",
+    domains: [],
     collisions: [],
     ...over,
   };

@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 /**
  * The list of brains: health dot and text, URL, the domains using each,
- * a hint when a plugin serves the same URL, the empty state, and "Connect
- * remote brain".
+ * a hint when a plugin serves the same URL, the empty state, "Connect
+ * remote brain" and "Embedded brain", and an embedded brain's folder.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { BrainList, brainDomainsText, healthText } from "./BrainList.js";
-import { jarvisBrain, teamBrain } from "../test-fixtures/brains.js";
+import { embeddedBrain, jarvisBrain, teamBrain } from "../test-fixtures/brains.js";
 
 describe("healthText", () => {
   it("describes every health state", () => {
@@ -30,7 +30,7 @@ describe("BrainList", () => {
   const health = { jarvis: { reachable: true, pages: 80, checkedAt: 0 }, team: { reachable: false, error: "timeout", checkedAt: 0 } };
 
   it("renders each brain with its health, URL and domains", () => {
-    render(<BrainList brains={[jarvisBrain(), teamBrain()]} health={health} selected="jarvis" onConnect={vi.fn()} />);
+    render(<BrainList brains={[jarvisBrain(), teamBrain()]} health={health} selected="jarvis" onConnect={vi.fn()} onEmbed={vi.fn()} />);
     const jarvis = screen.getByRole("link", { name: /Jarvis/ });
     expect(jarvis).toHaveAttribute("href", "#/brains/jarvis");
     expect(jarvis).toHaveAttribute("aria-current", "page");
@@ -42,15 +42,26 @@ describe("BrainList", () => {
 
   it("passes axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
-    const { container } = render(<BrainList brains={[jarvisBrain(), teamBrain()]} health={{ jarvis: "checking" }} onConnect={vi.fn()} />);
+    const { container } = render(<BrainList brains={[jarvisBrain(), teamBrain()]} health={{ jarvis: "checking" }} onConnect={vi.fn()} onEmbed={vi.fn()} />);
     expect(await axe(container)).toHaveNoViolations();
   });
 
   it("explains the empty state and connects a brain", () => {
     const onConnect = vi.fn();
-    render(<BrainList brains={[]} health={{}} onConnect={onConnect} />);
+    const onEmbed = vi.fn();
+    render(<BrainList brains={[]} health={{}} onConnect={onConnect} onEmbed={onEmbed} />);
     expect(screen.getByText(/No brain yet/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Connect remote brain" }));
     expect(onConnect).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Embedded brain (existing wiki folder)" }));
+    expect(onEmbed).toHaveBeenCalled();
+  });
+
+  // An embedded brain shows its kind and its wiki folder instead of an URL.
+  it("shows an embedded brain with its wiki folder", () => {
+    render(<BrainList brains={[embeddedBrain()]} health={{}} onConnect={vi.fn()} onEmbed={vi.fn()} />);
+    const row = screen.getByRole("link", { name: /Work/ });
+    expect(row).toHaveTextContent("Embedded");
+    expect(row).toHaveTextContent("/home/me/wiki");
   });
 });

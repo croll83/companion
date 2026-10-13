@@ -578,7 +578,22 @@ export interface BrainSkillInfo {
   note?: string;
 }
 
-/** A brain (phase 1: remote only), as GET /brains returns it. Never carries the token. */
+export type BrainLanguage = "auto" | "it" | "en" | "none";
+
+/** What Companion's supervisor knows of an embedded brain's process. */
+export interface BrainRuntimeInfo {
+  state: "stopped" | "starting" | "running" | "unhealthy" | "backoff" | "failed";
+  pid?: number;
+  /** The child's ephemeral port (troubleshooting only: sessions use Companion's port). */
+  port?: number;
+  startedAt?: number;
+  crashes: number;
+  cause?: string;
+  action?: string;
+  lastExitCode?: number | null;
+}
+
+/** A brain (remote, or embedded: run by Companion on a wiki folder), as GET /brains returns it. Never carries a token or key. */
 export interface BrainInfo {
   slug: string;
   name: string;
@@ -586,6 +601,9 @@ export interface BrainInfo {
   createdAt: number;
   about: string;
   remote?: { baseUrl: string; mcpUrl?: string; healthUrl?: string; auth: BrainAuth };
+  embedded?: { wikiDir: string; autostart: boolean; redactSecrets: boolean; language: BrainLanguage };
+  /** Embedded brains: the child process. */
+  runtime?: BrainRuntimeInfo;
   skill: BrainSkillInfo;
   urls: { mcpUrl: string; healthUrl: string; apiUrl: string; skillUrl: string };
   hasToken: boolean;
@@ -611,6 +629,8 @@ export interface BrainHealth {
   checkedAt: number;
   /** The server reported another wiki version, so its skill was fetched again. */
   skillRefresh?: "updated" | "unchanged" | "failed";
+  /** Embedded brains: the child process. */
+  runtime?: BrainRuntimeInfo;
 }
 
 export interface BrainTestResult {
@@ -641,6 +661,21 @@ export interface BrainInput {
   token?: string | null;
   /** "server": fetch `<base>/skill` (a failure keeps the current skill, with a note). Absent on create: try the server first. */
   skill?: { source: "generated" } | { source: "server" } | { source: "custom"; custom: string };
+  /** Embedded brains (changing one of these restarts the brain). */
+  language?: BrainLanguage;
+  redactSecrets?: boolean;
+  autostart?: boolean;
+}
+
+/** "Embedded brain (existing wiki folder)": Companion runs the brain server on this folder. */
+export interface EmbeddedBrainInput {
+  kind: "embedded";
+  name: string;
+  about?: string;
+  /** Absolute path (or ~/...) of a folder with SCHEMA.md and index.md. */
+  wikiDir: string;
+  language?: BrainLanguage;
+  redactSecrets?: boolean;
 }
 
 /** A browser connected to Claude in Chrome (from `list_connected_browsers`). */
@@ -1157,9 +1192,14 @@ export const api = {
   /** Re-read the MCP servers of the user's Claude config and claude.ai account (`claude mcp list`, ~10 s). */
   refreshAccountMcp: () => post<{ at: number; servers: number; error?: string }>("/account-mcp-servers/refresh", {}),
 
-  // Brains (phase 1: remote). Assigned to domains with updateDomain(slug, { brain }).
+  // Brains (remote and embedded). Assigned to domains with updateDomain(slug, { brain }).
   listBrains: () => get<{ brains: BrainInfo[] }>("/brains"),
-  createBrain: (input: BrainInput) => post<BrainInfo>("/brains", input),
+  createBrain: (input: BrainInput | EmbeddedBrainInput) => post<BrainInfo>("/brains", input),
+  /** Embedded brains: start, stop or restart the brain's process. */
+  brainProcess: (slug: string, action: "start" | "stop" | "restart") =>
+    post<{ runtime: BrainRuntimeInfo }>(`/brains/${encodeURIComponent(slug)}/${action}`, {}),
+  /** Embedded brains: the last lines of the brain's log. */
+  brainLogs: (slug: string, lines = 100) => get<{ lines: string[] }>(`/brains/${encodeURIComponent(slug)}/logs?lines=${lines}`),
   updateBrain: (slug: string, input: BrainInput) => patch<BrainInfo>(`/brains/${encodeURIComponent(slug)}`, input),
   deleteBrain: (slug: string) => del<{ ok: true; clearedFrom: string[] }>(`/brains/${encodeURIComponent(slug)}`),
   brainHealth: (slug: string) => get<BrainHealth>(`/brains/${encodeURIComponent(slug)}/health`),

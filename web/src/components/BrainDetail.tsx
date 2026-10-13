@@ -4,6 +4,8 @@ import { brainsHash, domainsHash } from "../utils/routing.js";
 import { BrainForm } from "./BrainForm.js";
 import { HealthDot, healthText, type BrainHealthState } from "./BrainList.js";
 import { BrainSkill } from "./BrainSkill.js";
+import { BrainRuntime } from "./BrainRuntime.js";
+import { EmbeddedBrainForm } from "./EmbeddedBrainForm.js";
 
 export interface BrainActions {
   onUpdate: (slug: string, input: BrainInput) => Promise<boolean>;
@@ -14,10 +16,15 @@ export interface BrainActions {
   onCheckHealth: (slug: string) => void;
   /** Fetch the brain's skill from its server again. */
   onRefreshSkill: (slug: string) => Promise<boolean>;
+  /** Embedded brains: start, stop or restart the brain's process. */
+  onProcess: (slug: string, action: "start" | "stop" | "restart") => Promise<boolean>;
+  /** Embedded brains: the last lines of its log; null when they could not be read. */
+  onLoadLogs: (slug: string) => Promise<string[] | null>;
 }
 
 /** "None", "Bearer token (set)", "OAuth · client <id> · callback port 8765". */
 function authText(brain: BrainInfo): string {
+  if (brain.kind === "embedded") return "A token per session, minted by Companion";
   const auth = brain.remote?.auth;
   if (auth?.mode === "bearer") return `Bearer token (${brain.hasToken ? "set" : "missing"})`;
   if (auth?.mode === "oauth") return `OAuth · client ${auth.clientId}${auth.callbackPort ? ` · callback port ${auth.callbackPort}` : ""}`;
@@ -97,6 +104,7 @@ export function BrainDetail({
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<BrainTestResult | null>(null);
   const collisions = brain.collisions.filter((c) => c.domains.length > 0);
+  const embedded = brain.kind === "embedded";
 
   const runTest = async () => {
     setTesting(true);
@@ -111,8 +119,9 @@ export function BrainDetail({
         <h2 className="mt-1 text-[16px] font-semibold">{brain.name}</h2>
         {brain.about && <p className="text-[12px] text-cc-muted whitespace-pre-wrap">{brain.about}</p>}
         <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 text-[11px] text-cc-muted">
+          {embedded && <><dt>Wiki</dt><dd className="font-mono-code break-all">{brain.embedded?.wikiDir}</dd></>}
           <dt>MCP</dt><dd className="font-mono-code break-all">{brain.urls.mcpUrl}</dd>
-          <dt>Health</dt><dd className="font-mono-code break-all">{brain.urls.healthUrl}</dd>
+          {!embedded && <><dt>Health</dt><dd className="font-mono-code break-all">{brain.urls.healthUrl}</dd></>}
           <dt>Auth</dt>
           <dd className="break-all">{authText(brain)}</dd>
         </dl>
@@ -134,6 +143,16 @@ export function BrainDetail({
         </div>
         {test && <TestResult result={test} />}
       </section>
+
+      {embedded && (
+        <BrainRuntime
+          key={brain.runtime?.state ?? "stopped"}
+          brain={brain}
+          busy={busy}
+          onAction={(action) => actions.onProcess(brain.slug, action)}
+          loadLogs={() => actions.onLoadLogs(brain.slug)}
+        />
+      )}
 
       {brain.remote?.auth.mode === "oauth" && <OAuthSignIn brain={brain} />}
 
@@ -186,7 +205,14 @@ export function BrainDetail({
       />
 
       <section aria-label="Settings" className="space-y-2">
-        {editing ? (
+        {editing && embedded ? (
+          <EmbeddedBrainForm
+            brain={brain}
+            busy={busy}
+            onCancel={() => setEditing(false)}
+            onSubmit={(input) => actions.onUpdate(brain.slug, input as BrainInput).then((ok) => { if (ok) setEditing(false); })}
+          />
+        ) : editing ? (
           <BrainForm
             brain={brain}
             busy={busy}
@@ -207,7 +233,9 @@ export function BrainDetail({
           <div role="alert" className="p-2 rounded-lg border border-cc-error/30 text-[12px] space-y-1.5">
             <p>
               Remove <strong>{brain.name}</strong>? {brain.domains.length > 0 ? `${brain.domains.length} domain(s) stop using it. ` : ""}
-              Companion forgets its settings and token; the brain itself (its server and wiki) is not touched.
+              {embedded
+                ? "Companion stops it and deletes its settings, inbox and log; the wiki folder is not touched."
+                : "Companion forgets its settings and token; the brain itself (its server and wiki) is not touched."}
             </p>
             <div className="flex gap-2">
               <button type="button" onClick={() => void actions.onDelete(brain.slug)} className="px-2.5 py-1 rounded-md bg-cc-error/15 text-cc-error hover:bg-cc-error/25 cursor-pointer">

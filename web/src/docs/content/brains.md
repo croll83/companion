@@ -1,6 +1,6 @@
 ---
 title: Brains
-description: Connect a remote knowledge base (an MCP server) and give it to the sessions of a domain
+description: Connect a remote knowledge base, or let The Companion run one on a wiki folder, and give it to the sessions of a domain
 ---
 
 # Brains
@@ -11,9 +11,12 @@ Memory = the CLI's private notes; Brain = a curated, shared wiki with sources.
 
 Open **Brains** in the sidebar (`#/brains`).
 
-## Remote brains
+There are two kinds:
 
-This version connects **remote** brains: a server that runs elsewhere and is reachable at an URL, such as a brain on your tailnet or a team brain. Brains that The Companion runs itself ("embedded") come later.
+- **Remote**: a server that runs elsewhere and is reachable at an URL, such as a brain on your tailnet or a team brain.
+- **Embedded**: The Companion runs the brain server itself, on a wiki folder of this machine. Nothing to install or keep running.
+
+## Remote brains
 
 Click **Connect remote brain** and fill in:
 
@@ -22,6 +25,36 @@ Click **Connect remote brain** and fill in:
 - **Authentication**: none, a bearer token, or OAuth with a pre-registered client (see below). A bearer token is stored only in `~/.companion/brains/<slug>/secret` (readable by you alone) and is never shown again or returned by the API.
 
 **Test connection** checks the health URL and performs an MCP `initialize` against the server, then closes the test session.
+
+## Embedded brains
+
+Click **Embedded brain (existing wiki folder)** and fill in:
+
+- **Name** and **What it is about** (the skill's description).
+- **Wiki folder**: an existing folder of this machine, as an absolute path or `~/...`, with `SCHEMA.md` and `index.md` at its root (an LLM wiki: pages over sources in `raw/`, a tag taxonomy in `SCHEMA.md`, an append-only `log.md`). The Companion only reads it. Creating a new wiki from a template comes in a later version.
+- **Language of the wiki**: how search matches word forms. "Italian and English" indexes both forms of every word, for mixed wikis.
+- **Hide secrets** (on by default): tokens and passwords found in the wiki reach sessions as `[REDACTED:<rule>]`.
+
+The brain starts at once, and with The Companion afterwards (**Start with Companion**, in **Edit brain**). Its skill comes from the brain server, built from your about text and the titles of `index.md`.
+
+How it runs:
+
+- Each embedded brain is a separate process: the brain server bundled with The Companion (`dist/brain/brain.js`), run by the same Bun. A crash or a stuck brain never takes The Companion or its sessions down.
+- The process listens on `127.0.0.1` on a port of its own, which sessions never see. Sessions use The Companion's port: `http://127.0.0.1:<port>/brains/<slug>/mcp`. A restart of the brain is invisible to them.
+- The wiki is re-read every 2 minutes, so edits show up without a restart.
+- Sessions can search and read the wiki, and record notes in the brain's **inbox** (`brain_inbox_add`). Notes never change the wiki: a consolidation (a job or a person) reviews them first. The inbox lives in `~/.companion/brains/<slug>/data/inbox.db`.
+
+The brain's page shows its **Brain process**: running, starting, restarting after a crash, or stopped. **Start**, **Stop** and **Restart** act on it. If it crashes 5 times in 10 minutes, or cannot start at all (for example the wiki folder is gone), it stops trying and the page says why and what to do. **Troubleshooting** shows the process id, its own port and the last lines of its log (`~/.companion/brains/<slug>/logs/brain.log`).
+
+Removing an embedded brain stops it and deletes its settings, inbox and log. The wiki folder is not touched.
+
+### Security of embedded brains
+
+- The proxy on The Companion's port accepts connections from this machine only, and only with a **token** that The Companion gives each session when it starts (`brn_...`, signed with the brain's key). The brain records which session wrote each note, and a session cannot write as another.
+- The brain's own API (inbox, consolidation) needs a second key that only The Companion's server holds.
+- Both keys come from `~/.companion/brains/<slug>/secret` (readable by you alone). The API never returns them.
+- Tokens never expire. Replacing the `secret` file and restarting the brain revokes every token at once; sessions get new ones when they restart.
+- **Limit**: this protects against accidents and against a session manipulated by prompt injection. It does not protect against other programs running as your Unix user, which can read `~/.companion`.
 
 ## OAuth (pre-registered client)
 
@@ -57,7 +90,7 @@ A brain server can publish its own skill at `<base>/skill`, a public endpoint (j
 - A new brain is on **nowhere**. Choose it in a domain's page, under **Brain**.
 - Each domain has **at most one brain**: two brains would mix up where agents read and write. Choosing a brain replaces the current one.
 - GLOBAL's brain is the default for every domain without a choice of its own. A domain can also choose **No brain**, or go back to **As in GLOBAL**.
-- Removing a brain clears it from every domain. The remote server and its wiki are not touched.
+- Removing a brain clears it from every domain. The wiki is never touched: a remote brain's server and wiki stay as they are, and an embedded brain's folder too.
 
 Changes apply when a session starts or reloads. Sessions from before domains ("legacy") never get a brain.
 
@@ -65,9 +98,9 @@ Changes apply when a session starts or reloads. Sessions from before domains ("l
 
 Both CLIs get the brain's MCP server under the same name, `<slug>-brain`, and a skill with the same name. The skill comes from the server, is generated from the name and about text, or is your own text (a body, or a whole `SKILL.md` with frontmatter) written in the brain's page.
 
-- **Claude Code**: the server is added to the session's generated MCP config. A bearer token goes in as an `Authorization` header in that private file. An OAuth brain gets `"oauth": {"clientId", "callbackPort"}` instead. The skill comes from a small plugin The Companion generates. Tools appear as `mcp__<slug>-brain__<tool>`.
+- **Claude Code**: the server is added to the session's generated MCP config. A bearer token, or an embedded brain's session token, goes in as an `Authorization` header in that private file. An OAuth brain gets `"oauth": {"clientId", "callbackPort"}` instead. The skill comes from a small plugin The Companion generates. Tools appear as `mcp__<slug>-brain__<tool>`.
 - **Codex**: the server is added to the session's `config.toml`.
-  - Bearer brain: `bearer_token_env_var`. The token itself is set only in the environment of the Codex process and is never written to disk there.
+  - Bearer brain, or embedded brain (its session token): `bearer_token_env_var`. The token itself is set only in the environment of the Codex process, is never written to disk there, and is hidden from the commands Codex runs.
   - OAuth brain: an `[mcp_servers.<slug>-brain.oauth]` table with the `client_id`.
   - Codex does not show MCP server instructions to the model, so the skill is linked into the session and its `AGENTS.md` gets a line naming the brain.
 
