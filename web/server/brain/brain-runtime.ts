@@ -102,6 +102,26 @@ export function codexBrainEnv(b: DomainBrain | null): Record<string, string> {
   return b?.token ? { [b.tokenEnvVar]: b.token } : {};
 }
 
+/** Env var names Companion gives Codex for brains (their values are tokens). */
+export const BRAIN_ENV_PATTERN = "COMPANION_BRAIN_*";
+
+/**
+ * The `-c` override that keeps brain tokens out of the commands Codex runs.
+ * Codex passes its own environment to shell commands (verified on 0.161: an
+ * `echo $COMPANION_BRAIN_…_TOKEN` printed it), while only the Codex process
+ * needs the token for the MCP header. `shell_environment_policy.exclude`
+ * hides it (verified); a `-c` replaces the array, so the patterns already in
+ * the session's config.toml are kept. Codex's default excludes still apply.
+ */
+export function codexShellExcludeOverride(configToml: string): string {
+  const existing: string[] = [];
+  const section = /^\[shell_environment_policy\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(configToml)?.[1] ?? "";
+  const list = /^\s*exclude\s*=\s*\[([^\]]*)\]/m.exec(section)?.[1] ?? "";
+  for (const m of list.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)) existing.push(m[1] ?? m[2]);
+  const all = [...new Set([...existing, BRAIN_ENV_PATTERN])];
+  return `shell_environment_policy.exclude=[${all.map((x) => JSON.stringify(x)).join(", ")}]`;
+}
+
 /** The line of the generated AGENTS.md that tells Codex about the brain. */
 export function codexBrainAgentsLine(b: DomainBrain): string {
   return `This domain's knowledge base is the brain ${b.brain.name}: use its \`${b.serverName}\` MCP tools; see the ${b.serverName} skill.`;

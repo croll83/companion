@@ -26,6 +26,7 @@ import {
   claudeBrainServer,
   codexBrainAgentsLine,
   codexBrainEnv,
+  codexShellExcludeOverride,
   codexBrainServer,
   collidingPlugins,
 } from "./brain-runtime.js";
@@ -158,5 +159,26 @@ describe("collisions and adoption", () => {
     // Ops had no brain (GLOBAL had none): it is pinned to none.
     expect(getDomain("ops")?.brain).toBeNull();
     expect(brainForDomain(ctx("ops"))).toBeNull();
+  });
+});
+
+// Brain tokens reach Codex as env vars; the override keeps them out of the
+// shell commands Codex runs, keeping the user's own excludes (a -c replaces
+// the whole array).
+describe("codexShellExcludeOverride", () => {
+  it("adds the brain pattern alone when the config has no excludes", () => {
+    expect(codexShellExcludeOverride("")).toBe('shell_environment_policy.exclude=["COMPANION_BRAIN_*"]');
+    expect(codexShellExcludeOverride('model = "gpt"\n[shell_environment_policy]\ninherit = "all"\n')).toBe('shell_environment_policy.exclude=["COMPANION_BRAIN_*"]');
+  });
+
+  it("keeps the excludes already in the session's config, without duplicates", () => {
+    const toml = [
+      'model = "gpt"',
+      "[shell_environment_policy]",
+      "exclude = [\"AWS_*\", 'MY_SECRET', \"COMPANION_BRAIN_*\"]",
+      "[mcp_servers.x]",
+      'exclude = ["not-this-one"]',
+    ].join("\n");
+    expect(codexShellExcludeOverride(toml)).toBe('shell_environment_policy.exclude=["AWS_*", "MY_SECRET", "COMPANION_BRAIN_*"]');
   });
 });

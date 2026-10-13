@@ -9,6 +9,7 @@ import {
   unlinkSync,
   lstatSync,
   readlinkSync,
+  readFileSync,
   symlinkSync,
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -39,6 +40,7 @@ import {
   type CompanionMcpEntry,
 } from "./companion-mcp-config.js";
 import { GLOBAL_DOMAIN } from "./domain-store.js";
+import { codexShellExcludeOverride } from "./brain/brain-runtime.js";
 import {
   buildClaudeDomainSpawn,
   prepareCodexDomainHome,
@@ -1085,6 +1087,21 @@ export class CliLauncher {
    * Make a session's own CODEX_HOME ready before every Codex spawn: seed it
    * from ~/.codex, then (re)write the `companion` MCP server entry.
    */
+  /**
+   * Brain tokens reach Codex as env vars for its MCP header; keep them out of
+   * the shell commands it runs (see codexShellExcludeOverride).
+   */
+  private hideBrainTokensFromShell(args: string[], codexHome: string, env: Record<string, string> | undefined): void {
+    if (!env || !Object.keys(env).some((k) => k.startsWith("COMPANION_BRAIN_"))) return;
+    let toml = "";
+    try {
+      toml = readFileSync(join(codexHome, "config.toml"), "utf-8");
+    } catch {
+      /* no config yet: only our pattern */
+    }
+    args.push("-c", codexShellExcludeOverride(toml));
+  }
+
   private prepareCodexHome(
     codexHome: string,
     sessionId: string,
@@ -1323,6 +1340,7 @@ export class CliLauncher {
       options.codexHome,
     );
     const { writableRoots, env: domainEnv } = this.prepareCodexHome(codexHome, sessionId, info);
+    this.hideBrainTokensFromShell(args, codexHome, domainEnv);
 
     const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, { ...options.env, ...domainEnv }, codexHome);
 
@@ -1500,6 +1518,7 @@ export class CliLauncher {
       options.codexHome,
     );
     const { writableRoots, env: domainEnv } = this.prepareCodexHome(codexHome, sessionId, info);
+    this.hideBrainTokensFromShell(args, codexHome, domainEnv);
 
     const { spawnCmd, spawnEnv } = buildCodexSpawn(binary, args, { ...options.env, ...domainEnv }, codexHome);
 
