@@ -616,7 +616,63 @@ export interface BrainInfo {
   domains: { slug: string; name: string; own: boolean }[];
   /** Installed plugins serving the same MCP URL, and where each is on. */
   collisions: { pluginId: string; pluginName: string; servers: string[]; domains: string[] }[];
+  consolidation?: BrainConsolidationConfig;
+  /** For the list: whether it consolidates, and when it last did. */
+  consolidationSummary?: { enabled: boolean; lastSuccessAt?: number; lastStatus?: BrainConsolidationRunStatus };
 }
+
+/** A brain's consolidation settings (server/brain/brain-store.ts ConsolidationConfig). */
+export interface BrainConsolidationConfig {
+  enabled: boolean;
+  /** 5-field cron, in Companion's time zone. */
+  schedule: string;
+  mode: "local" | "master" | "pr";
+  backend: "claude" | "codex";
+  /** Absent: the latest Sonnet (Claude) or Codex's first model, resolved at every run. */
+  model?: string;
+  threshold: number;
+  agentId?: string;
+}
+
+export type BrainConsolidationRunStatus = "running" | "success" | "skipped" | "not_synced" | "no_commit" | "error";
+
+/** One consolidation run (embedded brains), or one run of the linked agent (remote brains). */
+export interface BrainConsolidationRun {
+  id: string;
+  trigger: "schedule" | "manual" | "threshold" | "catch-up" | "webhook" | "linear";
+  status: BrainConsolidationRunStatus;
+  startedAt: number;
+  finishedAt?: number;
+  pending?: number;
+  sessionId?: string;
+  backend?: "claude" | "codex";
+  model?: string;
+  decided?: Record<string, number>;
+  commit?: string;
+  costUsd?: number;
+  tokens?: { input: number; output: number };
+  error?: string;
+}
+
+/** GET /brains/:slug/consolidation. */
+export interface BrainConsolidationView {
+  config: BrainConsolidationConfig;
+  agent: { id: string; name: string; backendType: "claude" | "codex"; model: string; enabled: boolean } | null;
+  resolvedModel: string | null;
+  running: boolean;
+  runningSessionId?: string;
+  nextRunAt: number | null;
+  lastSuccessAt?: number;
+  runs: BrainConsolidationRun[];
+  domain: string;
+}
+
+export type BrainConsolidationPatch = Partial<Pick<BrainConsolidationConfig, "enabled" | "schedule" | "backend" | "threshold">> & {
+  /** null or "": the default model. */
+  model?: string | null;
+  /** Remote brains: the agent to link (null unlinks). */
+  agentId?: string | null;
+};
 
 export interface BrainHealth {
   reachable: boolean;
@@ -1313,6 +1369,16 @@ export const api = {
     post<{ note_id: string; status: "discarded" }>(`/brains/${encodeURIComponent(slug)}/inbox/${encodeURIComponent(noteId)}/dismiss`, reason ? { reason } : {}),
   addBrainSource: (slug: string, input: BrainSourceInput) =>
     post<{ path?: string; note_id: string; duplicate: boolean }>(`/brains/${encodeURIComponent(slug)}/sources`, input),
+  brainConsolidation: (slug: string) => get<BrainConsolidationView>(`/brains/${encodeURIComponent(slug)}/consolidation`),
+  /** Embedded: the settings (turning it on creates the agent). Remote: {agentId} links an agent. */
+  updateBrainConsolidation: (slug: string, input: BrainConsolidationPatch) =>
+    put<BrainConsolidationView>(`/brains/${encodeURIComponent(slug)}/consolidation`, input),
+  /** "Consolidate now": skipped (and recorded) when no note waits. */
+  runBrainConsolidation: (slug: string) =>
+    post<{ started: boolean; run?: BrainConsolidationRun; consolidation: BrainConsolidationView }>(`/brains/${encodeURIComponent(slug)}/consolidation/run`, {}),
+  /** Retry the sync of a not-synced run into the wiki folder. */
+  syncBrainConsolidation: (slug: string) =>
+    post<{ run: BrainConsolidationRun; consolidation: BrainConsolidationView }>(`/brains/${encodeURIComponent(slug)}/consolidation/sync`, {}),
   /** Where the plugin is on, the brain replaces it (plugin turned off there). */
   adoptPluginAsBrain: (slug: string, pluginId: string) =>
     post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),

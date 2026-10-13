@@ -3,12 +3,12 @@
  * The list of brains: health dot and text, URL, the domains using each,
  * a hint when a plugin serves the same URL, the empty state, "New brain",
  * "Connect remote brain" and "Adopt existing folder", an embedded brain's
- * folder, and the notes waiting in its inbox.
+ * folder, the notes waiting in its inbox and when it was last consolidated.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import { BrainList, brainDomainsText, healthText, waitingText } from "./BrainList.js";
+import { BrainList, brainDomainsText, consolidatedText, healthText, waitingText } from "./BrainList.js";
 import { embeddedBrain, jarvisBrain, teamBrain } from "../test-fixtures/brains.js";
 
 describe("healthText", () => {
@@ -76,5 +76,24 @@ describe("BrainList", () => {
     const row = screen.getByRole("link", { name: /Work/ });
     expect(row).toHaveTextContent("Embedded");
     expect(row).toHaveTextContent("/home/me/wiki");
+  });
+
+  // The card says when the brain was last consolidated ("N notes waiting · last consolidated <time>"),
+  // and flags a last run that never reached the wiki.
+  it("shows when a consolidating brain was last consolidated", () => {
+    expect(consolidatedText(embeddedBrain())).toBe("");
+    expect(consolidatedText(embeddedBrain({ consolidationSummary: { enabled: false, lastSuccessAt: 5 } }))).toBe("");
+    expect(consolidatedText(embeddedBrain({ consolidationSummary: { enabled: true } }))).toBe("not consolidated yet");
+    expect(consolidatedText(embeddedBrain({ consolidationSummary: { enabled: true, lastStatus: "not_synced" } }))).toBe("not consolidated yet · last run not synced");
+    const at = Date.UTC(2026, 9, 14, 5);
+    const brain = embeddedBrain({ consolidationSummary: { enabled: true, lastSuccessAt: at, lastStatus: "success" } });
+    render(<BrainList brains={[brain]} health={{ work: { reachable: true, inbox: { pending: 3 }, checkedAt: 0 } }} onCreate={vi.fn()} onConnect={vi.fn()} onEmbed={vi.fn()} />);
+    expect(screen.getByRole("link", { name: /Work/ })).toHaveTextContent(`3 notes waiting · last consolidated ${new Date(at).toLocaleString()}`);
+  });
+
+  it("shows the last consolidation without notes waiting", () => {
+    render(<BrainList brains={[embeddedBrain({ consolidationSummary: { enabled: true } })]} health={{}} onCreate={vi.fn()} onConnect={vi.fn()} onEmbed={vi.fn()} />);
+    expect(screen.getByRole("link", { name: /Work/ })).toHaveTextContent("not consolidated yet");
+    expect(screen.getByRole("link", { name: /Work/ })).not.toHaveTextContent("·  ·");
   });
 });
