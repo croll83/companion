@@ -47,6 +47,7 @@ import { warnIfBunOutdated } from "./bun-runtime-check.js";
 import { warnIfLegacyTailscaleFunnel } from "./legacy-tailscale-funnel.js";
 import { setCompanionPort } from "./brain/brain-endpoints.js";
 import { brainSupervisor } from "./brain/brain-supervisor.js";
+import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consolidation.js";
 import { handleBrainProxy } from "./brain/brain-proxy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -67,6 +68,10 @@ const terminalManager = new TerminalManager();
 const prPoller = new PRPoller(wsBridge);
 const recorder = new RecorderManager();
 const agentExecutor = new AgentExecutor(launcher, wsBridge);
+// Brains' consolidation: triggers, the curator clone and the verified sync around their agents' runs.
+const brainConsolidation = new BrainConsolidation({ executor: agentExecutor });
+setBrainConsolidation(brainConsolidation);
+agentExecutor.setRunHooks(brainConsolidation);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
 // Scheduled messages into existing sessions. Delivery relaunches a dead CLI
@@ -397,6 +402,9 @@ wakeupScheduler.startAll();
 // ── Embedded brains ─────────────────────────────────────────────────────────
 // Children start in the background: the proxy holds early requests up to 10 s.
 brainSupervisor.startAll();
+// Consolidation crons, and the threshold / catch-up checks on each health tick.
+brainConsolidation.startAll();
+brainSupervisor.addHealthListener((slug, tick) => brainConsolidation.onHealth(slug, tick.inbox));
 
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).

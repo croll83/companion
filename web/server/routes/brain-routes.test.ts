@@ -435,3 +435,107 @@ describe("skill from the server", () => {
     expect(JSON.stringify(skillCall?.[1])).not.toContain("Authorization");
   });
 });
+
+/**
+ * Consolidation routes, with a fake service (its logic has its own tests,
+ * brain/brain-consolidation.test.ts). Validates the wiring: GET returns the
+ * view, PUT goes to configure (embedded) or linkAgent (remote, {agentId}
+ * only), "Consolidate now" and "Retry sync" pass refusals on with their
+ * status, the list carries the consolidation summary, deleting a brain lets
+ * the service forget it first, and without the service the routes say so.
+ */
+describe("consolidation", () => {
+  const view = (over: Record<string, unknown> = {}) => ({
+    config: { enabled: true, schedule: "0 5 * * *", mode: "local", backend: "claude", threshold: 10, agentId: "a1" },
+    agent: { id: "a1", name: "Work brain consolidation", backendType: "claude", model: "claude-sonnet-5-5", enabled: true },
+    resolvedModel: "claude-sonnet-5-5",
+    running: false,
+    nextRunAt: null,
+    lastSuccessAt: 1234,
+    runs: [{ id: "r1", trigger: "schedule", status: "not_synced", startedAt: 1000 }],
+    domain: "global",
+    ...over,
+  });
+  let svc: { view: Mock; configure: Mock; linkAgent: Mock; trigger: Mock; retrySync: Mock; forget: Mock };
+  let capp: Hono;
+
+  beforeEach(() => {
+    svc = {
+      view: vi.fn(() => view()),
+      configure: vi.fn(() => ({ ok: true })),
+      linkAgent: vi.fn(() => ({ ok: true })),
+      trigger: vi.fn(async () => ({ ok: true, started: true })),
+      retrySync: vi.fn(async () => ({ ok: true, run: { id: "r2", trigger: "manual", status: "success", startedAt: 2 } })),
+      forget: vi.fn(),
+    };
+    capp = new Hono();
+    registerBrainRoutes(capp, { fetch: fakeFetch, consolidation: svc as never });
+  });
+
+  it("serves the view, and the summary in the brain list", async () => {
+    await createJarvis();
+    const res = await capp.request("/brains/jarvis/consolidation");
+    expect(res.status).toBe(200);
+    expect((await res.json()).agent.id).toBe("a1");
+    const list = await (await capp.request("/brains")).json();
+    expect(list.brains[0].consolidationSummary).toEqual({ enabled: true, lastSuccessAt: 1234, lastStatus: "not_synced" });
+    expect((await capp.request("/brains/nope/consolidation")).status).toBe(404);
+  });
+
+  it("PUT: a remote brain links an agent (only agentId), with the service's errors", async () => {
+    await createJarvis();
+    let res = await capp.request("/brains/jarvis/consolidation", send("PUT", { agentId: "jarvis-wiki-consolidation", prompt: "ignored" }));
+    expect(res.status).toBe(200);
+    expect(svc.linkAgent).toHaveBeenCalledWith("jarvis", "jarvis-wiki-consolidation");
+    await capp.request("/brains/jarvis/consolidation", send("PUT", { agentId: null }));
+    expect(svc.linkAgent).toHaveBeenLastCalledWith("jarvis", null);
+    svc.linkAgent.mockReturnValueOnce({ ok: false, status: 409, error: "taken" });
+    res = await capp.request("/brains/jarvis/consolidation", send("PUT", { agentId: "x" }));
+    expect(res.status).toBe(409);
+    expect(svc.configure).not.toHaveBeenCalled();
+  });
+
+  it("PUT on an embedded brain configures it; run and sync pass results and refusals on", async () => {
+    const wiki = join(tmp, "wiki-cons");
+    mkdirSync(wiki, { recursive: true });
+    writeFileSync(join(wiki, "SCHEMA.md"), "# s\n");
+    writeFileSync(join(wiki, "index.md"), "# i\n");
+    const sup = { start: vi.fn(), stop: vi.fn(async () => {}), restart: vi.fn(async () => {}), status: vi.fn(() => ({ state: "running" }) as BrainRuntimeStatus), waitRunning: vi.fn(async () => false), logTail: vi.fn(() => []) };
+    const eapp = new Hono();
+    registerBrainRoutes(eapp, { fetch: fakeFetch, consolidation: svc as never, supervisor: sup, readyWaitMs: 1 });
+    expect((await eapp.request("/brains", send("POST", { kind: "embedded", name: "Work", wikiDir: wiki }))).status).toBe(201);
+
+    let res = await eapp.request("/brains/work/consolidation", send("PUT", { enabled: true, threshold: 5 }));
+    expect(res.status).toBe(200);
+    expect(svc.configure).toHaveBeenCalledWith("work", { enabled: true, threshold: 5 });
+    svc.configure.mockReturnValueOnce({ ok: false, status: 400, error: "bad cron" });
+    res = await eapp.request("/brains/work/consolidation", send("PUT", { schedule: "x" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("bad cron");
+
+    res = await eapp.request("/brains/work/consolidation/run", send("POST", {}));
+    expect(await res.json()).toMatchObject({ started: true, consolidation: { agent: { id: "a1" } } });
+    expect(svc.trigger).toHaveBeenCalledWith("work", "manual");
+    svc.trigger.mockResolvedValueOnce({ ok: true, started: false, run: { id: "s", status: "skipped" } });
+    expect(await (await eapp.request("/brains/work/consolidation/run", send("POST", {}))).json()).toMatchObject({ started: false, run: { status: "skipped" } });
+    svc.trigger.mockResolvedValueOnce({ ok: false, status: 409, error: "in progress" });
+    expect((await eapp.request("/brains/work/consolidation/run", send("POST", {}))).status).toBe(409);
+
+    res = await eapp.request("/brains/work/consolidation/sync", send("POST", {}));
+    expect(await res.json()).toMatchObject({ run: { status: "success" } });
+    svc.retrySync.mockResolvedValueOnce({ ok: false, status: 409, error: "no clone" });
+    expect((await eapp.request("/brains/work/consolidation/sync", send("POST", {}))).status).toBe(409);
+
+    // Deleting the brain lets the service forget it (cron, its agent) first.
+    expect((await eapp.request("/brains/work", { method: "DELETE" })).status).toBe(200);
+    expect(svc.forget).toHaveBeenCalledWith(expect.objectContaining({ slug: "work" }));
+  });
+
+  it("says so when the server has no consolidation service", async () => {
+    await createJarvis();
+    const res = await app.request("/brains/jarvis/consolidation");
+    expect(res.status).toBe(503);
+    const list = await (await app.request("/brains")).json();
+    expect(list.brains[0].consolidationSummary).toBeUndefined();
+  });
+});

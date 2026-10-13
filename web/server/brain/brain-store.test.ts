@@ -39,6 +39,9 @@ import {
   readServerSkill,
   sameUrl,
   updateBrain,
+  consolidationOf,
+  mergeConsolidation,
+  updateConsolidation,
   type BrainConfig,
 } from "./brain-store.js";
 import { createDomain, ensureGlobalDomain, getDomain, updateDomain } from "../domain-store.js";
@@ -425,5 +428,77 @@ describe("embedded brains", () => {
     expect(getBrain("work")!.embedded).toEqual({ wikiDir: raw.embedded.wikiDir, autostart: true, redactSecrets: true, language: "auto" });
     writeFileSync(path, JSON.stringify({ ...raw, embedded: { wikiDir: "relative" } }));
     expect(getBrain("work")).toBeUndefined();
+  });
+});
+
+/**
+ * Consolidation settings in brain.json: off by default, the defaults of the
+ * design (05:00, local, Claude, threshold 10, model absent = latest Sonnet
+ * resolved at each run), validated patches (a cron croner accepts and not
+ * more often than every 15 minutes; master/pr refused for now), and other
+ * edits of the brain keeping them.
+ */
+describe("consolidation settings", () => {
+  function embedded() {
+    const wiki = join(tmp, "wiki-c");
+    mkdirSync(wiki, { recursive: true });
+    writeFileSync(join(wiki, "SCHEMA.md"), "# s\n");
+    writeFileSync(join(wiki, "index.md"), "# i\n");
+    const r = createEmbeddedBrain({ name: "Work", wikiDir: wiki });
+    if (!r.ok) throw new Error(r.error);
+    return r.brain;
+  }
+
+  it("is off with the design's defaults until set", () => {
+    const b = embedded();
+    expect(b.consolidation).toBeUndefined();
+    expect(consolidationOf(b)).toEqual({ enabled: false, schedule: "0 5 * * *", mode: "local", backend: "claude", threshold: 10 });
+  });
+
+  it("saves a valid patch and keeps it through other edits", () => {
+    embedded();
+    const r = updateConsolidation("work", { enabled: true, schedule: "30 4 * * 1-5", threshold: 3, model: "claude-opus-5-5", agentId: "a1" });
+    expect(r.ok).toBe(true);
+    expect(getBrain("work")?.consolidation).toEqual({ enabled: true, schedule: "30 4 * * 1-5", mode: "local", backend: "claude", model: "claude-opus-5-5", threshold: 3, agentId: "a1" });
+    updateBrain("work", { about: "New about" });
+    expect(getBrain("work")?.consolidation?.agentId).toBe("a1");
+    // Switching backend drops a model of the other CLI; null/"" go back to the default.
+    updateConsolidation("work", { backend: "codex" });
+    expect(getBrain("work")?.consolidation?.model).toBeUndefined();
+    updateConsolidation("work", { model: "gpt-5.5", agentId: null });
+    expect(getBrain("work")?.consolidation).toMatchObject({ backend: "codex", model: "gpt-5.5" });
+    expect(getBrain("work")?.consolidation?.agentId).toBeUndefined();
+    updateConsolidation("work", { model: "", mode: "local" });
+    expect(getBrain("work")?.consolidation?.model).toBeUndefined();
+    expect(updateConsolidation("nope", {})).toMatchObject({ ok: false, status: 404 });
+  });
+
+  it("refuses invalid values", () => {
+    const cur = consolidationOf({});
+    const bad: [Record<string, unknown>, RegExp][] = [
+      [{ enabled: "yes" }, /true or false/],
+      [{ schedule: "" }, /schedule is required/],
+      [{ schedule: "not a cron" }, /./],
+      [{ schedule: "* * * * *" }, /more often than every 15 minutes/],
+      [{ mode: "master" }, /Only the local mode/],
+      [{ backend: "gpt" }, /claude or codex/],
+      [{ model: "bad model; rm" }, /Invalid model id/],
+      [{ threshold: 0 }, /from 1 to 1000/],
+      [{ threshold: 2.5 }, /from 1 to 1000/],
+      [{ agentId: 3 }, /Invalid agent id/],
+    ];
+    for (const [patch, error] of bad) expect(mergeConsolidation(cur, patch)).toMatch(error);
+  });
+
+  it("normalizes a hand-edited brain.json", () => {
+    embedded();
+    const file = join(brainDir("work"), "brain.json");
+    const json = JSON.parse(readFileSync(file, "utf8"));
+    json.consolidation = { enabled: "yes", mode: "pr", backend: "codex", threshold: 5000, schedule: "  ", model: " m1 " };
+    writeFileSync(file, JSON.stringify(json));
+    expect(getBrain("work")?.consolidation).toEqual({ enabled: false, schedule: "0 5 * * *", mode: "pr", backend: "codex", model: "m1", threshold: 1000 });
+    json.consolidation = { threshold: -1 };
+    writeFileSync(file, JSON.stringify(json));
+    expect(getBrain("work")?.consolidation?.threshold).toBe(10);
   });
 });
