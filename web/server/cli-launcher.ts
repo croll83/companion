@@ -1120,6 +1120,7 @@ export class CliLauncher {
     try {
       const prepared = prepareCodexDomainHome(codexHome, info.domain, {
         userAgentsMdPath: join(getLegacyCodexHome(), "AGENTS.md"),
+        sessionId,
       });
       if (this.syncCodexMcp(sessionId, codexHome, prepared.mcp)) prepared.commit();
       // A sandboxed (workspace-write) session must still be able to save notes.

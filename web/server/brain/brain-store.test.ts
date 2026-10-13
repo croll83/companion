@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -24,6 +24,10 @@ import {
   brainSkillDir,
   brainSkillMarkdown,
   brainUrls,
+  brainDataDir,
+  brainLogPath,
+  checkWikiDir,
+  createEmbeddedBrain,
   createRemoteBrain,
   deleteBrain,
   ensureBrainPlugin,
@@ -348,5 +352,78 @@ describe("deleteBrain", () => {
     expect(getDomain("ops")?.brain).toBe("other");
     expect(existsSync(brainDir("lab"))).toBe(false);
     expect(deleteBrain("lab")).toMatchObject({ ok: false, status: 404 });
+  });
+});
+
+describe("embedded brains", () => {
+  function wiki(name = "wiki", files = ["SCHEMA.md", "index.md"]): string {
+    const dir = join(tmp, name);
+    mkdirSync(dir, { recursive: true });
+    for (const f of files) writeFileSync(join(dir, f), "# x\n");
+    return dir;
+  }
+
+  // Only an existing wiki folder (SCHEMA.md and index.md at its root) is accepted: no scaffolding in this phase.
+  it("checks the wiki folder", () => {
+    expect(checkWikiDir(wiki())).toEqual({ ok: true, path: join(tmp, "wiki") });
+    expect(checkWikiDir(undefined)).toMatchObject({ ok: false, error: "The wiki folder is required" });
+    expect(checkWikiDir("relative/path")).toMatchObject({ ok: false, error: expect.stringMatching(/absolute/) });
+    expect(checkWikiDir(join(tmp, "nope"))).toMatchObject({ ok: false, error: expect.stringMatching(/does not exist/) });
+    writeFileSync(join(tmp, "file.md"), "x");
+    expect(checkWikiDir(join(tmp, "file.md"))).toMatchObject({ ok: false, error: expect.stringMatching(/not a folder/) });
+    expect(checkWikiDir(wiki("half", ["SCHEMA.md"]))).toMatchObject({ ok: false, error: expect.stringMatching(/index.md missing/) });
+    // "~/" is the home folder (only stat'ed here, never written).
+    expect(checkWikiDir("~/no-such-brain-wiki-xyz")).toMatchObject({ ok: false, error: `The folder ${join(homedir(), "no-such-brain-wiki-xyz")} does not exist` });
+  });
+
+  it("creates an embedded brain with defaults, a private secret and no domain", () => {
+    const r = createEmbeddedBrain({ name: "Work notes", wikiDir: `${wiki()}/`, about: " Team wiki " });
+    if (!r.ok) throw new Error(r.error);
+    expect(r.brain).toMatchObject({
+      slug: "work-notes", kind: "embedded", about: "Team wiki",
+      embedded: { wikiDir: join(tmp, "wiki"), autostart: true, redactSecrets: true, language: "auto" },
+      skill: { source: "generated" },
+    });
+    expect(r.brain.remote).toBeUndefined();
+    expect(getBrain("work-notes")).toEqual(r.brain);
+    expect(readBrainToken("work-notes")).toMatch(/^[0-9a-f]{64}$/);
+    expect(statSync(join(brainDir("work-notes"), "secret")).mode & 0o777).toBe(0o600);
+    expect(brainDataDir("work-notes")).toBe(join(brainDir("work-notes"), "data"));
+    expect(brainLogPath("work-notes")).toBe(join(brainDir("work-notes"), "logs", "brain.log"));
+    expect(existsSync(join(brainSkillDir("work-notes"), "SKILL.md"))).toBe(true);
+  });
+
+  it("validates the options and refuses duplicates", () => {
+    const dir = wiki();
+    expect(createEmbeddedBrain({ name: "", wikiDir: dir })).toMatchObject({ ok: false, status: 400 });
+    expect(createEmbeddedBrain({ name: "!!", wikiDir: dir })).toMatchObject({ ok: false, status: 400 });
+    expect(createEmbeddedBrain({ name: "W", wikiDir: dir, about: 3 })).toMatchObject({ ok: false, status: 400 });
+    expect(createEmbeddedBrain({ name: "W", wikiDir: join(tmp, "missing") })).toMatchObject({ ok: false, status: 400 });
+    expect(createEmbeddedBrain({ name: "W", wikiDir: dir, autostart: "yes" })).toMatchObject({ ok: false, error: "autostart must be true or false" });
+    expect(createEmbeddedBrain({ name: "W", wikiDir: dir, language: "fr" })).toMatchObject({ ok: false, error: expect.stringMatching(/language must be/) });
+    const r = createEmbeddedBrain({ name: "W", wikiDir: dir, autostart: false, redactSecrets: false, language: "it" });
+    expect(r).toMatchObject({ ok: true, brain: { embedded: { autostart: false, redactSecrets: false, language: "it" } } });
+    expect(createEmbeddedBrain({ name: "W", wikiDir: dir })).toMatchObject({ ok: false, status: 409 });
+  });
+
+  // The secret of an embedded brain is its key: an update must never delete it like a remote brain's token.
+  it("updates the embedded options and keeps the secret", () => {
+    createEmbeddedBrain({ name: "Work", wikiDir: wiki() });
+    const secret = readBrainToken("work");
+    const r = updateBrain("work", { name: "Work 2", language: "en", redactSecrets: false });
+    expect(r).toMatchObject({ ok: true, brain: { name: "Work 2", embedded: { language: "en", redactSecrets: false, autostart: true } } });
+    expect(readBrainToken("work")).toBe(secret);
+    expect(updateBrain("work", { autostart: 1 })).toMatchObject({ ok: false, status: 400 });
+    expect(updateBrain("work", { language: "xx" })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("normalizes a hand-edited embedded config; a broken one is skipped", () => {
+    createEmbeddedBrain({ name: "Work", wikiDir: wiki() });
+    const path = join(brainDir("work"), "brain.json");
+    const raw = JSON.parse(readFileSync(path, "utf-8"));
+    writeFileSync(path, JSON.stringify({ ...raw, embedded: { wikiDir: raw.embedded.wikiDir, language: "klingon" } }));
+    expect(getBrain("work")!.embedded).toEqual({ wikiDir: raw.embedded.wikiDir, autostart: true, redactSecrets: true, language: "auto" });
+    writeFileSync(path, JSON.stringify({ ...raw, embedded: { wikiDir: "relative" } }));
+    expect(getBrain("work")).toBeUndefined();
   });
 });

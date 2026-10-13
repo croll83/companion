@@ -45,6 +45,9 @@ import { checkHostsEntry } from "./hosts-check.js";
 import { checkClaudeCli } from "./claude-cli-check.js";
 import { warnIfBunOutdated } from "./bun-runtime-check.js";
 import { warnIfLegacyTailscaleFunnel } from "./legacy-tailscale-funnel.js";
+import { setCompanionPort } from "./brain/brain-endpoints.js";
+import { brainSupervisor } from "./brain/brain-supervisor.js";
+import { handleBrainProxy } from "./brain/brain-proxy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -57,6 +60,8 @@ const host = process.env.HOST || "0.0.0.0";
 const sessionStore = new SessionStore(process.env.COMPANION_SESSION_DIR);
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
+// Sessions reach embedded brains through this port (/brains/<slug>/mcp).
+setCompanionPort(port);
 const worktreeTracker = new WorktreeTracker();
 const terminalManager = new TerminalManager();
 const prPoller = new PRPoller(wsBridge);
@@ -211,6 +216,12 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
     const reqIp = server.requestIP(req);
     const reqAddr = reqIp?.address ?? "";
     const isLocalhost = reqAddr === "127.0.0.1" || reqAddr === "::1" || reqAddr === "::ffff:127.0.0.1";
+
+    // ── Embedded brains' MCP proxy — before Hono's auth: loopback + brn_ token (brain-proxy.ts)
+    if (url.pathname.startsWith("/brains/")) {
+      const proxied = await handleBrainProxy(req, reqAddr);
+      if (proxied) return proxied;
+    }
 
     // ── Browser WebSocket — connects to a specific session ─────────────
     const browserMatch = url.pathname.match(/^\/ws\/browser\/([a-f0-9-]+)$/);
@@ -383,6 +394,10 @@ agentExecutor.startAll();
 // After the orchestrator is wired: a wake-up due at startup relaunches its session.
 wakeupScheduler.startAll();
 
+// ── Embedded brains ─────────────────────────────────────────────────────────
+// Children start in the background: the proxy holds early requests up to 10 s.
+brainSupervisor.startAll();
+
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).
 telegramBridgeManager.start(port);
@@ -427,6 +442,7 @@ setInterval(() => {
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 function gracefulShutdown() {
   telegramBridgeManager.stop();
+  brainSupervisor.stopAll();
   closeLogFile();
   process.exit(0);
 }

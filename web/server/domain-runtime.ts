@@ -279,7 +279,7 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   const runtime = domainRuntimeDir(sessionId);
   ensurePrivateDir(runtime);
 
-  const brain = brainForDomain(r);
+  const brain = brainForDomain(r, sessionId);
   const args: string[] = ["--plugin-dir", r.globalDir];
   if (!r.isGlobal) args.push("--plugin-dir", r.dir);
   if (brain) args.push("--plugin-dir", brain.pluginDir);
@@ -626,10 +626,11 @@ export function linkCodexSkills(
 export function prepareCodexDomainHome(
   codexHome: string,
   slug: string | undefined,
-  opts: { userAgentsMdPath: string },
+  opts: { userAgentsMdPath: string; sessionId?: string },
 ): { resolved: ResolvedDomain; mcp: CodexDomainMcp; env: Record<string, string>; commit: () => void } {
   const r = resolveDomain(slug);
-  const brain = brainForDomain(r);
+  // The session id names the author of an embedded brain's notes (its brn_ token).
+  const brain = brainForDomain(r, opts.sessionId);
   const agentsPath = join(codexHome, "AGENTS.md");
   try {
     // A link (to ~/.codex/AGENTS.md, from before the session had a domain) is
