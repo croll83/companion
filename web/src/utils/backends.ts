@@ -13,6 +13,8 @@ export {
   isValidEffort,
 } from "../../server/effort.js";
 export type { EffortLevel } from "../../server/effort.js";
+import { CLAUDE_MODELS as SHARED_CLAUDE_MODELS } from "../../server/claude-models.js";
+export { latestSonnet } from "../../server/claude-models.js";
 
 export interface ModelOption {
   value: string;
@@ -52,14 +54,8 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
 
 // ─── Static fallbacks ────────────────────────────────────────────────────────
 
-export const CLAUDE_MODELS: ModelOption[] = [
-  { value: "claude-fable-5-1", label: "Fable 5.1", icon: "" },
-  { value: "claude-opus-5-5", label: "Opus 5.5", icon: "" },
-  { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
-  { value: "claude-opus-4-6", label: "Opus 4.6", icon: "" },
-  { value: "claude-sonnet-5-5", label: "Sonnet 5.5", icon: "" },
-  { value: "claude-haiku-5-5", label: "Haiku 5.5", icon: "" },
-];
+/** The Claude catalog lives in server/claude-models.ts: the server resolves "latest Sonnet" from it. */
+export const CLAUDE_MODELS: ModelOption[] = SHARED_CLAUDE_MODELS;
 
 /**
  * Offline fallback only — the picker normally comes from Codex's own catalogue
