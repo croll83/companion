@@ -6,6 +6,10 @@ import { HealthDot, healthText, type BrainHealthState } from "./BrainList.js";
 import { BrainSkill } from "./BrainSkill.js";
 import { BrainRuntime } from "./BrainRuntime.js";
 import { EmbeddedBrainForm } from "./EmbeddedBrainForm.js";
+import { BrainLoginChips } from "./BrainLoginChips.js";
+import { BrainPages } from "./BrainPages.js";
+import { BrainInbox } from "./BrainInbox.js";
+import { WikiCheck } from "./WikiCheck.js";
 
 export interface BrainActions {
   onUpdate: (slug: string, input: BrainInput) => Promise<boolean>;
@@ -35,13 +39,14 @@ function authText(brain: BrainInfo): string {
  * OAuth brains: Companion holds no token. Each CLI (Claude Code, Codex) signs
  * in once, from any session of a domain that uses the brain, through the
  * session's MCP panel; the tokens stay in that CLI's own store and serve all
- * its sessions.
+ * its sessions. The chips show each CLI's state from its active sessions.
  */
 function OAuthSignIn({ brain }: { brain: BrainInfo }) {
   const domain = brain.domains.find((d) => d.slug !== "global") ?? brain.domains[0];
   return (
     <section aria-label="Sign-in" className="p-2.5 rounded-lg border border-cc-border text-[12px] space-y-1">
       <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Sign-in</h3>
+      <BrainLoginChips brain={brain} />
       <p>
         Sign in once per CLI (Claude Code and Codex each keep their own tokens, shared by all their sessions): open a session of a
         domain that uses this brain, then its MCP panel → <strong>{brain.serverName}</strong> → <strong>Sign in</strong>. Companion never
@@ -80,11 +85,15 @@ function TestResult({ result }: { result: BrainTestResult }) {
   );
 }
 
+type Tab = "overview" | "pages" | "inbox";
+
 /**
  * One brain: where it points, its health and a connection test, which
  * domains use it (brains are assigned from each domain's page, one brain per
  * domain), plugins serving the same URL with "Adopt plugin as brain", its
- * skill, editing and removal.
+ * skill, editing and removal. An embedded brain also has the Pages tab (read
+ * its wiki), the Inbox tab (notes, Dismiss, Add source) and a wiki check
+ * with one-click fixes in its overview.
  */
 export function BrainDetail({
   brain,
@@ -103,8 +112,15 @@ export function BrainDetail({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<BrainTestResult | null>(null);
+  const [tab, setTab] = useState<Tab>("overview");
   const collisions = brain.collisions.filter((c) => c.domains.length > 0);
   const embedded = brain.kind === "embedded";
+  const waiting = health && health !== "checking" ? health.inbox?.pending ?? 0 : 0;
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "pages", label: "Pages" },
+    { id: "inbox", label: waiting ? `Inbox (${waiting})` : "Inbox" },
+  ];
 
   const runTest = async () => {
     setTesting(true);
@@ -127,127 +143,163 @@ export function BrainDetail({
         </dl>
       </header>
 
-      <section aria-label="Connection" className="space-y-1">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Connection</h3>
-        <div className="flex items-center gap-2 text-[12px]">
-          <HealthDot health={health} />
-          <span className="min-w-0 break-words">{healthText(health)}</span>
-        </div>
-        <div className="flex gap-2">
-          <button type="button" onClick={() => actions.onCheckHealth(brain.slug)} disabled={health === "checking"} className="px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-active disabled:opacity-50 cursor-pointer">
-            Check again
-          </button>
-          <button type="button" onClick={() => void runTest()} disabled={testing} className="px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-active disabled:opacity-50 cursor-pointer disabled:cursor-wait">
-            {testing ? "Testing…" : "Test connection"}
-          </button>
-        </div>
-        {test && <TestResult result={test} />}
-      </section>
-
       {embedded && (
-        <BrainRuntime
-          key={brain.runtime?.state ?? "stopped"}
-          brain={brain}
-          busy={busy}
-          onAction={(action) => actions.onProcess(brain.slug, action)}
-          loadLogs={() => actions.onLoadLogs(brain.slug)}
-        />
+        <div role="tablist" aria-label="Brain views" className="flex gap-1 border-b border-cc-border">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              id={`brain-tab-${t.id}`}
+              aria-selected={tab === t.id}
+              aria-controls={`brain-panel-${t.id}`}
+              onClick={() => setTab(t.id)}
+              className={`px-3 py-1.5 -mb-px border-b-2 text-[12px] cursor-pointer ${tab === t.id ? "border-cc-primary text-cc-fg font-medium" : "border-transparent text-cc-muted hover:text-cc-fg"}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
       )}
 
-      {brain.remote?.auth.mode === "oauth" && <OAuthSignIn brain={brain} />}
-
-      {collisions.map((c) => (
-        <div key={c.pluginId} role="alert" className="p-2.5 rounded-lg border border-cc-warning/40 bg-cc-warning/10 text-[12px] space-y-1.5">
-          <p>
-            The plugin <strong>{c.pluginName}</strong> serves the same MCP server and is on in {c.domains.map((d) => (d === "global" ? "GLOBAL" : d)).join(", ")}.
-            Where the brain is on, the brain wins and the plugin is skipped. Adopting it gives those domains this brain and turns the plugin off there.
-          </p>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void actions.onAdopt(brain.slug, c.pluginId)}
-            className="px-2.5 py-1 rounded-md text-[12px] font-medium bg-cc-primary text-white hover:bg-cc-primary-hover disabled:opacity-50 cursor-pointer"
-          >
-            Adopt plugin as brain
-          </button>
+      {embedded && tab === "pages" && (
+        <div role="tabpanel" id="brain-panel-pages" aria-labelledby="brain-tab-pages">
+          <BrainPages slug={brain.slug} />
         </div>
-      ))}
+      )}
+      {embedded && tab === "inbox" && (
+        <div role="tabpanel" id="brain-panel-inbox" aria-labelledby="brain-tab-inbox">
+          <BrainInbox slug={brain.slug} onChanged={() => actions.onCheckHealth(brain.slug)} />
+        </div>
+      )}
 
-      <section aria-label="Domains using it">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Domains</h3>
-        {brain.domains.length === 0 ? (
-          <p className="text-[12px] text-cc-muted">
-            On no domain. Brains are off by default: choose this one in a domain's page (one brain per domain).
-          </p>
-        ) : (
-          <ul className="mt-1 flex flex-wrap gap-1.5">
-            {brain.domains.map((d) => (
-              <li key={d.slug}>
-                <a href={domainsHash(d.slug)} className="inline-block px-2 py-0.5 rounded-md border border-cc-border text-[12px] hover:bg-cc-hover">
-                  {d.slug === "global" ? "GLOBAL · default for every domain" : d.own ? d.name : `${d.name} (as in GLOBAL)`}
-                </a>
-              </li>
-            ))}
-          </ul>
-        )}
-        <p className="mt-1 text-[10px] text-cc-muted">
-          Claude Code sessions get the <span className="font-mono-code">{brain.serverName}</span> tools and the skill; Codex sessions get the
-          same tools, the skill, and a line in their AGENTS.md. Changes apply when a session starts or reloads.
-        </p>
-      </section>
-
-      <BrainSkill
-        key={`${brain.skill.source}:${brain.skill.custom ?? ""}:${brain.skill.server?.fetchedAt ?? ""}`}
-        brain={brain}
-        busy={busy}
-        onSave={(skill) => actions.onUpdate(brain.slug, { skill })}
-        onRefresh={() => actions.onRefreshSkill(brain.slug)}
-      />
-
-      <section aria-label="Settings" className="space-y-2">
-        {editing && embedded ? (
-          <EmbeddedBrainForm
-            brain={brain}
-            busy={busy}
-            onCancel={() => setEditing(false)}
-            onSubmit={(input) => actions.onUpdate(brain.slug, input as BrainInput).then((ok) => { if (ok) setEditing(false); })}
-          />
-        ) : editing ? (
-          <BrainForm
-            brain={brain}
-            busy={busy}
-            onCancel={() => setEditing(false)}
-            onSubmit={(input) => actions.onUpdate(brain.slug, input).then((ok) => { if (ok) setEditing(false); })}
-          />
-        ) : (
+      {tab === "overview" && (
+        <div className="space-y-4" {...(embedded ? { role: "tabpanel", id: "brain-panel-overview", "aria-labelledby": "brain-tab-overview" } : {})}>
+        <section aria-label="Connection" className="space-y-1">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Connection</h3>
+          <div className="flex items-center gap-2 text-[12px]">
+            <HealthDot health={health} />
+            <span className="min-w-0 break-words">{healthText(health)}</span>
+          </div>
           <div className="flex gap-2">
-            <button type="button" onClick={() => setEditing(true)} className="px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-active cursor-pointer">
-              Edit brain
+            <button type="button" onClick={() => actions.onCheckHealth(brain.slug)} disabled={health === "checking"} className="px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-active disabled:opacity-50 cursor-pointer">
+              Check again
             </button>
-            <button type="button" onClick={() => setConfirmDelete(true)} className="px-2.5 py-1 rounded-md text-[12px] text-cc-error hover:bg-cc-error/10 cursor-pointer">
-              Remove brain…
+            <button type="button" onClick={() => void runTest()} disabled={testing} className="px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-active disabled:opacity-50 cursor-pointer disabled:cursor-wait">
+              {testing ? "Testing…" : "Test connection"}
             </button>
           </div>
+          {test && <TestResult result={test} />}
+        </section>
+
+        {embedded && (
+          <BrainRuntime
+            key={brain.runtime?.state ?? "stopped"}
+            brain={brain}
+            busy={busy}
+            onAction={(action) => actions.onProcess(brain.slug, action)}
+            loadLogs={() => actions.onLoadLogs(brain.slug)}
+          />
         )}
-        {confirmDelete && (
-          <div role="alert" className="p-2 rounded-lg border border-cc-error/30 text-[12px] space-y-1.5">
+
+        {embedded && <WikiCheck slug={brain.slug} onFixed={() => actions.onCheckHealth(brain.slug)} />}
+
+        {brain.remote?.auth.mode === "oauth" && <OAuthSignIn brain={brain} />}
+
+        {collisions.map((c) => (
+          <div key={c.pluginId} role="alert" className="p-2.5 rounded-lg border border-cc-warning/40 bg-cc-warning/10 text-[12px] space-y-1.5">
             <p>
-              Remove <strong>{brain.name}</strong>? {brain.domains.length > 0 ? `${brain.domains.length} domain(s) stop using it. ` : ""}
-              {embedded
-                ? "Companion stops it and deletes its settings, inbox and log; the wiki folder is not touched."
-                : "Companion forgets its settings and token; the brain itself (its server and wiki) is not touched."}
+              The plugin <strong>{c.pluginName}</strong> serves the same MCP server and is on in {c.domains.map((d) => (d === "global" ? "GLOBAL" : d)).join(", ")}.
+              Where the brain is on, the brain wins and the plugin is skipped. Adopting it gives those domains this brain and turns the plugin off there.
             </p>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void actions.onAdopt(brain.slug, c.pluginId)}
+              className="px-2.5 py-1 rounded-md text-[12px] font-medium bg-cc-primary text-white hover:bg-cc-primary-hover disabled:opacity-50 cursor-pointer"
+            >
+              Adopt plugin as brain
+            </button>
+          </div>
+        ))}
+
+        <section aria-label="Domains using it">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Domains</h3>
+          {brain.domains.length === 0 ? (
+            <p className="text-[12px] text-cc-muted">
+              On no domain. Brains are off by default: choose this one in a domain's page (one brain per domain).
+            </p>
+          ) : (
+            <ul className="mt-1 flex flex-wrap gap-1.5">
+              {brain.domains.map((d) => (
+                <li key={d.slug}>
+                  <a href={domainsHash(d.slug)} className="inline-block px-2 py-0.5 rounded-md border border-cc-border text-[12px] hover:bg-cc-hover">
+                    {d.slug === "global" ? "GLOBAL · default for every domain" : d.own ? d.name : `${d.name} (as in GLOBAL)`}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-1 text-[10px] text-cc-muted">
+            Claude Code sessions get the <span className="font-mono-code">{brain.serverName}</span> tools and the skill; Codex sessions get the
+            same tools, the skill, and a line in their AGENTS.md. Changes apply when a session starts or reloads.
+          </p>
+        </section>
+
+        <BrainSkill
+          key={`${brain.skill.source}:${brain.skill.custom ?? ""}:${brain.skill.server?.fetchedAt ?? ""}`}
+          brain={brain}
+          busy={busy}
+          onSave={(skill) => actions.onUpdate(brain.slug, { skill })}
+          onRefresh={() => actions.onRefreshSkill(brain.slug)}
+        />
+
+        <section aria-label="Settings" className="space-y-2">
+          {editing && embedded ? (
+            <EmbeddedBrainForm
+              brain={brain}
+              busy={busy}
+              onCancel={() => setEditing(false)}
+              onSubmit={(input) => actions.onUpdate(brain.slug, input as BrainInput).then((ok) => { if (ok) setEditing(false); })}
+            />
+          ) : editing ? (
+            <BrainForm
+              brain={brain}
+              busy={busy}
+              onCancel={() => setEditing(false)}
+              onSubmit={(input) => actions.onUpdate(brain.slug, input).then((ok) => { if (ok) setEditing(false); })}
+            />
+          ) : (
             <div className="flex gap-2">
-              <button type="button" onClick={() => void actions.onDelete(brain.slug)} className="px-2.5 py-1 rounded-md bg-cc-error/15 text-cc-error hover:bg-cc-error/25 cursor-pointer">
-                Remove brain
+              <button type="button" onClick={() => setEditing(true)} className="px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-active cursor-pointer">
+                Edit brain
               </button>
-              <button type="button" onClick={() => setConfirmDelete(false)} className="px-2.5 py-1 rounded-md text-cc-muted hover:bg-cc-hover cursor-pointer">
-                Cancel
+              <button type="button" onClick={() => setConfirmDelete(true)} className="px-2.5 py-1 rounded-md text-[12px] text-cc-error hover:bg-cc-error/10 cursor-pointer">
+                Remove brain…
               </button>
             </div>
-          </div>
-        )}
-      </section>
+          )}
+          {confirmDelete && (
+            <div role="alert" className="p-2 rounded-lg border border-cc-error/30 text-[12px] space-y-1.5">
+              <p>
+                Remove <strong>{brain.name}</strong>? {brain.domains.length > 0 ? `${brain.domains.length} domain(s) stop using it. ` : ""}
+                {embedded
+                  ? "Companion stops it and deletes its settings, inbox and log; the wiki folder is not touched."
+                  : "Companion forgets its settings and token; the brain itself (its server and wiki) is not touched."}
+              </p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => void actions.onDelete(brain.slug)} className="px-2.5 py-1 rounded-md bg-cc-error/15 text-cc-error hover:bg-cc-error/25 cursor-pointer">
+                  Remove brain
+                </button>
+                <button type="button" onClick={() => setConfirmDelete(false)} className="px-2.5 py-1 rounded-md text-cc-muted hover:bg-cc-hover cursor-pointer">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+        </div>
+      )}
     </article>
   );
 }

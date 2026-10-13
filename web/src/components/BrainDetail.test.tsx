@@ -3,10 +3,15 @@
  * One brain: URLs and auth (never a token), health and "Test connection",
  * the domains using it (links to each), the collision banner with "Adopt
  * plugin as brain", the skill, editing and removal with confirmation.
+ * Embedded brains: the Overview / Pages / Inbox tabs (the inbox count from
+ * health) and the wiki check; OAuth brains: the per-CLI sign-in chips.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
+const mockApi = vi.hoisted(() => ({ brainPages: vi.fn(), brainPage: vi.fn(), brainInbox: vi.fn(), brainLint: vi.fn(), fixBrainLint: vi.fn() }));
+vi.mock("../api.js", () => ({ api: mockApi }));
+
 import { BrainDetail, type BrainActions } from "./BrainDetail.js";
 import { embeddedBrain, jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
 import type { BrainInfo, BrainTestResult } from "../api.js";
@@ -190,5 +195,45 @@ describe("BrainDetail", () => {
     const { container } = render(<BrainDetail brain={embeddedBrain({ runtime: { state: "failed", crashes: 5, cause: "The wiki folder is missing.", action: "Restore it." } })} health={{ reachable: false, checkedAt: 0 }} desktop busy={false} actions={actions()} />);
     await screen.findByLabelText("Brain log");
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("switches an embedded brain between Overview, Pages and Inbox", async () => {
+    mockApi.brainPages.mockResolvedValue({ pages: [{ slug: "a", path: "concepts/a.md", title: "Alpha", type: "concept", tags: [], updated: null }] });
+    mockApi.brainInbox.mockResolvedValue({ counts: { pending: 2 }, notes: [] });
+    const a = actions();
+    render(<BrainDetail brain={embeddedBrain()} health={{ reachable: true, pages: 1, inbox: { pending: 2 }, checkedAt: 0 }} desktop busy={false} actions={a} />);
+    const tabs = screen.getByRole("tablist", { name: "Brain views" });
+    expect(within(tabs).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("region", { name: "Wiki check" })).toBeInTheDocument();
+    fireEvent.click(within(tabs).getByRole("tab", { name: "Pages" }));
+    expect(await screen.findByRole("button", { name: /Alpha/ })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Brain process" })).toBeNull();
+    fireEvent.click(within(tabs).getByRole("tab", { name: "Inbox (2)" }));
+    expect(await screen.findByText("No notes waiting.")).toBeInTheDocument();
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "brain-tab-inbox");
+    fireEvent.click(within(tabs).getByRole("tab", { name: "Overview" }));
+    expect(screen.getByRole("region", { name: "Brain process" })).toBeInTheDocument();
+    // A fix of the wiki check rechecks the brain's health (pages, inbox).
+    mockApi.brainLint.mockResolvedValueOnce({ ok: false, errors: 1, warnings: 0, pages: 1, advice: [{ id: "log-missing", level: "warn", sentence: "There is no log.md.", paths: ["log.md"], count: 1, fix: { id: "create-log", label: "Create log.md" } }] });
+    mockApi.fixBrainLint.mockResolvedValueOnce({ done: "log.md created", lint: { ok: true, errors: 0, warnings: 0, pages: 1, advice: [] } });
+    fireEvent.click(screen.getByRole("button", { name: "Check the wiki" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create log.md" }));
+    await waitFor(() => expect(a.onCheckHealth).toHaveBeenCalledWith("work"));
+  });
+
+  it("passes axe accessibility scan for an embedded brain's tabs", async () => {
+    mockApi.brainPages.mockResolvedValue({ pages: [] });
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<BrainDetail brain={embeddedBrain()} health={{ reachable: true, checkedAt: 0 }} desktop busy={false} actions={actions()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Pages" }));
+    await screen.findByText(/No pages yet/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no tabs for a remote brain, and shows the sign-in chips of an OAuth brain", () => {
+    setup(oauthBrain());
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.getByRole("list", { name: "Sign-in state" })).toHaveTextContent("Claude Code: unknown");
+    expect(screen.queryByRole("region", { name: "Wiki check" })).toBeNull();
   });
 });

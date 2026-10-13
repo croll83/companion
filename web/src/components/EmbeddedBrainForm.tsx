@@ -10,11 +10,12 @@ const LANGUAGES: { value: BrainLanguage; label: string }[] = [
 ];
 
 /**
- * "Embedded brain (existing wiki folder)" (no `brain`) and its edit form
- * (with one). Companion runs the brain server itself on a wiki folder of this
- * machine (SCHEMA.md and index.md at its root; Companion never writes it).
- * Creating a new wiki from a template comes later. The folder of an
- * existing brain cannot change: another folder is another brain.
+ * "Adopt existing folder" (no `brain`, inside AdoptBrainFlow) and the edit
+ * form of an embedded brain (with one). Companion runs the brain server
+ * itself on a wiki folder of this machine (SCHEMA.md and index.md at its
+ * root; when they are missing, AdoptBrainFlow offers to create them). A new
+ * wiki from the template is NewBrainWizard. The folder of an existing brain
+ * cannot change: another folder is another brain.
  */
 export function EmbeddedBrainForm({
   brain,
@@ -64,7 +65,7 @@ export function EmbeddedBrainForm({
         label="Wiki folder"
         hint={editing
           ? "Fixed for this brain: another folder is another brain."
-          : "An existing wiki on this machine: a folder with SCHEMA.md and index.md at its root. Companion only reads it."}
+          : "An existing wiki on this machine, such as an LLM wiki kept by an agent. Companion checks it next and offers to add what is missing (it never deletes anything)."}
       >
         <input
           id={ids.dir}

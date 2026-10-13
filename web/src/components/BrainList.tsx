@@ -25,22 +25,33 @@ export function brainDomainsText(brain: BrainInfo): string {
   return `Used by ${brain.domains.map((d) => (d.slug === "global" ? "GLOBAL (default)" : d.name)).join(", ")}`;
 }
 
+/** "3 notes waiting" from a health answer that reports the inbox; "" otherwise. */
+export function waitingText(health: BrainHealthState): string {
+  const n = health && health !== "checking" ? health.inbox?.pending ?? 0 : 0;
+  return n > 0 ? `${n} note${n === 1 ? "" : "s"} waiting` : "";
+}
+
 /**
- * The list of brains: name, about, URL (or wiki folder), health, and the
- * domains using each. A row opens the brain (#/brains/<slug>); "Connect
- * remote brain" and "Embedded brain" open their forms.
+ * The list of brains: name, about, URL (or wiki folder), health, the
+ * domains using each and the notes waiting in its inbox. A row opens the
+ * brain (#/brains/<slug>); "New brain", "Adopt existing folder" and
+ * "Connect remote brain" open their forms.
  */
 export function BrainList({
   brains,
   health,
   selected,
+  onCreate,
   onConnect,
   onEmbed,
 }: {
   brains: BrainInfo[];
   health: Record<string, BrainHealthState>;
   selected?: string;
+  /** "New brain": a new wiki from the template. */
+  onCreate: () => void;
   onConnect: () => void;
+  /** "Adopt existing folder". */
   onEmbed: () => void;
 }) {
   return (
@@ -65,16 +76,24 @@ export function BrainList({
                   {brainDomainsText(b)}
                   {b.collisions.some((c) => c.domains.length > 0) ? " · a plugin serves the same URL" : ""}
                 </p>
+                {waitingText(health[b.slug]) && <p className="text-[10px] font-medium text-cc-primary">{waitingText(health[b.slug])}</p>}
               </a>
             </li>
           ))}
         </ul>
       ) : (
         <p className="rounded-xl border border-cc-border bg-cc-card px-3 py-3 text-[12px] text-cc-muted">
-          No brain yet. Connect a remote one (a knowledge base with an MCP server, such as a wiki on your tailnet), or let
-          Companion run one on a wiki folder of this machine.
+          No brain yet. Create one: Companion makes a new wiki and runs its brain. You can also adopt a wiki folder you already
+          have, or connect a remote brain (a knowledge base with an MCP server, such as a wiki on your tailnet).
         </p>
       )}
+      <button
+        type="button"
+        onClick={onCreate}
+        className="mt-2 w-full px-3 py-2 rounded-xl bg-cc-primary text-white text-[12px] font-medium hover:bg-cc-primary-hover cursor-pointer"
+      >
+        New brain
+      </button>
       <button
         type="button"
         onClick={onConnect}
@@ -87,7 +106,7 @@ export function BrainList({
         onClick={onEmbed}
         className="mt-2 w-full px-3 py-2 rounded-xl border border-dashed border-cc-border text-[12px] text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
       >
-        Embedded brain (existing wiki folder)
+        Adopt existing folder
       </button>
     </nav>
   );

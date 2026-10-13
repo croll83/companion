@@ -627,6 +627,8 @@ export interface BrainHealth {
   content_hash?: string;
   error?: string;
   checkedAt: number;
+  /** Notes in the brain's inbox by status (embedded brains report them). */
+  inbox?: Record<string, number>;
   /** The server reported another wiki version, so its skill was fetched again. */
   skillRefresh?: "updated" | "unchanged" | "failed";
   /** Embedded brains: the child process. */
@@ -677,6 +679,90 @@ export interface EmbeddedBrainInput {
   language?: BrainLanguage;
   redactSecrets?: boolean;
 }
+
+/** "New brain": a wiki from Companion's template and its embedded brain. */
+export interface NewBrainInput {
+  name: string;
+  about?: string;
+  tags?: string[];
+  /** Absolute or ~/ path; default ~/companion_brain_<slug>. */
+  wikiDir?: string;
+}
+
+export interface NewBrainResult {
+  brain: BrainInfo;
+  wiki: { dir: string; language: BrainLanguage; tags: string[]; commit: string };
+}
+
+/** A fix of the guided lint (only adds to the wiki). */
+export type BrainLintFixId = "create-schema" | "create-index" | "create-log" | "add-taxonomy" | "add-tags" | "index-pages";
+
+/** One problem of a wiki, in a sentence, with a one-click fix when there is one. */
+export interface BrainLintAdvice {
+  id: string;
+  level: "error" | "warn";
+  sentence: string;
+  paths: string[];
+  count: number;
+  fix?: { id: BrainLintFixId; label: string };
+}
+
+export interface BrainLintView {
+  ok: boolean;
+  errors: number;
+  warnings: number;
+  pages: number;
+  advice: BrainLintAdvice[];
+}
+
+/** "Adopt existing folder": what the folder lacks before a brain can run on it. */
+export interface BrainAdoptCheck {
+  ok: true;
+  path: string;
+  ready: boolean;
+  advice: BrainLintAdvice[];
+  done?: string;
+}
+
+/** A page in the Pages tab list (with a snippet when it comes from a search). */
+export interface BrainPageSummary {
+  slug: string;
+  path: string;
+  title: string;
+  type: string;
+  tags: string[];
+  updated: string | null;
+  snippet?: string;
+}
+
+/** One page (or a navigation file) of an embedded brain. Data, never HTML. */
+export interface BrainPageDoc extends BrainPageSummary {
+  sources: string[];
+  markdown: string;
+}
+
+export type BrainNoteStatus = "pending" | "deferred" | "accepted" | "rejected" | "discarded" | "withdrawn";
+
+/** A note of a brain's inbox, as the Inbox tab shows it. */
+export interface BrainNote {
+  note_id: string;
+  kind: string;
+  statement: string;
+  pages?: string[];
+  new_page_hint?: string;
+  sources?: string[];
+  evidence?: string;
+  author: string;
+  received_at: string;
+  status: BrainNoteStatus;
+  status_reason?: string | null;
+  status_changed_at?: string | null;
+  status_by?: string | null;
+  client_name?: string;
+}
+
+/** "Add source": a text (pasted or from a file) or an URL (recorded as a note only). */
+export type BrainSourceInput = { name: string; text: string; note?: string } | { url: string; title?: string; note?: string };
 
 /** A browser connected to Claude in Chrome (from `list_connected_browsers`). */
 export interface ConnectedBrowser {
@@ -1207,6 +1293,26 @@ export const api = {
   /** Fetch the brain's skill from its server again. */
   refreshBrainSkill: (slug: string) =>
     post<{ outcome: "updated" | "unchanged" | "failed"; error?: string; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/skill/refresh`, {}),
+  /** Whether git is installed (a new wiki is a git repository). */
+  brainGit: () => get<{ available: boolean; version?: string }>("/brains/git"),
+  /** A new wiki from the template, and its embedded brain (started, on no domain). */
+  createNewBrain: (input: NewBrainInput) => post<NewBrainResult>("/brains/new", input),
+  /** What a folder lacks before it can be adopted; `fix` applies one first. */
+  checkAdoptFolder: (input: { wikiDir: string; fix?: BrainLintFixId; name?: string; about?: string }) =>
+    post<BrainAdoptCheck>("/brains/adopt-check", input),
+  brainLint: (slug: string) => get<BrainLintView>(`/brains/${encodeURIComponent(slug)}/lint`),
+  fixBrainLint: (slug: string, fix: BrainLintFixId) =>
+    post<{ done: string; lint: BrainLintView }>(`/brains/${encodeURIComponent(slug)}/lint/fix`, { fix }),
+  brainPages: (slug: string, q = "") =>
+    get<{ pages: BrainPageSummary[]; query?: string }>(`/brains/${encodeURIComponent(slug)}/pages${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
+  brainPage: (slug: string, page: string) =>
+    get<BrainPageDoc>(`/brains/${encodeURIComponent(slug)}/pages/${encodeURIComponent(page)}`),
+  brainInbox: (slug: string, status: BrainNoteStatus = "pending") =>
+    get<{ counts: Record<string, number>; notes: BrainNote[] }>(`/brains/${encodeURIComponent(slug)}/inbox?status=${status}`),
+  dismissBrainNote: (slug: string, noteId: string, reason?: string) =>
+    post<{ note_id: string; status: "discarded" }>(`/brains/${encodeURIComponent(slug)}/inbox/${encodeURIComponent(noteId)}/dismiss`, reason ? { reason } : {}),
+  addBrainSource: (slug: string, input: BrainSourceInput) =>
+    post<{ path?: string; note_id: string; duplicate: boolean }>(`/brains/${encodeURIComponent(slug)}/sources`, input),
   /** Where the plugin is on, the brain replaces it (plugin turned off there). */
   adoptPluginAsBrain: (slug: string, pluginId: string) =>
     post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),
