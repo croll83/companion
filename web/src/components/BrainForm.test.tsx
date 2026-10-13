@@ -9,7 +9,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { BrainForm } from "./BrainForm.js";
-import { teamBrain } from "../test-fixtures/brains.js";
+import { oauthBrain, teamBrain } from "../test-fixtures/brains.js";
 
 function type(label: string | RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -81,5 +81,40 @@ describe("BrainForm", () => {
     type("Name", "X");
     type("Base URL", "");
     expect(screen.getByText("The base URL is required.")).toBeInTheDocument();
+  });
+
+  // OAuth with a pre-registered client: the client id is required, the
+  // callback port optional (an integer 1-65535); no token field.
+  it("connects an OAuth brain with a client id and an optional callback port", () => {
+    const onSubmit = vi.fn(async () => true);
+    render(<BrainForm busy={false} onSubmit={onSubmit} />);
+    type("Name", "Hercle");
+    type("Base URL", "https://brain.example");
+    fireEvent.change(screen.getByLabelText("Authentication"), { target: { value: "oauth" } });
+    expect(screen.queryByLabelText("Token")).toBeNull();
+    expect(screen.getByText("OAuth needs the client id of the pre-registered app.")).toBeInTheDocument();
+    type("OAuth client id", "a b");
+    expect(screen.getByText("The client id cannot contain spaces.")).toBeInTheDocument();
+    type("OAuth client id", " app-1 ");
+    type("Callback port (optional)", "99999");
+    expect(screen.getByText("The callback port must be a number from 1 to 65535.")).toBeInTheDocument();
+    type("Callback port (optional)", "8765");
+    fireEvent.click(screen.getByRole("button", { name: "Connect brain" }));
+    expect(onSubmit).toHaveBeenCalledWith({ name: "Hercle", about: "", baseUrl: "https://brain.example", auth: { mode: "oauth", clientId: "app-1", callbackPort: 8765 } });
+  });
+
+  it("edits an OAuth brain, keeping its client and dropping the port when cleared", () => {
+    const onSubmit = vi.fn(async () => true);
+    render(<BrainForm brain={oauthBrain()} busy={false} onSubmit={onSubmit} />);
+    expect(screen.getByLabelText("OAuth client id")).toHaveValue("11111111-2222-3333-4444-555555555555");
+    type("Callback port (optional)", "");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ auth: { mode: "oauth", clientId: "11111111-2222-3333-4444-555555555555" } }));
+  });
+
+  it("passes axe accessibility scan with OAuth fields", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<BrainForm brain={oauthBrain()} busy={false} onSubmit={vi.fn()} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

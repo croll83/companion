@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from "react";
-import type { BrainAuthMode, BrainInfo, BrainInput } from "../api.js";
+import type { BrainAuth, BrainAuthMode, BrainInfo, BrainInput } from "../api.js";
 
 const FIELD = "w-full px-2 py-1.5 rounded-md bg-cc-input-bg border border-cc-border text-[13px] focus:outline-none focus:ring-1 focus:ring-cc-primary";
 const HTTP_URL = /^https?:\/\/\S+$/i;
@@ -14,11 +14,21 @@ function Field({ id, label, hint, children }: { id: string; label: string; hint?
   );
 }
 
+/** An optional port typed by the user: "" = none, else an integer 1-65535 (null when invalid). */
+function parsePort(text: string): number | undefined | null {
+  const t = text.trim();
+  if (!t) return undefined;
+  const n = Number(t);
+  return /^\d+$/.test(t) && n >= 1 && n <= 65535 ? n : null;
+}
+
 /**
  * "Connect remote brain" (no `brain`) and "Edit" (with one): name, what it
- * is about, base URL, authentication (none or a bearer token) and, under
- * Advanced, overrides of the MCP and health URLs. The token is write-only:
- * an existing one is never shown, an empty field keeps it.
+ * is about, base URL, authentication (none, a bearer token, or OAuth with a
+ * pre-registered client: client id and, for Claude, an optional fixed
+ * callback port) and, under Advanced, overrides of the MCP and health URLs.
+ * The token is write-only: an existing one is never shown, an empty field
+ * keeps it. OAuth needs no secret here: each CLI signs in from a session.
  */
 export function BrainForm({
   brain,
@@ -38,24 +48,36 @@ export function BrainForm({
   const [token, setToken] = useState("");
   const [mcpUrl, setMcpUrl] = useState(brain?.remote?.mcpUrl ?? "");
   const [healthUrl, setHealthUrl] = useState(brain?.remote?.healthUrl ?? "");
-  const ids = { name: useId(), about: useId(), base: useId(), mode: useId(), token: useId(), mcp: useId(), health: useId() };
+  const savedAuth = brain?.remote?.auth;
+  const [clientId, setClientId] = useState(savedAuth?.mode === "oauth" ? savedAuth.clientId : "");
+  const [callbackPort, setCallbackPort] = useState(savedAuth?.mode === "oauth" && savedAuth.callbackPort ? String(savedAuth.callbackPort) : "");
+  const ids = {
+    name: useId(), about: useId(), base: useId(), mode: useId(), token: useId(), mcp: useId(), health: useId(), client: useId(), port: useId(),
+  };
 
   const editing = !!brain;
   const tokenNeeded = mode === "bearer" && !token.trim() && !(editing && brain.hasToken);
   const badUrl = [baseUrl, mcpUrl, healthUrl].some((u) => u.trim() && !HTTP_URL.test(u.trim()));
+  const port = parsePort(callbackPort);
   const problem = !name.trim() ? "A name is required."
     : !baseUrl.trim() ? "The base URL is required."
     : badUrl ? "URLs must start with http:// or https://."
     : tokenNeeded ? "Bearer authentication needs a token."
+    : mode === "oauth" && !clientId.trim() ? "OAuth needs the client id of the pre-registered app."
+    : mode === "oauth" && /\s/.test(clientId.trim()) ? "The client id cannot contain spaces."
+    : mode === "oauth" && port === null ? "The callback port must be a number from 1 to 65535."
     : "";
   const base = baseUrl.trim().replace(/\/+$/, "") || "<base>";
 
   const submit = () => {
+    const auth: BrainAuth = mode === "oauth"
+      ? { mode, clientId: clientId.trim(), ...(port ? { callbackPort: port } : {}) }
+      : { mode };
     const input: BrainInput = {
       name: name.trim(),
       about: about.trim(),
       baseUrl: baseUrl.trim(),
-      auth: { mode },
+      auth,
     };
     if (mode === "bearer" && token.trim()) input.token = token.trim();
     // On create an empty override is simply left out; on edit it removes the old one.
@@ -73,18 +95,37 @@ export function BrainForm({
       <Field id={ids.name} label="Name">
         <input id={ids.name} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Jarvis" className={FIELD} />
       </Field>
-      <Field id={ids.about} label="What it is about" hint="Tells the model when to use the brain: it becomes the description of the brain's skill.">
+      <Field id={ids.about} label="What it is about" hint="Tells the model when to use the brain: the description of the generated skill (used when the server publishes no skill of its own).">
         <textarea id={ids.about} value={about} onChange={(e) => setAbout(e.target.value)} rows={3} className={FIELD} />
       </Field>
-      <Field id={ids.base} label="Base URL" hint={<>Companion uses <span className="font-mono-code">{base}/mcp</span>, <span className="font-mono-code">{base}/healthz</span> and <span className="font-mono-code">{base}/api/v1</span>.</>}>
+      <Field id={ids.base} label="Base URL" hint={<>Companion uses <span className="font-mono-code">{base}/mcp</span>, <span className="font-mono-code">{base}/healthz</span>, <span className="font-mono-code">{base}/api/v1</span> and the server's skill at <span className="font-mono-code">{base}/skill</span>.</>}>
         <input id={ids.base} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://100.116.99.9:7421" inputMode="url" className={`${FIELD} font-mono-code`} />
       </Field>
       <Field id={ids.mode} label="Authentication">
         <select id={ids.mode} value={mode} onChange={(e) => setMode(e.target.value as BrainAuthMode)} className={FIELD}>
           <option value="none">None (e.g. a brain on your tailnet)</option>
           <option value="bearer">Bearer token</option>
+          <option value="oauth">OAuth (pre-registered client)</option>
         </select>
       </Field>
+      {mode === "oauth" && (
+        <>
+          <Field
+            id={ids.client}
+            label="OAuth client id"
+            hint="The app registered with the brain's identity provider (e.g. Microsoft Entra). Not a secret. Each CLI signs in once from a session."
+          >
+            <input id={ids.client} value={clientId} onChange={(e) => setClientId(e.target.value)} autoComplete="off" className={`${FIELD} font-mono-code`} />
+          </Field>
+          <Field
+            id={ids.port}
+            label="Callback port (optional)"
+            hint="Claude Code's fixed sign-in redirect port, if the app registration names one. Codex picks its own."
+          >
+            <input id={ids.port} value={callbackPort} onChange={(e) => setCallbackPort(e.target.value)} inputMode="numeric" placeholder="e.g. 8765" className={`${FIELD} font-mono-code`} />
+          </Field>
+        </>
+      )}
       {mode === "bearer" && (
         <Field
           id={ids.token}
