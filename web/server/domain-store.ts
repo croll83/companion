@@ -56,6 +56,13 @@ export interface DomainInfo {
   skillGroups?: Record<string, boolean>;
   /** Single skills turned on/off, keyed "<group>:<name>"; wins over the groups (see isSkillOn). */
   skillChoices?: Record<string, boolean>;
+  /**
+   * The brain (server/brain/) sessions of this domain use. One brain per
+   * domain: a string = that brain, null = explicitly none, absent = GLOBAL's.
+   * On GLOBAL: a string = the default brain of every domain without its own
+   * choice; absent = none. See effectiveBrainSlug.
+   */
+  brain?: string | null;
 }
 
 export interface McpServerDef {
@@ -122,7 +129,27 @@ function normalize(raw: Partial<DomainInfo> & { slug: string }): DomainInfo {
     ...(raw.plugins && typeof raw.plugins === "object" ? { plugins: sanitizePlugins(raw.plugins) } : {}),
     ...(raw.skillGroups && typeof raw.skillGroups === "object" ? { skillGroups: sanitizePlugins(raw.skillGroups) } : {}),
     ...(raw.skillChoices && typeof raw.skillChoices === "object" ? { skillChoices: sanitizePlugins(raw.skillChoices) } : {}),
+    ...readBrainChoice(raw),
   };
+}
+
+/** The `brain` field as stored: a valid slug, or null ("none") except on GLOBAL, where absent already means none. */
+function readBrainChoice(raw: Partial<DomainInfo> & { slug: string }): Pick<DomainInfo, "brain"> {
+  if (isValidSlug(raw.brain)) return { brain: raw.brain };
+  if (raw.brain === null && raw.slug !== GLOBAL_DOMAIN) return { brain: null };
+  return {};
+}
+
+/**
+ * The brain sessions of a domain use: the domain's own choice (null = none),
+ * else GLOBAL's, else none. `domain` is undefined for GLOBAL itself.
+ */
+export function effectiveBrainSlug(
+  domain: Pick<DomainInfo, "brain"> | undefined,
+  global: Pick<DomainInfo, "brain">,
+): string | null {
+  if (domain && domain.brain !== undefined) return domain.brain;
+  return global.brain ?? null;
 }
 
 /** The MCP on/off map; a registry from before it has a `mcpDisabled` list (all off). */
@@ -179,6 +206,19 @@ function readRegistry(): DomainInfo[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Read every domain, let `change` edit them in place, and write them back in
+ * one go: for changes that must apply to several domains at once (a brain
+ * deleted or adopted in place of a plugin). Returns the domains as written.
+ */
+export function updateDomainsAtomically(change: (domains: DomainInfo[]) => void): DomainInfo[] {
+  const domains = readRegistry();
+  change(domains);
+  const normalized = domains.map((d) => normalize(d));
+  writeRegistry(normalized);
+  return normalized;
 }
 
 function writeRegistry(domains: DomainInfo[]): void {
@@ -306,6 +346,8 @@ export interface DomainPatch {
   chromeBrowser?: unknown;
   plugins?: unknown;
   skillGroups?: unknown;
+  /** A brain slug, null (no brain) or "inherit" (back to GLOBAL's; not for GLOBAL). Existence is checked by the route. */
+  brain?: unknown;
 }
 
 export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
@@ -352,9 +394,34 @@ export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
     if (Object.keys(merged).length > 0) next[key] = merged;
     else delete next[key];
   }
+  if (patch.brain !== undefined) {
+    const error = applyBrainChoice(next, patch.brain);
+    if (error) return { ok: false, status: 400, error };
+  }
   domains[idx] = next;
   writeRegistry(domains);
   return { ok: true, domain: next };
+}
+
+/**
+ * Set a domain's brain from a patch: a slug replaces the previous one (one
+ * brain per domain), null turns it off, "inherit" removes the choice. On
+ * GLOBAL, null and "inherit" are refused/normalized: absent already means none.
+ */
+function applyBrainChoice(domain: DomainInfo, value: unknown): string | null {
+  const isGlobal = domain.slug === GLOBAL_DOMAIN;
+  if (value === "inherit") {
+    if (isGlobal) return "GLOBAL has nothing to inherit a brain from: use null for none";
+    delete domain.brain;
+  } else if (value === null) {
+    if (isGlobal) delete domain.brain;
+    else domain.brain = null;
+  } else if (isValidSlug(value)) {
+    domain.brain = value;
+  } else {
+    return "brain must be a brain slug, null or \"inherit\"";
+  }
+  return null;
 }
 
 /** Remove a domain from the registry. Its folder and files stay on disk. */

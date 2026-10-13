@@ -38,6 +38,8 @@ import {
   removeDomainSkill,
   slugify,
   updateDomain,
+  effectiveBrainSlug,
+  updateDomainsAtomically,
 } from "./domain-store.js";
 
 let tmp: string;
@@ -407,5 +409,53 @@ describe("domain skills", () => {
     expect(removeDomainSkill("herd", "old")).toMatchObject({ ok: false, status: 404 });
     expect(removeDomainSkill("herd", "../etc")).toMatchObject({ ok: false, status: 404 });
     expect(removeDomainSkill("nope", "old")).toMatchObject({ ok: false, status: 404 });
+  });
+});
+
+describe("brain choice", () => {
+  // One brain per domain: a slug replaces the previous one, null opts out
+  // of GLOBAL's default, "inherit" goes back to it.
+  it("sets, replaces, turns off and inherits a domain's brain", () => {
+    ensureGlobalDomain();
+    createDomain({ name: "Herd" });
+    expect(updateDomain("herd", { brain: "jarvis" })).toMatchObject({ ok: true, domain: { brain: "jarvis" } });
+    expect(updateDomain("herd", { brain: "team" })).toMatchObject({ ok: true, domain: { brain: "team" } });
+    expect(getDomain("herd")?.brain).toBe("team");
+    expect(updateDomain("herd", { brain: null })).toMatchObject({ ok: true, domain: { brain: null } });
+    expect(getDomain("herd")?.brain).toBeNull();
+    expect(updateDomain("herd", { brain: "inherit" }).ok).toBe(true);
+    expect(getDomain("herd")).not.toHaveProperty("brain");
+    expect(updateDomain("herd", { brain: "Bad Slug" })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain("herd", { brain: 3 })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  // GLOBAL has nothing to inherit from; for it, null simply means none.
+  it("for GLOBAL: a default brain or none, never inherit", () => {
+    ensureGlobalDomain();
+    expect(updateDomain(GLOBAL_DOMAIN, { brain: "jarvis" })).toMatchObject({ ok: true, domain: { brain: "jarvis" } });
+    expect(updateDomain(GLOBAL_DOMAIN, { brain: "inherit" })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain(GLOBAL_DOMAIN, { brain: null }).ok).toBe(true);
+    expect(getDomain(GLOBAL_DOMAIN)).not.toHaveProperty("brain");
+  });
+
+  it("resolves the effective brain: domain > GLOBAL > none", () => {
+    expect(effectiveBrainSlug(undefined, {})).toBeNull();
+    expect(effectiveBrainSlug(undefined, { brain: "g" })).toBe("g");
+    expect(effectiveBrainSlug({}, { brain: "g" })).toBe("g");
+    expect(effectiveBrainSlug({ brain: null }, { brain: "g" })).toBeNull();
+    expect(effectiveBrainSlug({ brain: "d" }, { brain: "g" })).toBe("d");
+  });
+
+  // Several domains change in one registry write (adopt / delete a brain);
+  // a hand-edited invalid value is dropped when read back.
+  it("updates several domains at once, normalizing what it writes", () => {
+    ensureGlobalDomain();
+    createDomain({ name: "Herd" });
+    const written = updateDomainsAtomically((domains) => {
+      for (const d of domains) d.brain = d.slug === "herd" ? "jarvis" : ("../bad" as string);
+    });
+    expect(written.map((d) => d.brain)).toEqual([undefined, "jarvis"]);
+    expect(getDomain("herd")?.brain).toBe("jarvis");
+    expect(getDomain(GLOBAL_DOMAIN)).not.toHaveProperty("brain");
   });
 });
