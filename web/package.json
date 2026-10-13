@@ -29,7 +29,9 @@
     "dev": "bun dev.ts",
     "dev:api": "bun --watch server/index.ts",
     "dev:vite": "vite",
-    "build": "vite build",
+    "build": "vite build && bun run build:brain",
+    "build:brain": "bun build server/brain/core/main.ts --target=bun --minify --outfile dist/brain/brain.js",
+    "test:brain-smoke": "bun scripts/brain-smoke.ts",
     "start": "NODE_ENV=production bun server/index.ts",
     "prepublishOnly": "bun run build",
     "typecheck": "tsc --noEmit",
@@ -66,6 +68,7 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@tailwindcss/vite": "^4.0.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -91,6 +94,8 @@
     "vite-plugin-pwa": "^1.2.0",
     "vitest": "^4.0.18",
     "vitest-axe": "^0.1.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5",
     "zustand": "^5.0.0"
   }
 }
