@@ -18,13 +18,19 @@ import {
  *    --mcp-config (0600, so a bearer token is written there as a literal
  *    `Authorization` header), and `--plugin-dir <brain>/plugin` for its skill.
  *    Claude also receives the server's MCP instructions.
+ *    An OAuth brain gets Claude's `oauth: {clientId, callbackPort?}` instead.
  *  - Codex: the same server as a `[mcp_servers.<slug>-brain]` table added LAST.
  *    Per-session CODEX_HOME folders are not private (0775), so the token is
  *    never written there: the table names an env var
  *    (`bearer_token_env_var = "COMPANION_BRAIN_<SLUG>_TOKEN"`) that is set on
  *    the Codex process. Codex does not show MCP server instructions to the
  *    model (verified on 0.161), so the skill is linked into CODEX_HOME/skills
- *    and the generated AGENTS.md names the brain.
+ *    and the generated AGENTS.md names the brain. An OAuth brain gets
+ *    `[mcp_servers.<slug>-brain.oauth] client_id` (codexMcpTable).
+ *
+ * OAuth tokens are never Companion's: each CLI signs in once from a session's
+ * MCP panel (Claude mcp_authenticate, Codex mcpServer/oauth/login) and keeps
+ * them in its own store, shared by all its sessions.
  *
  * A marketplace plugin serving the same MCP URL "collides" with the brain:
  * where the brain is on, the plugin is forced off (Claude) or skipped (Codex),
@@ -44,6 +50,8 @@ export interface DomainBrain {
   token?: string;
   /** The env var Codex reads the token from. */
   tokenEnvVar: string;
+  /** Pre-registered OAuth client, when the brain uses OAuth. */
+  oauth?: { clientId: string; callbackPort?: number };
   /** Whether the domain chose the brain itself (false: GLOBAL's default). */
   own: boolean;
 }
@@ -68,7 +76,8 @@ export function brainForDomain(r: { domain: DomainInfo; global: DomainInfo; isGl
     console.warn(`[brain-runtime] Domain "${r.domain.slug}" uses brain "${slug}", which does not exist: skipped`);
     return null;
   }
-  const token = brain.remote?.auth.mode === "bearer" ? readBrainToken(slug) : undefined;
+  const auth = brain.remote?.auth;
+  const token = auth?.mode === "bearer" ? readBrainToken(slug) : undefined;
   if (brain.remote?.auth.mode === "bearer" && !token) {
     console.warn(`[brain-runtime] Brain "${slug}" uses a bearer token but none is set: connecting without it`);
   }
@@ -80,13 +89,23 @@ export function brainForDomain(r: { domain: DomainInfo; global: DomainInfo; isGl
     skillDir: brainSkillDir(slug),
     ...(token ? { token } : {}),
     tokenEnvVar: brainTokenEnvVar(slug),
+    ...(auth?.mode === "oauth" ? { oauth: { clientId: auth.clientId, ...(auth.callbackPort ? { callbackPort: auth.callbackPort } : {}) } } : {}),
     own: r.isGlobal || r.domain.brain !== undefined,
   };
 }
 
-/** The brain's server in Claude's --mcp-config: the token as a literal header (that file is 0600). */
+/**
+ * The brain's server in Claude's --mcp-config: the token as a literal header
+ * (that file is 0600), or the pre-registered OAuth client (Claude's format,
+ * verified on CLI 2.1.293).
+ */
 export function claudeBrainServer(b: DomainBrain): McpServerDef {
-  return { type: "http", url: b.mcpUrl, ...(b.token ? { headers: { Authorization: `Bearer ${b.token}` } } : {}) };
+  return {
+    type: "http",
+    url: b.mcpUrl,
+    ...(b.token ? { headers: { Authorization: `Bearer ${b.token}` } } : {}),
+    ...(b.oauth ? { oauth: { ...b.oauth } } : {}),
+  };
 }
 
 /**
@@ -94,7 +113,13 @@ export function claudeBrainServer(b: DomainBrain): McpServerDef {
  * codexMcpTable turns into `bearer_token_env_var`, never a literal value.
  */
 export function codexBrainServer(b: DomainBrain): McpServerDef {
-  return { type: "http", url: b.mcpUrl, ...(b.token ? { headers: { Authorization: `Bearer \${${b.tokenEnvVar}}` } } : {}) };
+  return {
+    type: "http",
+    url: b.mcpUrl,
+    ...(b.token ? { headers: { Authorization: `Bearer \${${b.tokenEnvVar}}` } } : {}),
+    // codexMcpTable writes only the client id: Codex picks its own callback port.
+    ...(b.oauth ? { oauth: { clientId: b.oauth.clientId } } : {}),
+  };
 }
 
 /** Env for a Codex spawn: the token under the variable codexBrainServer names. */

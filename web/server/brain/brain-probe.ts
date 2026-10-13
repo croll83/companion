@@ -10,6 +10,11 @@ import { brainUrls, readBrainToken, type BrainConfig } from "./brain-store.js";
  *  - test: health, plus an MCP `initialize` POSTed to <mcpUrl> the way a
  *    client would (JSON or SSE answer), then a DELETE of the MCP session when
  *    the server opened one (a stateful server keeps a limited number).
+ *
+ * OAuth brains: Companion holds no token (each CLI signs in from a session),
+ * so the health check (public on brain servers) is sent without one and an
+ * MCP answer of 401 with a WWW-Authenticate challenge means "reachable,
+ * sign-in required", not a failure.
  */
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -39,6 +44,8 @@ export interface BrainMcpCheck {
   transport?: "json" | "sse";
   /** The MCP session the server opened was closed again (DELETE). */
   sessionClosed?: boolean;
+  /** OAuth brain: the server answered 401 with a WWW-Authenticate challenge, i.e. it is up and wants a sign-in. */
+  signInRequired?: boolean;
   error?: string;
 }
 
@@ -54,7 +61,8 @@ export interface ProbeOptions {
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 
-function errorText(err: unknown, timeoutMs: number): string {
+/** A fetch error as one line: a timeout, or the message and its cause. */
+export function errorText(err: unknown, timeoutMs: number): string {
   if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
     return `No answer within ${Math.round(timeoutMs / 1000)} s`;
   }
@@ -69,7 +77,8 @@ function authHeaders(brain: BrainConfig): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function sameOrigin(a: string, b: string): boolean {
+/** Whether two URLs share an origin (a token goes only to the MCP server's own origin). */
+export function sameOrigin(a: string, b: string): boolean {
   try {
     return new URL(a).origin === new URL(b).origin;
   } catch {
@@ -175,10 +184,16 @@ export async function checkBrainMcp(brain: BrainConfig, opts: ProbeOptions = {})
   const sessionId = res.headers.get("mcp-session-id");
   const out: BrainMcpCheck = { ok: false, status: res.status };
   try {
-    if (!res.ok) {
+    const challenge = res.status === 401 && !!res.headers.get("www-authenticate");
+    if (!res.ok && challenge && brain.remote?.auth.mode === "oauth") {
+      await res.body?.cancel().catch(() => {});
+      out.signInRequired = true;
+    } else if (!res.ok) {
       await res.body?.cancel().catch(() => {});
       out.error = res.status === 401 || res.status === 403
-        ? `HTTP ${res.status}: the brain refused the credentials`
+        ? challenge && brain.remote?.auth.mode === "none"
+          ? `HTTP ${res.status}: the brain requires sign-in (choose OAuth as its authentication)`
+          : `HTTP ${res.status}: the brain refused the credentials`
         : `HTTP ${res.status}`;
     } else {
       const sse = (res.headers.get("content-type") ?? "").includes("text/event-stream");

@@ -18,6 +18,7 @@ vi.mock("../paths.js", () => ({
 }));
 
 import {
+  applyServerSkill,
   brainDir,
   brainPluginDir,
   brainSkillDir,
@@ -31,6 +32,7 @@ import {
   listBrains,
   normalizeHttpUrl,
   readBrainToken,
+  readServerSkill,
   sameUrl,
   updateBrain,
   type BrainConfig,
@@ -79,11 +81,12 @@ describe("URLs", () => {
     expect(sameUrl("not a url/", "not a url")).toBe(true);
   });
 
-  it("derives mcp, health and api URLs from the base, with overrides", () => {
+  it("derives mcp, health, api and skill URLs from the base, with overrides", () => {
     expect(brainUrls({ remote: { baseUrl: "http://b:1", auth: { mode: "none" } } })).toEqual({
       mcpUrl: "http://b:1/mcp",
       healthUrl: "http://b:1/healthz",
       apiUrl: "http://b:1/api/v1",
+      skillUrl: "http://b:1/skill",
     });
     expect(brainUrls({ remote: { baseUrl: "http://b", mcpUrl: "http://m/x", healthUrl: "http://h/ok", auth: { mode: "none" } } }))
       .toMatchObject({ mcpUrl: "http://m/x", healthUrl: "http://h/ok" });
@@ -130,7 +133,11 @@ describe("createRemoteBrain", () => {
     [{ name: "x", baseUrl: "http://x", mcpUrl: "nope" }, 400, "MCP URL"],
     [{ name: "x", baseUrl: "http://x", healthUrl: "nope" }, 400, "health URL"],
     [{ name: "x", baseUrl: "http://x", about: 3 }, 400, "about"],
-    [{ name: "x", baseUrl: "http://x", auth: { mode: "oauth" } }, 400, "auth must be"],
+    // OAuth is supported since the pre-registered client mode: without a client id it is still refused.
+    [{ name: "x", baseUrl: "http://x", auth: { mode: "oauth" } }, 400, "client id"],
+    [{ name: "x", baseUrl: "http://x", auth: { mode: "kerberos" } }, 400, "auth must be"],
+    [{ name: "x", baseUrl: "http://x", auth: { mode: "oauth", clientId: "a b" } }, 400, "without spaces"],
+    [{ name: "x", baseUrl: "http://x", auth: { mode: "oauth", clientId: "app", callbackPort: 70000 } }, 400, "callback port"],
     [{ name: "x", baseUrl: "http://x", auth: { mode: "bearer" } }, 400, "needs a token"],
     [{ name: "x", baseUrl: "http://x", auth: { mode: "bearer" }, token: "a b" }, 400, "spaces"],
     [{ name: "x", baseUrl: "http://x", token: 5 }, 400, "non-empty"],
@@ -257,6 +264,68 @@ describe("updateBrain", () => {
 
   it("reports an unknown brain", () => {
     expect(updateBrain("nope", { name: "x" })).toMatchObject({ ok: false, status: 404 });
+  });
+});
+
+describe("OAuth auth", () => {
+  // The client id (and Claude's optional callback port) is configuration, not
+  // a secret: kept in brain.json; switching to OAuth drops a bearer token.
+  it("stores the pre-registered client and drops a bearer token", () => {
+    const b = created({ name: "Ent", baseUrl: "https://e.example", auth: { mode: "oauth", clientId: " app-1 ", callbackPort: "8765" } });
+    expect(b.remote?.auth).toEqual({ mode: "oauth", clientId: "app-1", callbackPort: 8765 });
+    expect(getBrain("ent")?.remote?.auth).toEqual({ mode: "oauth", clientId: "app-1", callbackPort: 8765 });
+    created({ name: "Lab", baseUrl: "http://x", auth: { mode: "bearer" }, token: "t" });
+    expect(updateBrain("lab", { auth: { mode: "oauth", clientId: "app-2" } })).toMatchObject({ ok: true, brain: { remote: { auth: { mode: "oauth", clientId: "app-2" } } } });
+    expect(hasBrainToken("lab")).toBe(false);
+    expect(updateBrain("lab", { auth: { mode: "oauth" } })).toMatchObject({ ok: false, error: expect.stringContaining("client id") });
+  });
+
+  // A hand-edited OAuth entry without a valid client id falls back to "none".
+  it("normalizes a broken OAuth config to none", () => {
+    mkdirSync(join(h.home, "brains", "bad"), { recursive: true });
+    writeFileSync(join(h.home, "brains", "bad", "brain.json"), JSON.stringify({ remote: { baseUrl: "http://b", auth: { mode: "oauth", clientId: "" } } }));
+    expect(getBrain("bad")?.remote?.auth).toEqual({ mode: "none" });
+  });
+});
+
+describe("server skill storage", () => {
+  const meta = { fetchedAt: 1, etag: '"e"', contentHash: "h1", serverVersion: "1", name: "x-brain" };
+
+  // A fetched skill becomes the brain's skill; a 304 keeps it; a failure
+  // keeps it with a note; choosing another source drops it.
+  it("applies fetched, unchanged and failed outcomes", () => {
+    created({ name: "Lab", baseUrl: "http://x" });
+    applyServerSkill("lab", { kind: "fetched", meta, text: "---\nname: lab-brain\ndescription: d\n---\n\n# From server\n" });
+    expect(getBrain("lab")?.skill).toEqual({ source: "server", server: meta });
+    expect(readServerSkill("lab")).toContain("# From server");
+    expect(readFileSync(join(brainSkillDir("lab"), "SKILL.md"), "utf-8")).toContain("# From server");
+    expect(applyServerSkill("lab", { kind: "unchanged", fetchedAt: 2, contentHash: "h2" })?.skill).toEqual({ source: "server", server: { ...meta, fetchedAt: 2, contentHash: "h2" } });
+    expect(applyServerSkill("lab", { kind: "unchanged", fetchedAt: 3 })?.skill.server?.contentHash).toBe("h2");
+    expect(applyServerSkill("lab", { kind: "failed", note: "down" })?.skill).toMatchObject({ source: "server", note: "down" });
+    expect(updateBrain("lab", { skill: { source: "generated" } })).toMatchObject({ ok: true, brain: { skill: { source: "generated" } } });
+    expect(readServerSkill("lab")).toBeUndefined();
+    expect(applyServerSkill("nope", { kind: "failed", note: "x" })).toBeUndefined();
+  });
+
+  // A "server" brain whose stored copy vanished uses the generated skill,
+  // and a 304 without a copy is reported in the note.
+  it("falls back to the generated skill when the stored copy is gone", () => {
+    created({ name: "Lab", baseUrl: "http://x", about: "About lab" });
+    applyServerSkill("lab", { kind: "fetched", meta, text: "---\nname: lab-brain\ndescription: d\n---\nbody\n" });
+    rmSync(join(brainDir("lab"), "server-skill.md"));
+    expect(brainSkillMarkdown(getBrain("lab")!)).toContain('description: "About lab"');
+    expect(applyServerSkill("lab", { kind: "unchanged", fetchedAt: 5 })?.skill).toEqual({ source: "generated", note: expect.stringContaining("304") });
+  });
+
+  // The API cannot set "server" directly (the routes fetch first); hand-edited
+  // configs keep a valid server source and drop a broken one.
+  it("refuses a direct server source and normalizes stored ones", () => {
+    expect(createRemoteBrain({ name: "x", baseUrl: "http://x", skill: { source: "server" } })).toMatchObject({ ok: false, error: expect.stringContaining("fetching") });
+    mkdirSync(join(h.home, "brains", "srv"), { recursive: true });
+    writeFileSync(join(h.home, "brains", "srv", "brain.json"), JSON.stringify({ remote: { baseUrl: "http://b" }, skill: { source: "server", server: { fetchedAt: 1, contentHash: 5 }, note: "n" } }));
+    expect(getBrain("srv")?.skill).toEqual({ source: "server", server: { fetchedAt: 1, contentHash: null }, note: "n" });
+    writeFileSync(join(h.home, "brains", "srv", "brain.json"), JSON.stringify({ remote: { baseUrl: "http://b" }, skill: { source: "server" } }));
+    expect(getBrain("srv")?.skill).toEqual({ source: "generated" });
   });
 });
 

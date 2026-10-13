@@ -31,6 +31,7 @@ import {
   collidingPlugins,
 } from "./brain-runtime.js";
 import type { InstalledPlugin } from "../claude-plugins.js";
+import { codexMcpTable } from "../domain-runtime.js";
 
 let tmp: string;
 const savedRoot = process.env.COMPANION_DOMAINS_ROOT;
@@ -115,6 +116,31 @@ describe("server definitions", () => {
     expect(JSON.stringify(codexBrainServer(b))).not.toContain("tok-123");
     expect(codexBrainEnv(b)).toEqual({ COMPANION_BRAIN_TEAM_TOKEN: "tok-123" });
     expect(codexBrainEnv(null)).toEqual({});
+  });
+
+  // OAuth (pre-registered client): Claude gets `oauth {clientId, callbackPort}`
+  // in its --mcp-config, Codex the client id (codexMcpTable writes the
+  // `[mcp_servers.<name>.oauth]` table); no token anywhere, no env.
+  it("gives both CLIs the pre-registered OAuth client and no token", () => {
+    createRemoteBrain({ name: "Entra", baseUrl: "https://brain.example", auth: { mode: "oauth", clientId: "app-123", callbackPort: 8765 } });
+    updateDomain("herd", { brain: "entra" });
+    const b = brainForDomain(ctx("herd"))!;
+    expect(b).toMatchObject({ oauth: { clientId: "app-123", callbackPort: 8765 } });
+    expect(b.token).toBeUndefined();
+    expect(claudeBrainServer(b)).toEqual({ type: "http", url: "https://brain.example/mcp", oauth: { clientId: "app-123", callbackPort: 8765 } });
+    expect(codexBrainServer(b)).toEqual({ type: "http", url: "https://brain.example/mcp", oauth: { clientId: "app-123" } });
+    expect(codexMcpTable(b.serverName, codexBrainServer(b), "herd", { brain: "entra" })).toEqual([
+      "# Managed by Companion: MCP server of domain herd (brain entra). Rewritten at every launch.",
+      "[mcp_servers.entra-brain]",
+      'url = "https://brain.example/mcp"',
+      "",
+      "[mcp_servers.entra-brain.oauth]",
+      'client_id = "app-123"',
+    ]);
+    expect(codexBrainEnv(b)).toEqual({});
+    createRemoteBrain({ name: "Entra2", baseUrl: "https://b2.example", auth: { mode: "oauth", clientId: "app-9" } });
+    updateDomain("ops", { brain: "entra2" });
+    expect(claudeBrainServer(brainForDomain(ctx("ops"))!)).toEqual({ type: "http", url: "https://b2.example/mcp", oauth: { clientId: "app-9" } });
   });
 
   it("names the token variable from the slug", () => {
