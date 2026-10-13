@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { DomainPatch, DomainSummary, DomainsResponse } from "../api.js";
 import { domainsHash, type DomainTab } from "../utils/routing.js";
+import { DomainBrain } from "./DomainBrain.js";
 import { DomainChrome } from "./DomainChrome.js";
 import { domainCounts } from "./DomainList.js";
 import { DomainMcpServers, type NewMcpServer } from "./DomainMcpServers.js";
@@ -121,6 +122,7 @@ export function DomainDetail({
             <p className="text-[11px] text-cc-muted font-mono-code break-all">{domain.path}</p>
             <p className="text-[11px] text-cc-muted">
               {domain.sessionCount} session{domain.sessionCount === 1 ? "" : "s"} · {domain.memoryNotes} memory notes
+              {domain.effectiveBrain ? ` · brain ${domain.effectiveBrain.name}` : ""}
               {isGlobal ? " · applies to every session" : ""}
             </p>
           </div>
@@ -205,6 +207,14 @@ export function DomainDetail({
           ))}
         </ul>
       )}
+
+      <DomainBrain
+        domain={domain}
+        brains={data.brains ?? []}
+        globalBrain={data.domains.find((d) => d.slug === "global")?.effectiveBrain?.name}
+        busy={busy}
+        onChange={(brain) => actions.onPatch(domain.slug, { brain })}
+      />
 
       <DomainChrome domain={domain} busy={busy} onUpdate={async (patch) => actions.onPatch(domain.slug, patch)} />
 

@@ -32,6 +32,12 @@ describe("DomainList", () => {
     expect(within(global).queryByTitle(/Needs attention/)).toBeNull();
   });
 
+  // The row says which brain the domain uses (own or GLOBAL's).
+  it("shows the domain's brain in its counts", () => {
+    render(<DomainList domains={[herdDomain({ effectiveBrain: { slug: "jarvis", name: "Jarvis", own: false } })]} groups={skillGroups} plugins={plugins} busy={false} onCreate={vi.fn(async () => true)} />);
+    expect(screen.getByText("MCP 2/4 · Skills 2/4 · Plugins 1 · Brain Jarvis")).toBeInTheDocument();
+  });
+
   it("passes axe accessibility scan with the new-domain form open", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<DomainList domains={[globalDomain()]} groups={skillGroups} plugins={plugins} busy={false} onCreate={vi.fn(async () => true)} />);

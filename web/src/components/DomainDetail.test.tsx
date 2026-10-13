@@ -128,6 +128,21 @@ describe("DomainDetail", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  // The Brain section patches the domain with one partial change; the
+  // header names the brain the domain uses.
+  it("wires the Brain select and names the brain in the summary", () => {
+    const a = actions();
+    render(
+      <DomainDetail domain={herdDomain({ effectiveBrain: { slug: "jarvis", name: "Jarvis", own: false } })}
+        data={domainsResponse({ brains: [{ slug: "jarvis", name: "Jarvis" }, { slug: "team", name: "Team" }], domains: [globalDomain({ brain: "jarvis", effectiveBrain: { slug: "jarvis", name: "Jarvis", own: true } }), herdDomain()] })}
+        desktop={false} busy={false} refreshingAccount={false} actions={a} />,
+    );
+    expect(screen.getByText("2 sessions · 3 memory notes · brain Jarvis")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "As in GLOBAL (Jarvis)" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Brain for this domain"), { target: { value: "team" } });
+    expect(a.onPatch).toHaveBeenCalledWith("herd", { brain: "team" });
+  });
+
   it("for GLOBAL: applies to every session, nothing on by name, no removal", () => {
     setup({ domain: globalDomain({ mcpServers: [] }) });
     expect(screen.getByText(/applies to every session/)).toBeInTheDocument();
