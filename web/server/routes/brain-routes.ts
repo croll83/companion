@@ -324,6 +324,8 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
   // ── Contents of an embedded brain (its curator API) ───────────────────────
   api.get("/brains/:slug/pages", curated(async (brain, c) => {
     const q = (c.req.query("q") ?? "").trim().slice(0, 300);
+    // Opening the tab shows the wiki as it is now, not as of the last periodic reload.
+    if (!q) await curator(brain.slug, "/admin/refresh", { method: "POST", body: {} });
     return curator(brain.slug, `/wiki/pages?redact=1${q ? `&q=${encodeURIComponent(q)}` : ""}`);
   }));
 
@@ -357,7 +359,11 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
   }));
 
   // Guided lint: the brain's findings as sentences, with fixes.
-  api.get("/brains/:slug/lint", curated(async (brain) => explainLint(await curator<LintReport>(brain.slug, "/lint"))));
+  // The wiki is reloaded first: the check sees the files as they are now.
+  api.get("/brains/:slug/lint", curated(async (brain) => {
+    await curator(brain.slug, "/admin/refresh", { method: "POST", body: {} });
+    return explainLint(await curator<LintReport>(brain.slug, "/lint"));
+  }));
 
   // Apply one additive fix to the wiki, reload the brain, lint again.
   api.post("/brains/:slug/lint/fix", curated(async (brain, c) => {

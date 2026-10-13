@@ -159,6 +159,10 @@ describe("New brain", () => {
     expect(r.brain.skillText).toMatch(/Tags: engine, charter\./);
     // The template lints clean through the brain's own lint.
     expect((await json("/brains/boat/lint")).body).toMatchObject({ ok: true, errors: 0, advice: [] });
+    // The check and the page list see files written since the last reload (no wait for the periodic one).
+    writeFileSync(join(process.env.HOME!, "companion_brain_boat", "concepts", "Bad Name.md"), "no frontmatter\n");
+    expect((await json("/brains/boat/lint")).body.ok).toBe(false);
+    expect((await json("/brains/boat/pages")).body.pages.map((p: { path: string }) => p.path)).toEqual(["concepts/Bad Name.md"]);
     // Off everywhere: GLOBAL has no brain.
     const domains = (await json("/domains")).body;
     expect(domains.domains.every((d: { effectiveBrain?: unknown }) => !d.effectiveBrain)).toBe(true);
