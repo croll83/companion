@@ -1899,3 +1899,119 @@ describe("AgentExecutor — archiving finished run sessions", () => {
     vi.useRealTimers();
   });
 });
+
+// =========================================================================
+// Run hooks (brain consolidation)
+// =========================================================================
+/**
+ * AgentRunHooks: the brains' consolidation agents get a preparation before
+ * the launch (env, model and domain of the run) and a `settle` step after it
+ * that can turn the outcome (a run whose commit never reached the wiki is no
+ * success). Validates: the overrides reach the launch, a failing prepare
+ * fails the run (through settle, so it is recorded), the run stays in
+ * progress while settle works (no second run, a CLI exit then is ignored),
+ * a throwing settle fails the run, and agents the hooks do not apply to are
+ * untouched (still synchronous).
+ */
+describe("AgentExecutor run hooks", () => {
+  let launcher: ReturnType<typeof makeMockLauncher>;
+  let wsBridge: ReturnType<typeof makeMockWsBridge>;
+  let executor: AgentExecutor;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    launcher = makeMockLauncher();
+    wsBridge = makeMockWsBridge();
+    executor = new AgentExecutor(launcher as never, wsBridge as never);
+  });
+
+  afterEach(() => {
+    executor.destroy();
+    vi.useRealTimers();
+  });
+
+  function hooks(over: Partial<import("./agent-executor.js").AgentRunHooks> = {}) {
+    return {
+      appliesTo: vi.fn((a: AgentConfig) => !!a.brainRole),
+      prepare: vi.fn(async () => ({ env: { BRAIN_API_URL: "http://127.0.0.1:1/x" }, model: "claude-sonnet-5-5", domain: "herd" })),
+      settle: vi.fn(async (_a: AgentConfig, _e: AgentExecution, outcome: { success: boolean; error?: string }) => outcome),
+      ...over,
+    };
+  }
+
+  const consolidator = () => makeAgent({ id: "cons", model: "old-model", env: { A: "1" }, brainRole: { slug: "work", role: "consolidation" } });
+
+  it("applies the preparation to the launch: env added, model and domain of the run", async () => {
+    const h = hooks();
+    executor.setRunHooks(h);
+    mockAgentStore.getAgent.mockReturnValue(consolidator());
+    await executor.executeAgent("cons");
+    expect(h.prepare).toHaveBeenCalledOnce();
+    expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({
+      env: { A: "1", BRAIN_API_URL: "http://127.0.0.1:1/x" },
+      model: "claude-sonnet-5-5",
+      domain: "herd",
+    }));
+  });
+
+  it("lets settle turn a successful result into a failure, and keeps the run in progress meanwhile", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const h = hooks({
+      settle: vi.fn(async () => {
+        await gate;
+        return { success: false, error: "Consolidated but not synced" };
+      }),
+    });
+    executor.setRunHooks(h);
+    mockAgentStore.getAgent.mockReturnValue(consolidator());
+    await executor.executeAgent("cons");
+    executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success", total_cost_usd: 0.1 }));
+    expect(h.settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sessionId: "session-123" }), { success: true, subtype: "success", error: undefined }, expect.objectContaining({ total_cost_usd: 0.1 }));
+    // Still in progress: a second run is refused, and a CLI exit now changes nothing.
+    expect(executor.isRunInProgress("cons")).toBe(true);
+    expect(executor.startRun("cons")).toMatchObject({ ok: false, status: 409 });
+    executor.handleSessionExited("session-123", 0);
+    executor.handleSessionInitFailed("session-123", "boom");
+    await vi.advanceTimersByTimeAsync(AgentExecutor.EXIT_GRACE_MS);
+    expect(executor.getExecutions("cons")[0].completedAt).toBeUndefined();
+    release();
+    await vi.waitFor(() => expect(executor.getExecutions("cons")[0].completedAt).toBeGreaterThan(0));
+    expect(executor.getExecutions("cons")[0]).toMatchObject({ success: false, error: "Consolidated but not synced" });
+    expect(h.settle).toHaveBeenCalledOnce();
+  });
+
+  it("fails the run when prepare throws, through settle", async () => {
+    const h = hooks({ prepare: vi.fn(async () => { throw new Error("not a git repository"); }) });
+    executor.setRunHooks(h);
+    mockAgentStore.getAgent.mockReturnValue(consolidator());
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await executor.executeAgent("cons");
+    expect(launcher.launch).not.toHaveBeenCalled();
+    expect(h.settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sessionId: "" }), { success: false, error: "not a git repository" }, undefined);
+    expect(executor.getExecutions("cons")[0]).toMatchObject({ success: false, error: "not a git repository" });
+    expect(executor.isRunInProgress("cons")).toBe(false);
+  });
+
+  it("fails the run when settle throws", async () => {
+    executor.setRunHooks(hooks({ settle: vi.fn(async () => { throw new Error("git crashed"); }) }));
+    mockAgentStore.getAgent.mockReturnValue(consolidator());
+    await executor.executeAgent("cons");
+    executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+    await vi.waitFor(() => expect(executor.getExecutions("cons")[0].completedAt).toBeGreaterThan(0));
+    expect(executor.getExecutions("cons")[0]).toMatchObject({ success: false, error: "Could not verify the run: git crashed" });
+  });
+
+  it("leaves other agents alone: no prepare, synchronous completion", async () => {
+    const h = hooks();
+    executor.setRunHooks(h);
+    mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "plain" }));
+    await executor.executeAgent("plain");
+    executor.handleSessionResult("session-123", resultMessage({ is_error: false, subtype: "success" }));
+    expect(executor.getExecutions("plain")[0].success).toBe(true);
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.settle).not.toHaveBeenCalled();
+    executor.setRunHooks(undefined);
+  });
+});

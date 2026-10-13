@@ -175,6 +175,8 @@ function toExport(agent: AgentConfig): AgentConfigExport {
     lastSessionId: _ls,
     enabled: _en,
     createdBy: _cb,
+    // A link to a brain of this Companion, meaningless elsewhere.
+    brainRole: _br,
     ...exportable
   } = agent;
   // Strip Linear OAuth credentials from export (keep oauthConnectionId for reference)

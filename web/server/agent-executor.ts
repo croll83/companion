@@ -53,6 +53,37 @@ export interface ExecuteAgentOptions {
   systemPrompt?: string;
 }
 
+/** How a run ended, as recorded on the run and the agent. */
+export interface RunOutcome {
+  success: boolean;
+  error?: string;
+  subtype?: string;
+}
+
+/** What a run hook changes for one run (see AgentRunHooks.prepare). */
+export interface RunPreparation {
+  /** Added to the run's environment (never persisted on the agent). */
+  env?: Record<string, string>;
+  /** Model for this run, instead of the agent's. */
+  model?: string;
+  /** Domain for this run, instead of the agent's. */
+  domain?: string;
+}
+
+/**
+ * Extra steps around the runs of some agents (the brains' consolidation
+ * agents, brain-consolidation.ts): `prepare` runs before the session is
+ * launched (throwing fails the run), `settle` after the run ended and may
+ * turn its outcome (e.g. a run whose result is not verified on disk is not
+ * a success). The run stays in progress until `settle` returns, so no other
+ * run of the agent starts meanwhile.
+ */
+export interface AgentRunHooks {
+  appliesTo(agent: AgentConfig): boolean;
+  prepare(agent: AgentConfig, exec: AgentExecution): Promise<RunPreparation>;
+  settle(agent: AgentConfig, exec: AgentExecution, outcome: RunOutcome, result?: CLIResultMessage): Promise<RunOutcome>;
+}
+
 /** Outcome of asking for a run: started, or refused with an HTTP-like status. */
 export type StartRunResult =
   | { ok: true }
@@ -160,6 +191,10 @@ export class AgentExecutor {
   private exitTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Schedule problems to show on the agent (invalid, past or skipped), by agent id. */
   private scheduleIssues = new Map<string, string>();
+  /** Steps around the runs of some agents (setRunHooks). */
+  private runHooks?: AgentRunHooks;
+  /** Runs whose `settle` hook is running: still in progress, not failed by a CLI exit. */
+  private settling = new Set<AgentExecution>();
 
   constructor(launcher: CliLauncher, wsBridge: WsBridge) {
     this.launcher = launcher;
@@ -172,7 +207,6 @@ export class AgentExecutor {
     }
   }
 
-  /** Start all enabled agents with schedule triggers from disk. Called once at server startup. */
   /** How a finished run's session gets archived (wired by the orchestrator). */
   setRunArchiver(archive: (sessionId: string) => Promise<unknown>): void {
     this.runArchiver = archive;
@@ -220,6 +254,17 @@ export class AgentExecutor {
     );
   }
 
+  /** Steps around the runs of the agents the hooks apply to (wired at startup). */
+  setRunHooks(hooks: AgentRunHooks | undefined): void {
+    this.runHooks = hooks;
+  }
+
+  /** The hooks for this agent's runs, if any apply. */
+  private hooksFor(agent: AgentConfig | null | undefined): AgentRunHooks | undefined {
+    return agent && this.runHooks?.appliesTo(agent) ? this.runHooks : undefined;
+  }
+
+  /** Start all enabled agents with schedule triggers from disk. Called once at server startup. */
   startAll(): void {
     if (!this.sweepTimer) {
       this.sweepTimer = setInterval(() => { void this.sweepFinishedRuns(); }, RUN_ARCHIVE_SWEEP_MS);
@@ -418,6 +463,11 @@ export class AgentExecutor {
         envVars = { ...envVars, ...opts.additionalEnv };
       }
       const envSlug = agent.envSlug && envManager.getEnv(agent.envSlug) ? agent.envSlug : undefined;
+      // Hooked agents (brain consolidation): prepared before the launch.
+      // (Not awaited without hooks: the launch stays synchronous for other agents.)
+      const hooks = this.hooksFor(agent);
+      const prep: RunPreparation = hooks ? await hooks.prepare(agent, execution) : {};
+      if (prep.env) envVars = { ...envVars, ...prep.env };
 
       // Context: "fork" copies the source session's conversation and runs in
       // its folder; "brief" (default) starts fresh in the agent's folder.
@@ -443,7 +493,7 @@ export class AgentExecutor {
         );
       }
       const sessionInfo = this.launcher.launch({
-        model: agent.model,
+        model: prep.model ?? agent.model,
         permissionMode: "bypassPermissions",
         cwd,
         env: envVars,
@@ -458,7 +508,7 @@ export class AgentExecutor {
         systemPrompt: agent.backendType === "codex" ? opts.systemPrompt : undefined,
         forkSource,
         // Scheduled and on-demand runs share their domain's memory and tools.
-        domain: agent.domain || GLOBAL_DOMAIN,
+        domain: prep.domain || agent.domain || GLOBAL_DOMAIN,
       });
 
       execution.sessionId = sessionInfo.sessionId;
@@ -506,10 +556,10 @@ export class AgentExecutor {
       console.error(`[agent-executor] Agent "${agent.name}" failed:`, err);
       const error = err instanceof Error ? err.message : String(err);
       if (execution.sessionId) {
-        this.finishRun(execution, { success: false, error });
+        await this.closeRun(execution, { success: false, error });
       } else {
         // Never got a session: record the failed attempt as a closed run.
-        this.finishRun(execution, { success: false, error }, { lastRunAt: Date.now() });
+        await this.closeRun(execution, { success: false, error }, undefined, { lastRunAt: Date.now() });
         this.addExecution(agentId, execution);
       }
       return undefined;
@@ -583,11 +633,11 @@ export class AgentExecutor {
     if (!exec) return;
     const data = message.data;
     const success = !data.is_error;
-    this.finishRun(exec, {
+    void this.closeRun(exec, {
       success,
       subtype: data.subtype,
       error: success ? undefined : resultErrorText(data),
-    });
+    }, data);
   }
 
   /**
@@ -626,10 +676,11 @@ export class AgentExecutor {
    */
   handleSessionExited(sessionId: string, exitCode: number | null): void {
     const exec = this.activeRuns.get(sessionId);
-    if (!exec || this.exitTimers.has(sessionId)) return;
+    if (!exec || this.exitTimers.has(sessionId) || this.settling.has(exec)) return;
     const timer = setTimeout(() => {
       this.exitTimers.delete(sessionId);
-      this.finishRun(exec, {
+      if (this.settling.has(exec)) return;
+      void this.closeRun(exec, {
         success: false,
         error: exitCode
           ? `CLI exited with code ${exitCode} before the run finished`
@@ -645,8 +696,8 @@ export class AgentExecutor {
    */
   handleSessionInitFailed(sessionId: string, error: string): void {
     const exec = this.activeRuns.get(sessionId);
-    if (!exec) return;
-    this.finishRun(exec, { success: false, error: error.slice(0, MAX_ERROR_LENGTH) });
+    if (!exec || this.settling.has(exec)) return;
+    void this.closeRun(exec, { success: false, error: error.slice(0, MAX_ERROR_LENGTH) });
   }
 
   /**
@@ -682,10 +733,37 @@ export class AgentExecutor {
     }
   }
 
+  /**
+   * Close a run: through the agent's `settle` hook first, if one applies
+   * (the run stays in progress until it returns), then finishRun. Without a
+   * hook this completes synchronously.
+   */
+  private async closeRun(
+    exec: AgentExecution,
+    outcome: RunOutcome,
+    result?: CLIResultMessage,
+    agentUpdates: Partial<AgentConfig> = {},
+  ): Promise<void> {
+    if (exec.completedAt || this.settling.has(exec)) return;
+    const agent = agentStore.getAgent(exec.agentId);
+    const hooks = this.hooksFor(agent);
+    if (hooks && agent) {
+      this.settling.add(exec);
+      try {
+        outcome = await hooks.settle(agent, exec, outcome, result);
+      } catch (err) {
+        outcome = { ...outcome, success: false, error: `Could not verify the run: ${err instanceof Error ? err.message : String(err)}` };
+      } finally {
+        this.settling.delete(exec);
+      }
+    }
+    this.finishRun(exec, outcome, agentUpdates);
+  }
+
   /** Close a run once; persist it, update the agent's counters, tidy up. */
   private finishRun(
     exec: AgentExecution,
-    outcome: { success: boolean; error?: string; subtype?: string },
+    outcome: RunOutcome,
     agentUpdates: Partial<AgentConfig> = {},
   ): void {
     if (exec.completedAt) return;
@@ -765,5 +843,6 @@ export class AgentExecutor {
     this.activeRuns.clear();
     this.launching.clear();
     this.scheduleIssues.clear();
+    this.settling.clear();
   }
 }
