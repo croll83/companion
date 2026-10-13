@@ -75,6 +75,18 @@ describe("checkBrainHealth", () => {
     expect(seen[0]).toMatchObject({ method: "GET", url: "/healthz" });
   });
 
+  // The inbox counts feed "N notes waiting" on the brain's card; junk values are dropped.
+  it("passes the inbox counts through", async () => {
+    handler = (_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ status: "ok", inbox: { pending: 3, accepted: 1, bogus: "x" } }));
+    };
+    const b = brain();
+    expect((await checkBrainHealth(b)).inbox).toEqual({ pending: 3, accepted: 1 });
+    handler = (_req, res) => res.end(JSON.stringify({ status: "ok", inbox: [1] }));
+    expect((await checkBrainHealth(b)).inbox).toBeUndefined();
+  });
+
   it("reports an HTTP error and a non-JSON body", async () => {
     handler = (_req, res) => { res.statusCode = 503; res.end("down"); };
     expect(await checkBrainHealth(brain())).toMatchObject({ reachable: false, status: 503, error: "HTTP 503" });

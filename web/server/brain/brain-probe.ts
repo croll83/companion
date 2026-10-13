@@ -29,8 +29,18 @@ export interface BrainHealth {
   version?: string;
   pages?: number;
   content_hash?: string;
+  /** Notes in the brain's inbox by status (embedded brains and jarvis-brain report them). */
+  inbox?: Record<string, number>;
   error?: string;
   checkedAt: number;
+}
+
+/** `{pending: 3, accepted: 1}` from the health JSON; undefined when absent or malformed. */
+function inboxCounts(v: unknown): Record<string, number> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [k, n] of Object.entries(v)) if (typeof n === "number" && Number.isFinite(n)) out[k] = n;
+  return out;
 }
 
 export interface BrainMcpCheck {
@@ -122,6 +132,7 @@ export async function checkBrainHealth(brain: BrainConfig, opts: ProbeOptions = 
       ...(pick<string>(body, "version", "string") ? { version: pick<string>(body, "version", "string") } : {}),
       ...(pick<number>(body, "pages", "number") !== undefined ? { pages: pick<number>(body, "pages", "number") } : {}),
       ...(pick<string>(body, "content_hash", "string") ? { content_hash: pick<string>(body, "content_hash", "string") } : {}),
+      ...(inboxCounts(body.inbox) ? { inbox: inboxCounts(body.inbox) } : {}),
       ...(res.ok ? {} : { error: `HTTP ${res.status}` }),
       checkedAt,
     };

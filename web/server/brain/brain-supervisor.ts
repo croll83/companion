@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { brainDataDir, brainDir, brainLogPath, brainServerName, getBrain, listBrains, type BrainConfig } from "./brain-store.js";
 import { embeddedKeys, ensureEmbeddedSecret } from "./brain-token.js";
 import { childBaseUrl, setChildPort } from "./brain-endpoints.js";
-import { refreshBrainSkill } from "./brain-skill-fetch.js";
+import { refreshBrainSkill, refreshSkillOnNewContent } from "./brain-skill-fetch.js";
+import { brainOwner } from "./brain-git.js";
 
 /**
  * Runs the embedded brains: one child process per brain, the bundle
@@ -25,6 +26,9 @@ import { refreshBrainSkill } from "./brain-skill-fetch.js";
  *    stdin is a pipe Companion never writes: when Companion dies it closes,
  *    and the child exits (BRAIN_EXIT_WITH_PARENT).
  *  - Health: GET /healthz every 30 s; 3 failures in a row kill the child.
+ *    Each answer's wiki content hash goes to `onHealth`: the skill fetched
+ *    from the child follows the wiki (its description lists index.md titles
+ *    and tags), so a new hash refetches it.
  *  - Crashes restart it with a backoff from 1 s to 60 s; 5 crashes within 10
  *    minutes put the brain in `failed`, with a cause and an action for the
  *    page (e.g. "wiki folder missing").
@@ -70,6 +74,8 @@ export interface SupervisorOptions {
   logMaxBytes?: number;
   /** Called each time a child becomes ready (refresh the skill fetched from it). */
   onReady?: (slug: string) => void;
+  /** Called after each good health check with the wiki's content hash. */
+  onHealth?: (slug: string, contentHash: string | undefined) => void;
 }
 
 interface Entry {
@@ -137,7 +143,7 @@ function cmdline(pid: number): string[] | null {
 
 export class BrainSupervisor {
   private entries = new Map<string, Entry>();
-  private o: Required<Omit<SupervisorOptions, "onReady" | "spawn">> & Pick<SupervisorOptions, "onReady" | "spawn">;
+  private o: Required<Omit<SupervisorOptions, "onReady" | "onHealth" | "spawn">> & Pick<SupervisorOptions, "onReady" | "onHealth" | "spawn">;
 
   constructor(opts: SupervisorOptions = {}) {
     this.o = {
@@ -155,6 +161,7 @@ export class BrainSupervisor {
       stableMs: opts.stableMs ?? 60_000,
       logMaxBytes: opts.logMaxBytes ?? 1_000_000,
       onReady: opts.onReady,
+      onHealth: opts.onHealth,
     };
   }
 
@@ -365,7 +372,8 @@ export class BrainSupervisor {
     const env: Record<string, string> = {};
     // Only what the bundle needs: no session or service secrets of Companion's own environment.
     for (const k of ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR"]) if (process.env[k]) env[k] = process.env[k]!;
-    const owner = process.env.USER || process.env.LOGNAME || "the user";
+    // "the knowledge base of Marco Monaco", not of the Unix login.
+    const owner = brainOwner();
     return {
       ...env,
       BRAIN_WIKI_DIR: brain.embedded!.wikiDir,
@@ -504,10 +512,12 @@ export class BrainSupervisor {
     const base = childBaseUrl(e.slug);
     if (!base || !e.child) return;
     let ok = false;
+    let contentHash: string | undefined;
     try {
       const res = await this.o.fetch(`${base}/healthz`, { signal: AbortSignal.timeout(5000) });
-      await res.body?.cancel().catch(() => undefined);
       ok = res.ok;
+      const body = (await res.json().catch(() => ({}))) as { content_hash?: unknown };
+      if (typeof body?.content_hash === "string") contentHash = body.content_hash;
     } catch {
       ok = false;
     }
@@ -515,6 +525,11 @@ export class BrainSupervisor {
     if (ok) {
       e.healthFailures = 0;
       if (e.state === "unhealthy") this.setState(e, "running");
+      try {
+        this.o.onHealth?.(e.slug, contentHash);
+      } catch {
+        /* the hook's problem, not the brain's */
+      }
       return;
     }
     e.healthFailures++;
@@ -572,4 +587,11 @@ function refreshSkillOnReady(slug: string): void {
   refreshBrainSkill(slug).catch((err: unknown) => console.warn(`[brain-supervisor] skill refresh of ${slug} failed:`, err));
 }
 
-export const brainSupervisor = new BrainSupervisor({ onReady: refreshSkillOnReady });
+/** After a health check: a "server" skill built from another wiki version is fetched again. */
+function refreshSkillOnHealth(slug: string, contentHash: string | undefined): void {
+  const brain = getBrain(slug);
+  if (!brain) return;
+  refreshSkillOnNewContent(brain, contentHash).catch((err: unknown) => console.warn(`[brain-supervisor] skill refresh of ${slug} failed:`, err));
+}
+
+export const brainSupervisor = new BrainSupervisor({ onReady: refreshSkillOnReady, onHealth: refreshSkillOnHealth });
