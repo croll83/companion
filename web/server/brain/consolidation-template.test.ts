@@ -18,10 +18,10 @@ vi.mock("../paths.js", () => ({
     return h.home;
   },
 }));
+// Codex's default model: the first of its catalogue by priority (codex-models.ts).
 vi.mock("../codex-models.js", () => ({
-  loadCodexCache: () => h.codex,
-  pickerModels: (cache: { models: { slug: string; priority?: number }[] }) =>
-    [...cache.models].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)).map((m) => ({ value: m.slug, label: m.slug, description: "" })),
+  defaultCodexModel: () =>
+    h.codex ? [...(h.codex as { models: { slug: string; priority?: number }[] }).models].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))[0]?.slug : undefined,
 }));
 
 import {

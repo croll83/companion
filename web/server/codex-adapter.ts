@@ -452,7 +452,8 @@ export class CodexAdapter implements IBackendAdapter {
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
   private sessionMetaCb: ((meta: { cliSessionId?: string; model?: string; cwd?: string }) => void) | null = null;
   private disconnectCb: (() => void) | null = null;
-  private initErrorCb: ((error: string) => void) | null = null;
+  // Several listeners: the launcher (fails an agent run, stops the proxy) and ws-bridge (tells the browsers).
+  private initErrorCbs: ((error: string) => void)[] = [];
 
   // State
   private threadId: string | null = null;
@@ -960,8 +961,9 @@ export class CodexAdapter implements IBackendAdapter {
     this.disconnectCb = cb;
   }
 
+  /** Adds a listener: registering one must not drop another's (a single slot left agent runs "running" forever). */
   onInitError(cb: (error: string) => void): void {
-    this.initErrorCb = cb;
+    this.initErrorCbs.push(cb);
   }
 
   isConnected(): boolean {
@@ -1222,7 +1224,9 @@ export class CodexAdapter implements IBackendAdapter {
       if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
       this.pendingOutgoing.length = 0;
       this.emit({ type: "error", message: errorMsg });
-      this.initErrorCb?.(errorMsg);
+      for (const cb of this.initErrorCbs) {
+        try { cb(errorMsg); } catch (cbErr) { console.error(`[codex-adapter] init error listener failed:`, cbErr); }
+      }
     }
   }
 

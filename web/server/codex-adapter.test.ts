@@ -1458,6 +1458,27 @@ describe("CodexAdapter", () => {
     expect(errors[0]).toContain("initialization failed");
   });
 
+  // The launcher (fails an agent run, stops the proxy) and ws-bridge (tells
+  // the browsers) both listen. With a single slot the second registration
+  // dropped the first, and an agent run whose Codex init failed ("No models
+  // are available") stayed "running" forever.
+  it("calls every onInitError listener, even when one throws", async () => {
+    const first: string[] = [];
+    const second: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onInitError((err) => first.push(err));
+    adapter.onInitError(() => { throw new Error("listener bug"); });
+    adapter.onInitError((err) => second.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, error: { code: -1, message: "No models are available" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(first).toHaveLength(1);
+    expect(second).toEqual(first);
+    expect(first[0]).toContain("No models are available");
+  });
+
   it("rejects messages and discards queue after init failure", async () => {
     // Verify that after initialization fails, sendBrowserMessage returns false
     // and any previously queued messages are discarded (no memory leak).
