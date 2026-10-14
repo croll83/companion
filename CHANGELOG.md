@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/croll83/companion/compare/the-companion-v1.4.0...the-companion-v1.4.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **release:** upload the tarball of the released version, never a stray one ([6f717ae](https://github.com/croll83/companion/commit/6f717ae933ecc2bf98faff101f57df513f37fb4a))
+
 ## [1.4.0](https://github.com/croll83/companion/compare/the-companion-v1.3.0...the-companion-v1.4.0) (2026-10-14)
 
 
