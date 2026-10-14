@@ -2175,3 +2175,27 @@ describe("brains API", () => {
     if (body !== undefined) expect(JSON.parse(opts.body)).toEqual(body);
   });
 });
+
+// ===========================================================================
+// Guided migration of a legacy session's folder memory
+// ===========================================================================
+describe("legacy memory", () => {
+  // The target domain goes in the query (so notes already there are flagged), only when given.
+  it("reads a session's folder memory, with or without a target domain", async () => {
+    const memory = { backend: "claude", dir: "/m", notes: [] };
+    mockFetch.mockResolvedValue(mockResponse(memory));
+    expect(await api.getLegacyMemory("s 1", "herd")).toEqual(memory);
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/sessions/s%201/legacy-memory?domain=herd");
+    await api.getLegacyMemory("s1");
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/sessions/s1/legacy-memory");
+  });
+
+  it("posts the chosen notes to copy into a domain", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ copied: ["a.md"], skipped: [] }));
+    expect(await api.copyLegacyMemory("s1", "herd", ["a.md"])).toEqual({ copied: ["a.md"], skipped: [] });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/s1/legacy-memory/copy");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ domain: "herd", files: ["a.md"] });
+  });
+});

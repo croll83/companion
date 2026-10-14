@@ -131,6 +131,15 @@ Send `"cron": "0 9 * * 1-5"` instead of `at` for a repeating wake-up. A wake-up 
 
 `POST /api/sessions/:id/message` with `{"content": "..."}` sends a user message into a session. It works for sessions whose CLI is not running: the message is queued and the session is relaunched on its saved conversation, like a wake-up. The response says `"delivery": "sent"` or `"queued"`. Archived sessions answer `409`.
 
+### Migrating a legacy session into a domain
+
+Sessions started before domains show a yellow **legacy memory** badge in the session panel. They keep spawning as before (their own memory, no domain skills, MCP servers or instructions) until you migrate them, one at a time, with **Migrate to domain** → pick a domain (GLOBAL included) → **Migrate and restart**. The CLI restarts on the same conversation and folder, from then on with the domain's memory, skills, MCP servers and instructions.
+
+What happens to the memory depends on the backend:
+
+- **Claude Code** stops reading its folder auto-memory (`~/.claude/projects/<folder>/memory/`, or the folder the session was pinned to). Before migrating, a dialog lists the notes of that folder, each with its type, description and a preview. All are checked by default, except the ones whose file is already in the domain memory (shown as "already in the domain"). **Copy N notes and migrate** copies the checked notes into `~/companion_domain_<slug>/memory/`, adds one line per note to its `MEMORY.md`, then migrates. **Migrate without copying** migrates straight away, and **Cancel** changes nothing. Notes are copied, never moved: the old folder is left as it is. A note whose file name is already in the domain memory is never overwritten: it is reported as skipped. If the copy fails, the session is not migrated. A session with no folder memory migrates directly.
+- **Codex** loses nothing: `~/.codex/AGENTS.md` is part of the domain instructions, project `AGENTS.md` files still apply, and the thread is the same. It migrates without a dialog.
+
 ### Archiving sessions
 
 Remove sessions from the sidebar by archiving them. This:
