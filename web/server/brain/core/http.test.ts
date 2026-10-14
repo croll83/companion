@@ -288,6 +288,15 @@ describe("curator API", () => {
     expect((await api("POST", `/consolidation/runs/${r2.json.run_id}/abandon`, {})).status).toBe(400);
     expect((await api("POST", `/consolidation/runs/${r2.json.run_id}/abandon`, { reason: "test" })).status).toBe(200);
     expect((await api("GET", "/consolidation/runs")).json.runs).toHaveLength(2);
+    // A later run the same day gets a fresh id (<date>-2), with the pending notes,
+    // never the day's closed run back (real bug: a manual run then "Consolidate now").
+    const r3 = await api("POST", "/consolidation/runs", {});
+    expect(r3.json.run_id).toBe(`${r2.json.run_id}-2`);
+    expect(r3.json.status).toBe("open");
+    expect(r3.json.counts.undecided).toBeGreaterThanOrEqual(1);
+    // While it is open, a start without run_id resumes it.
+    expect((await api("POST", "/consolidation/runs", {})).json.run_id).toBe(r3.json.run_id);
+    expect((await api("POST", `/consolidation/runs/${r3.json.run_id}/abandon`, { reason: "test" })).status).toBe(200);
     expect((await api("GET", "/consolidation/runs/nope")).status).toBe(404);
     expect(readFileSync(join(wikiDir, "entities", "billing-service.md"), "utf8")).toBe(before);
   });

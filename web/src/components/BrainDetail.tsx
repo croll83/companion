@@ -256,11 +256,19 @@ export function BrainDetail({
           </p>
         </section>
 
+        {/* A remote brain is consolidated on its own server: only its owners may run that from Companion, so it hides under Advanced. */}
         {!embedded && (
-          <section aria-label="Consolidation agent" className="space-y-1">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Consolidation</h3>
+          <details aria-label="Consolidation agent" className="space-y-1">
+            <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-cc-muted">
+              Advanced: consolidation (brain owners only)
+            </summary>
+            <p className="text-[12px]">
+              A remote brain is normally consolidated on its own server, by whoever runs it: its users need nothing here. If you own this
+              brain and consolidate it from Companion, first create an agent of your own with access to the brain&apos;s wiki and the right to
+              commit and push to it (its prompt, schedule and push are yours), then link it here to follow its runs.
+            </p>
             <BrainConsolidation brain={brain} waiting={waiting} />
-          </section>
+          </details>
         )}
 
         <BrainSkill

@@ -142,7 +142,7 @@ Each run lists its trigger, start time, duration, notes waiting, the decisions t
 
 **Limits.** The wiki folder must be a git repository on a branch (new brains are). The agent commits locally only: pushing to a remote (`master` or pull-request modes) is not available yet, and a wiki that is also edited elsewhere through a remote needs its own sync. A web address added as a source is read only if the agent has a web tool; otherwise its note is deferred. The agent's runs show in **Agents** too; running it from there goes through the same preparation and checks.
 
-**Remote brains** are consolidated where their server runs. In a remote brain's page, **Consolidation** can link an agent you already run for it: its runs then show on the brain's page. The Companion changes nothing in that agent (prompt, schedule, how it pushes) and adds no step to its runs.
+**Remote brains** are consolidated where their server runs, by whoever owns it: their users need nothing here. For the owners only, a remote brain's page has a closed **Advanced: consolidation** section. If you own the brain and consolidate it from Companion, first create an agent of your own with access to the brain's wiki and the right to commit and push to it, then link it there: its runs show on the brain's page. The Companion changes nothing in that agent (prompt, schedule, how it pushes) and adds no step to its runs.
 
 ### Security of embedded brains
 

@@ -79,9 +79,24 @@ export class Consolidation {
     `);
   }
 
-  /** Start a run, or return it if it already exists (idempotent on run_id; default run_id = today's date). */
+  /**
+   * The default run_id: today's date, or the date's own run while it is still
+   * open (resumed), else the first free `<date>-2`, `<date>-3`... A second run
+   * on the same day must not get back the day's finalized run.
+   */
+  private freeRunId(): string {
+    const day = this.now().toISOString().slice(0, 10);
+    const status = (id: string) => (this.db.prepare("SELECT status FROM cons_run WHERE run_id = ?").get(id) as { status: string } | undefined)?.status;
+    for (let n = 1; ; n++) {
+      const id = n === 1 ? day : `${day}-${n}`;
+      const s = status(id);
+      if (s === undefined || s === "open") return id;
+    }
+  }
+
+  /** Start a run, or return it if it already exists (idempotent on an explicit run_id; default run_id: freeRunId). */
   start(runIdIn: string | undefined, wiki: WikiSnapshot): RunView {
-    const runId = runIdIn?.trim() || this.now().toISOString().slice(0, 10);
+    const runId = runIdIn?.trim() || this.freeRunId();
     if (!RUN_ID_RE.test(runId)) throw new HttpError(400, "invalid run_id (3-64 characters: letters, digits, . _ -)");
     if (this.db.prepare("SELECT run_id FROM cons_run WHERE run_id = ?").get(runId)) return this.view(runId, wiki);
     const open = this.db.prepare("SELECT run_id FROM cons_run WHERE status = 'open'").get() as { run_id: string } | undefined;

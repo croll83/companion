@@ -255,9 +255,16 @@ describe("BrainDetail", () => {
     expect(mockApi.brainConsolidation).toHaveBeenCalledWith("work");
   });
 
-  it("shows the consolidation agent link in a remote brain's overview", async () => {
+  // A remote brain is consolidated on its own server: linking an agent is for
+  // the brain's owners only, so it sits in a closed "Advanced" section that
+  // explains what such an agent needs (Marco, 2026-10-14).
+  it("keeps the consolidation agent link of a remote brain under a closed Advanced section", async () => {
     setup(jarvisBrain({ collisions: [] }));
-    const section = screen.getByRole("region", { name: "Consolidation agent" });
+    const section = screen.getByRole("group", { name: "Consolidation agent" });
+    expect(section).not.toHaveAttribute("open");
+    expect(within(section).getByText(/brain owners only/)).toBeInTheDocument();
+    expect(within(section).getByText(/right to\s+commit and push/)).toBeInTheDocument();
+    fireEvent.click(within(section).getByText(/brain owners only/));
     expect(await within(section).findByRole("form", { name: "Link the consolidation agent" })).toBeInTheDocument();
   });
 });
