@@ -80,9 +80,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         working-directory: web
         run: |
-          tarball=$(ls the-companion-*.tgz | head -n 1)
-          if [ -z "$tarball" ]; then
-            echo "ERROR: no tarball produced by npm pack" >&2
+          # The tarball of THIS version, by name: a stray the-companion-*.tgz in
+          # the checkout once got uploaded instead (1.4.0 shipped 0.103.0's).
+          tarball="the-companion-$(node -p "require('./package.json').version").tgz"
+          if [ ! -f "$tarball" ]; then
+            echo "ERROR: npm pack did not produce $tarball" >&2
             exit 1
           fi
           echo "Uploading $tarball to release ${{ needs.release-please.outputs.tag_name }}"
