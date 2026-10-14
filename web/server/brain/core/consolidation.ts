@@ -253,7 +253,8 @@ export function logEntry(run: RunView, now: Date, summary?: string): string {
   const created = [...new Set(decided.filter((i) => i.is_new_page).map((i) => i.target))];
   const c = (k: string) => run.counts[k] ?? 0;
   return [
-    `## [${stamp}] consolidate`,
+    // Same shape as the scaffold's SCHEMA.md convention: `## [date time] <action> | <subject>`.
+    `## [${stamp}] consolidate | run ${run.run_id}`,
     `- Pages touched: ${touched.length ? touched.join(", ") : "none"}${created.length ? `; new pages proposed: ${created.join(", ")}` : ""}`,
     `- Notes: brain inbox run ${run.run_id}: ${c("accepted")} accepted, ${c("rejected")} rejected, ${c("deferred")} deferred, ${c("discarded")} discarded, ${c("undecided")} left for the next run.`,
     ...(summary?.trim() ? [`- Summary: ${summary.trim().replace(/\s+/g, " ")}`] : []),

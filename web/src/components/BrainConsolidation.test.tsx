@@ -30,7 +30,7 @@ import { latestSonnet } from "../utils/backends.js";
 const runs: BrainConsolidationRun[] = [
   { id: "r3", trigger: "threshold", status: "not_synced", startedAt: Date.UTC(2026, 9, 14, 9), finishedAt: Date.UTC(2026, 9, 14, 9, 2, 5), pending: 12, sessionId: "s3", model: "claude-sonnet-5-5", decided: { accepted: 3, rejected: 1, undecided: 0 }, commit: "abc1234", costUsd: 0.42, tokens: { input: 1500, output: 300 }, error: "Consolidated but not synced: git pull --ff-only failed" },
   { id: "r2", trigger: "schedule", status: "skipped", startedAt: Date.UTC(2026, 9, 13, 5), finishedAt: Date.UTC(2026, 9, 13, 5), pending: 0, error: "No note waiting" },
-  { id: "r1", trigger: "catch-up", status: "success", startedAt: Date.UTC(2026, 9, 12, 5), finishedAt: Date.UTC(2026, 9, 12, 5, 0, 45), commit: "def5678" },
+  { id: "r1", trigger: "catch-up", status: "success", startedAt: Date.UTC(2026, 9, 12, 5), finishedAt: Date.UTC(2026, 9, 12, 5, 0, 45), commit: "def5678", lint: { errors: 1, warnings: 0 } },
 ];
 
 function view(over: Partial<BrainConsolidationView> = {}): BrainConsolidationView {
@@ -72,6 +72,8 @@ describe("BrainConsolidation (embedded)", () => {
     expect(items[1]).toHaveTextContent("Skipped · scheduled");
     expect(items[1]).toHaveTextContent("No note waiting");
     expect(items[2]).toHaveTextContent("Success · catch-up at startup");
+    // The wiki check made after the sync.
+    expect(items[2]).toHaveTextContent("wiki check: 1 errors, 0 warnings");
   });
 
   it("passes axe accessibility scan", async () => {

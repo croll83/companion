@@ -68,6 +68,7 @@ function RunItem({ run }: { run: BrainConsolidationRun }) {
     run.pending !== undefined && run.status !== "skipped" ? `${run.pending} waiting` : "",
     decided,
     run.commit ? `commit ${run.commit}` : "",
+    run.lint ? (run.lint.errors || run.lint.warnings ? `wiki check: ${run.lint.errors} errors, ${run.lint.warnings} warnings` : "wiki check clean") : "",
     run.model ?? "",
     run.costUsd ? `$${run.costUsd.toFixed(2)}` : "",
     run.tokens ? `${run.tokens.input.toLocaleString()} in / ${run.tokens.output.toLocaleString()} out tokens` : "",

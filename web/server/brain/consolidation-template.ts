@@ -77,7 +77,7 @@ Steps:
    - deferred: needs a person or a check you cannot do here.
    - discarded: noise, or contains something that must not be stored (secrets, personal data).
    - A "source_pointer" note points to a source. A file under raw/ is in your clone: read it and bring its facts into the right pages, citing it as raw/... in their sources. A web address: fetch it only if you have a web tool, otherwise defer the note.
-6. Lint every page you changed or created with POST /lint/page and fix the errors you introduced (problems elsewhere are not your job).
+6. Lint every page you changed or created with POST /lint/page and fix the errors you introduced (problems elsewhere are not your job). The brain lints against the wiki as it was before your run: a source under raw/ or a page you added in this run is reported missing until Companion syncs your commit; ignore only those findings (check them yourself in your clone). Companion lints the whole wiki again after the sync. Lint content pages only, not index.md or log.md.
 7. POST /consolidation/runs/RUN/finalize {"summary"} and append the returned log_entry to log.md as SCHEMA.md prescribes.
 8. Commit everything in your clone, on the branch it is on: git add -A && git commit -m "consolidation: <date>: <N> notes accepted" (body: one line per accepted note, page and fact). Do not push.
 9. Never write secret values (passwords, tokens, keys) in pages, commit messages or your answer.

@@ -280,7 +280,7 @@ describe("curator API", () => {
     const fin = await api("POST", "/consolidation/runs/2026-10-13-test/finalize", { summary: "one correction applied" });
     expect(fin.status).toBe(200);
     expect(fin.json.released).toContain(fact2);
-    expect(fin.json.log_entry).toMatch(/^## \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] consolidate\n- Pages touched: entities\/billing-service.md/);
+    expect(fin.json.log_entry).toMatch(/^## \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] consolidate \| run 2026-10-13-test\n- Pages touched: entities\/billing-service.md/);
     expect(locked.brain.inbox.get(fact2)!.status).toBe("pending");
 
     const r2 = await api("POST", "/consolidation/runs", {});

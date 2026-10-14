@@ -81,6 +81,7 @@ function fakeExecutor(over: Partial<ConsolidationExecutor> = {}) {
 function fakeCurator(state: { pending: number; refreshFails?: boolean; runsFail?: boolean; runs?: { run_id: string; created_at: string; counts: Record<string, number> }[] }) {
   return vi.fn(async (_slug: string, path: string) => {
     if (path.startsWith("/inbox/notes")) return { counts: { pending: state.pending } } as never;
+    if (path === "/lint") return { errors: 0, warnings: 2 } as never;
     if (path === "/admin/refresh") {
       if (state.refreshFails) throw new Error("The brain is not running: start it first");
       return { changed: true } as never;
@@ -357,6 +358,8 @@ describe("prepare and settle (real git)", () => {
     expect(run).toMatchObject({ status: "success", sessionId: "s1", costUsd: 0.42, tokens: { input: 150, output: 50 }, decided: { accepted: 1, rejected: 1, undecided: 0 } });
     expect(run.commit).toBe(sh(wiki, "rev-parse", "--short", "HEAD"));
     expect(existsSync(join(wiki, "concepts", "new.md"))).toBe(true);
+    // The whole wiki is linted again after the sync (the agent could only lint against the old wiki).
+    expect(run.lint).toEqual({ errors: 0, warnings: 2 });
 
     // After the run the pass is dead.
     const dead = await handleBrainProxy(new Request(`http://127.0.0.1${path}/inbox/notes`), "127.0.0.1", deps);

@@ -82,6 +82,8 @@ export interface ConsolidationRun {
   tokens?: { input: number; output: number };
   /** Why it was skipped, not synced or failed. */
   error?: string;
+  /** The brain's lint of the whole wiki right after the sync (the agent can only lint its pages against the wiki as it was). */
+  lint?: { errors: number; warnings: number };
 }
 
 const MAX_RUNS = 50;
@@ -617,6 +619,17 @@ export class BrainConsolidation implements AgentRunHooks {
     const sync = await this.syncIntoWiki(slug, dir, wikiDir, branch);
     run.status = sync.ok ? "success" : "not_synced";
     if (!sync.ok) run.error = sync.error;
+    else run.lint = await this.lintAfterSync(slug);
+  }
+
+  /** Errors and warnings of the synced wiki; undefined when the brain cannot lint it (the run stays a success). */
+  private async lintAfterSync(slug: string): Promise<{ errors: number; warnings: number } | undefined> {
+    try {
+      const r = await this.curator<{ errors?: number; warnings?: number }>(slug, "/lint");
+      return { errors: r.errors ?? 0, warnings: r.warnings ?? 0 };
+    } catch {
+      return undefined;
+    }
   }
 
   /** `git pull --ff-only <clone> <branch>` in the wiki folder, then the brain reloads the wiki. */

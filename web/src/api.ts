@@ -652,6 +652,8 @@ export interface BrainConsolidationRun {
   costUsd?: number;
   tokens?: { input: number; output: number };
   error?: string;
+  /** The wiki's lint right after the sync. */
+  lint?: { errors: number; warnings: number };
 }
 
 /** GET /brains/:slug/consolidation. */
