@@ -59,6 +59,12 @@ vi.mock("./env-manager.js", () => ({
 
 const mockTranscriptExists = vi.hoisted(() => vi.fn(() => true));
 vi.mock("./claude-session-history.js", () => ({ claudeTranscriptExists: mockTranscriptExists }));
+// The Codex catalogue's default model, for sessions launched without one.
+const mockDefaultCodexModel = vi.hoisted(() => vi.fn<() => string | undefined>(() => undefined));
+vi.mock("./codex-models.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./codex-models.js")>()),
+  defaultCodexModel: mockDefaultCodexModel,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
@@ -454,6 +460,28 @@ describe("launch", () => {
     const [, options] = mockSpawn.mock.calls[0];
     expect(options.env.MY_VAR).toBe("hello");
     expect(options.env.CLAUDECODE).toBeUndefined();
+  });
+
+  // An agent saved without a model launched a Codex session with none, and
+  // codex app-server refused the thread ("No models are available. Set
+  // `model` explicitly"): the run then hung. The catalogue's default fills in.
+  it("gives a Codex session without a model the catalogue's default model", () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    mockDefaultCodexModel.mockReturnValue("gpt-test-sol");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const info = launcher.launch({ backendType: "codex", cwd: "/tmp/project" });
+    expect(info.model).toBe("gpt-test-sol");
+
+    // A chosen model is kept, and Claude sessions never get a Codex model.
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    expect(launcher.launch({ backendType: "codex", cwd: "/tmp/project", model: "gpt-chosen" }).model).toBe("gpt-chosen");
+    mockSpawn.mockReturnValueOnce(createMockProc());
+    expect(launcher.launch({ backendType: "claude", cwd: "/tmp/project" }).model).toBeUndefined();
+
+    // No catalogue yet: no model, Codex picks its own.
+    mockDefaultCodexModel.mockReturnValue(undefined);
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    expect(launcher.launch({ backendType: "codex", cwd: "/tmp/project" }).model).toBeUndefined();
   });
 
   it("enables Codex web search when codexInternetAccess=true", () => {

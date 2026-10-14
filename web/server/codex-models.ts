@@ -213,5 +213,15 @@ export function pickerModels(cache: CodexModelsCache): CodexPickerModel[] {
     .map((m) => ({ value: m.slug, label: m.display_name || m.slug, description: m.description || "" }));
 }
 
+/**
+ * The model a Codex session gets when none was chosen (an agent created
+ * without one): the first of the picker list, as the UI would preselect.
+ * Undefined while no catalogue exists yet: Codex then picks its own.
+ */
+export function defaultCodexModel(): string | undefined {
+  const cache = loadCodexCache();
+  return cache ? pickerModels(cache)[0]?.value : undefined;
+}
+
 /** Test seam: drop the memos. */
 export function resetCodexModelsCache(): void { cached = null; versionMemo = null; }

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { AgentConfig, AgentConfigCreateInput } from "../agent-types.js";
 import { GLOBAL_DOMAIN, listDomains } from "../domain-store.js";
 import { latestSonnet } from "../claude-models.js";
-import { loadCodexCache, pickerModels } from "../codex-models.js";
+import { defaultCodexModel } from "../codex-models.js";
 import { brainDir, type BrainConfig, type ConsolidationConfig } from "./brain-store.js";
 
 /**
@@ -34,10 +34,7 @@ export function consolidationDomain(slug: string): string {
  */
 export function resolveConsolidationModel(c: Pick<ConsolidationConfig, "backend" | "model">): string | undefined {
   if (c.model) return c.model;
-  if (c.backend === "codex") {
-    const cache = loadCodexCache();
-    return cache ? pickerModels(cache)[0]?.value : undefined;
-  }
+  if (c.backend === "codex") return defaultCodexModel();
   return latestSonnet();
 }
 

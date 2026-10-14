@@ -19,7 +19,7 @@ import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
 import { isValidEffort, supportsUltracode } from "./effort.js";
-import { isValidCodexEffort } from "./codex-models.js";
+import { defaultCodexModel, isValidCodexEffort } from "./codex-models.js";
 import { claudeTranscriptExists } from "./claude-session-history.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
@@ -604,6 +604,13 @@ export class CliLauncher {
     const sessionId = randomUUID();
     const cwd = options.cwd || process.cwd();
     const backendType = options.backendType || "claude";
+    // A Codex session without a model (an agent saved with the default) gets
+    // the catalogue's first model: Codex's app-server can refuse to start a
+    // thread without one ("No models are available. Set `model` explicitly").
+    if (backendType === "codex" && !options.model) {
+      const model = defaultCodexModel();
+      if (model) options = { ...options, model };
+    }
 
     const info: SdkSessionInfo = {
       sessionId,
