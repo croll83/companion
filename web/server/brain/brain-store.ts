@@ -1,22 +1,32 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { COMPANION_HOME } from "../paths.js";
 import { ensurePrivateDir, writePrivateFile } from "../private-file.js";
 import { isValidSlug, slugify, updateDomainsAtomically } from "../domain-store.js";
+import { childBaseUrl, embeddedProxyUrl } from "./brain-endpoints.js";
 
 /**
  * Brains: a knowledge base (an LLM wiki behind an MCP server) that the
  * sessions of a domain can search and read. One brain per domain (the
  * domain's `brain` field, domain-store.ts); a new brain is on nowhere.
  *
- * Phase 1 knows only REMOTE brains: an URL Companion does not run (jarvis-brain
- * on its LXC, a team brain). "embedded" (run by Companion) is reserved for
- * phase 2. Brains are virtual: Companion never writes into domain folders or
- * their mcp.json; domain-runtime.ts adds the brain to each spawn.
+ * Two kinds:
+ *  - REMOTE: an URL Companion does not run (jarvis-brain on its LXC, a team
+ *    brain);
+ *  - EMBEDDED: Companion runs the brain server itself (the bundle
+ *    dist/brain/brain.js, brain-supervisor.ts) on a wiki folder of this
+ *    machine; sessions reach it through Companion's port (brain-proxy.ts).
+ * Brains are virtual: Companion never writes into domain folders or their
+ * mcp.json; domain-runtime.ts adds the brain to each spawn.
  *
  * On disk, COMPANION_HOME/brains/<slug>/:
  *  - brain.json: the configuration (never a token),
- *  - secret: the bearer token, 0600, never returned by the API,
+ *  - secret: 0600, never returned by the API: a remote brain's bearer token,
+ *    or an embedded brain's 32-byte key (brain-token.ts),
+ *  - data/ (embedded): the child's inbox.db and brain.pid lockfile,
+ *  - logs/brain.log (embedded): the child's output, size-capped,
  *  - server-skill.md: the skill fetched from the brain's server (`<base>/skill`,
  *    brain-skill-fetch.ts), when the skill's source is "server",
  *  - plugin/: generated at every change, a Claude plugin
@@ -74,6 +84,20 @@ export interface BrainSkillConfig {
   note?: string;
 }
 
+/** Stemming of an embedded brain's search: Italian, English, both ("auto", mixed wikis) or none. */
+export const BRAIN_LANGUAGES = ["auto", "it", "en", "none"] as const;
+export type BrainLanguage = (typeof BRAIN_LANGUAGES)[number];
+
+export interface EmbeddedBrainConfig {
+  /** Absolute path of the wiki folder (SCHEMA.md and index.md at its root). Never written by Companion. */
+  wikiDir: string;
+  /** Start the brain when Companion starts. */
+  autostart: boolean;
+  /** Replace secrets found in the wiki with [REDACTED:<rule>] in what sessions read. */
+  redactSecrets: boolean;
+  language: BrainLanguage;
+}
+
 export interface BrainConfig {
   slug: string;
   name: string;
@@ -82,6 +106,7 @@ export interface BrainConfig {
   /** What the brain is about, in the user's words: the generated skill's description. */
   about: string;
   remote?: RemoteBrainConfig;
+  embedded?: EmbeddedBrainConfig;
   skill: BrainSkillConfig;
 }
 
@@ -133,6 +158,16 @@ function serverSkillPath(slug: string): string {
   return join(brainDir(slug), "server-skill.md");
 }
 
+/** An embedded brain's data folder (inbox.db, brain.pid). */
+export function brainDataDir(slug: string): string {
+  return join(brainDir(slug), "data");
+}
+
+/** An embedded brain's log (the child's stdout and stderr). */
+export function brainLogPath(slug: string): string {
+  return join(brainDir(slug), "logs", "brain.log");
+}
+
 // ── URLs ────────────────────────────────────────────────────────────────────
 
 /** An http(s) URL, trimmed, without trailing slashes; null when invalid. */
@@ -164,8 +199,17 @@ export function sameUrl(a: string | undefined, b: string | undefined): boolean {
   return canon(a) === canon(b);
 }
 
-/** The URLs of a brain: <base>/mcp, <base>/healthz, <base>/api/v1, <base>/skill, unless overridden. */
-export function brainUrls(brain: Pick<BrainConfig, "remote">): BrainUrls {
+/**
+ * The URLs of a brain: <base>/mcp, <base>/healthz, <base>/api/v1, <base>/skill,
+ * unless overridden. An embedded brain's MCP URL is the proxy on Companion's
+ * port (what sessions use); the others are the child's own, on its ephemeral
+ * port (port 0 while it is not running: nothing answers there).
+ */
+export function brainUrls(brain: Pick<BrainConfig, "remote"> & Partial<Pick<BrainConfig, "kind" | "slug">>): BrainUrls {
+  if (brain.kind === "embedded" && brain.slug) {
+    const base = childBaseUrl(brain.slug) ?? "http://127.0.0.1:0";
+    return { mcpUrl: embeddedProxyUrl(brain.slug), healthUrl: `${base}/healthz`, apiUrl: `${base}/api/v1`, skillUrl: `${base}/skill` };
+  }
   const r = brain.remote;
   const base = r?.baseUrl ?? "";
   return {
@@ -223,12 +267,25 @@ function normalizeSkill(raw: unknown): BrainSkillConfig {
   return { source: "generated", ...note };
 }
 
+function normalizeEmbedded(raw: unknown): EmbeddedBrainConfig | null {
+  const e = raw as Partial<EmbeddedBrainConfig> | undefined;
+  if (!e || typeof e.wikiDir !== "string" || !isAbsolute(e.wikiDir)) return null;
+  return {
+    wikiDir: e.wikiDir,
+    autostart: e.autostart !== false,
+    redactSecrets: e.redactSecrets !== false,
+    language: (BRAIN_LANGUAGES as readonly string[]).includes(e.language as string) ? (e.language as BrainLanguage) : "auto",
+  };
+}
+
 function normalize(raw: unknown, slug: string): BrainConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const b = raw as Partial<BrainConfig>;
   const kind: BrainKind = b.kind === "embedded" ? "embedded" : "remote";
+  const embedded = kind === "embedded" ? normalizeEmbedded(b.embedded) : null;
+  if (kind === "embedded" && !embedded) return null;
   const r = b.remote as Partial<RemoteBrainConfig> | undefined;
-  const baseUrl = normalizeHttpUrl(r?.baseUrl);
+  const baseUrl = kind === "remote" ? normalizeHttpUrl(r?.baseUrl) : null;
   if (kind === "remote" && !baseUrl) return null;
   const mcpUrl = normalizeHttpUrl(r?.mcpUrl);
   const healthUrl = normalizeHttpUrl(r?.healthUrl);
@@ -246,6 +303,7 @@ function normalize(raw: unknown, slug: string): BrainConfig | null {
         auth: normalizeAuth(r?.auth),
       },
     } : {}),
+    ...(embedded ? { embedded } : {}),
     skill: normalizeSkill(b.skill),
   };
 }
@@ -506,7 +564,87 @@ export function createRemoteBrain(input: CreateBrainInput): BrainResult {
   return { ok: true, brain };
 }
 
-export type BrainPatch = Omit<CreateBrainInput, "slug">;
+export interface CreateEmbeddedBrainInput {
+  name?: unknown;
+  slug?: unknown;
+  about?: unknown;
+  /** An existing wiki folder: absolute or `~/...`, with SCHEMA.md and index.md at its root. */
+  wikiDir?: unknown;
+  autostart?: unknown;
+  redactSecrets?: unknown;
+  language?: unknown;
+}
+
+/** `~/x` → the home folder's x; anything else as given, resolved. Null when not absolute. */
+function absoluteDir(value: string): string | null {
+  const v = value.trim();
+  const expanded = v === "~" ? homedir() : v.startsWith("~/") ? join(homedir(), v.slice(2)) : v;
+  return isAbsolute(expanded) ? resolve(expanded) : null;
+}
+
+/**
+ * Check a wiki folder for an embedded brain: an absolute folder that exists
+ * and has SCHEMA.md and index.md at its root (creating a new wiki from a
+ * template is not part of this). The normalized path, or an error message.
+ */
+export function checkWikiDir(value: unknown): { ok: true; path: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || !value.trim()) return { ok: false, error: "The wiki folder is required" };
+  const path = absoluteDir(value);
+  if (!path) return { ok: false, error: "The wiki folder must be an absolute path (or start with ~/)" };
+  try {
+    if (!statSync(path).isDirectory()) return { ok: false, error: `${path} is not a folder` };
+  } catch {
+    return { ok: false, error: `The folder ${path} does not exist` };
+  }
+  const missing = ["SCHEMA.md", "index.md"].filter((f) => !existsSync(join(path, f)));
+  if (missing.length) return { ok: false, error: `${path} is not a brain wiki: ${missing.join(" and ")} missing at its root` };
+  return { ok: true, path };
+}
+
+function parseFlag(value: unknown, label: string, fallback: boolean): boolean | Error {
+  if (value === undefined) return fallback;
+  return typeof value === "boolean" ? value : new Error(`${label} must be true or false`);
+}
+
+function parseLanguage(value: unknown, fallback: BrainLanguage): BrainLanguage | Error {
+  if (value === undefined) return fallback;
+  return (BRAIN_LANGUAGES as readonly unknown[]).includes(value) ? (value as BrainLanguage) : new Error(`language must be one of ${BRAIN_LANGUAGES.join(", ")}`);
+}
+
+/**
+ * Create an embedded brain on an existing wiki folder. It is assigned to no
+ * domain (off by default). A random secret (the keys of its tokens and of
+ * its curator API) is written next to brain.json; starting the child is the
+ * supervisor's job.
+ */
+export function createEmbeddedBrain(input: CreateEmbeddedBrainInput): BrainResult {
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (!name) return fail(400, "Brain name is required");
+  const slug = typeof input.slug === "string" && input.slug.trim() ? input.slug.trim() : slugify(name);
+  if (!isValidSlug(slug)) return fail(400, "The name must contain letters or digits");
+  if (existsSync(brainDir(slug))) return fail(409, `A brain "${slug}" already exists`);
+  if (input.about !== undefined && typeof input.about !== "string") return fail(400, "Invalid about text");
+  const wiki = checkWikiDir(input.wikiDir);
+  if (!wiki.ok) return fail(400, wiki.error);
+  const autostart = parseFlag(input.autostart, "autostart", true);
+  const redactSecrets = parseFlag(input.redactSecrets, "redactSecrets", true);
+  const language = parseLanguage(input.language, "auto");
+  for (const v of [autostart, redactSecrets, language]) if (v instanceof Error) return fail(400, v.message);
+  const brain: BrainConfig = {
+    slug,
+    name,
+    kind: "embedded",
+    createdAt: Date.now(),
+    about: typeof input.about === "string" ? input.about.trim() : "",
+    embedded: { wikiDir: wiki.path, autostart: autostart as boolean, redactSecrets: redactSecrets as boolean, language: language as BrainLanguage },
+    skill: { source: "generated" },
+  };
+  saveBrain(brain);
+  writeBrainToken(slug, randomBytes(32).toString("hex"));
+  return { ok: true, brain };
+}
+
+export type BrainPatch = Omit<CreateBrainInput, "slug"> & Pick<CreateEmbeddedBrainInput, "autostart" | "redactSecrets" | "language">;
 
 /**
  * Change a brain: name, about, URLs, auth mode, token (a string sets it, null
@@ -516,7 +654,7 @@ export type BrainPatch = Omit<CreateBrainInput, "slug">;
 export function updateBrain(slug: string, patch: BrainPatch): BrainResult {
   const cur = getBrain(slug);
   if (!cur) return fail(404, "Brain not found");
-  const next: BrainConfig = { ...cur, remote: cur.remote ? { ...cur.remote } : undefined };
+  const next: BrainConfig = { ...cur, remote: cur.remote ? { ...cur.remote } : undefined, embedded: cur.embedded ? { ...cur.embedded } : undefined };
   if (patch.name !== undefined) {
     if (typeof patch.name !== "string" || !patch.name.trim()) return fail(400, "Invalid name");
     next.name = patch.name.trim();
@@ -554,9 +692,19 @@ export function updateBrain(slug: string, patch: BrainPatch): BrainResult {
     const tokenAfter = token === undefined ? hasBrainToken(slug) : token !== null;
     if (remote.auth.mode === "bearer" && !tokenAfter) return fail(400, "Bearer authentication needs a token");
   }
+  // The wiki folder is fixed: another folder is another brain (its inbox refers to these pages).
+  const embedded = next.embedded;
+  if (embedded) {
+    const autostart = parseFlag(patch.autostart, "autostart", embedded.autostart);
+    const redactSecrets = parseFlag(patch.redactSecrets, "redactSecrets", embedded.redactSecrets);
+    const language = parseLanguage(patch.language, embedded.language);
+    for (const v of [autostart, redactSecrets, language]) if (v instanceof Error) return fail(400, v.message);
+    Object.assign(embedded, { autostart, redactSecrets, language });
+  }
   saveBrain(next);
-  if (next.remote?.auth.mode !== "bearer") writeBrainToken(slug, null);
-  else if (token !== undefined) writeBrainToken(slug, token);
+  // An embedded brain's secret is its key, not a bearer token: never touched here.
+  if (next.remote && next.remote.auth.mode !== "bearer") writeBrainToken(slug, null);
+  else if (next.remote && token !== undefined) writeBrainToken(slug, token);
   return { ok: true, brain: next };
 }
 
@@ -597,8 +745,9 @@ export function applyServerSkill(slug: string, update: ServerSkillUpdate): Brain
 
 /**
  * Delete a brain: it is cleared from every domain (in one registry write),
- * then its folder (config, token, generated plugin) is removed. A remote
- * brain's wiki is elsewhere and is never touched.
+ * then its folder (config, token, generated plugin; an embedded brain's
+ * inbox and log too) is removed. The wiki folder is never touched, for
+ * either kind. An embedded brain must be stopped first (the routes do it).
  */
 export function deleteBrain(slug: string): { ok: true; clearedFrom: string[] } | { ok: false; status: 404; error: string } {
   if (!getBrain(slug)) return { ok: false, status: 404, error: "Brain not found" };

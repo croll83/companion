@@ -44,6 +44,11 @@ jobs:
         with:
           bun-version: latest
 
+      # vitest runs under Node: the brain core's tests need node:sqlite (Node >= 22.13).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Install dependencies
         working-directory: web
         run: bun install
@@ -66,3 +71,7 @@ jobs:
         env:
           VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
           VITE_POSTHOG_HOST: ${{ vars.VITE_POSTHOG_HOST || 'https://us.i.posthog.com' }}
+
+      - name: Brain bundle smoke test (the built dist/brain/brain.js under Bun)
+        working-directory: web
+        run: bun run test:brain-smoke

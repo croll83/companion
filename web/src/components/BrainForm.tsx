@@ -1,10 +1,11 @@
 import { useId, useState, type ReactNode } from "react";
 import type { BrainAuth, BrainAuthMode, BrainInfo, BrainInput } from "../api.js";
 
-const FIELD = "w-full px-2 py-1.5 rounded-md bg-cc-input-bg border border-cc-border text-[13px] focus:outline-none focus:ring-1 focus:ring-cc-primary";
+export const FIELD = "w-full px-2 py-1.5 rounded-md bg-cc-input-bg border border-cc-border text-[13px] focus:outline-none focus:ring-1 focus:ring-cc-primary";
 const HTTP_URL = /^https?:\/\/\S+$/i;
 
-function Field({ id, label, hint, children }: { id: string; label: string; hint?: ReactNode; children: ReactNode }) {
+/** A labelled form field with an optional hint (shared by the brain forms). */
+export function Field({ id, label, hint, children }: { id: string; label: string; hint?: ReactNode; children: ReactNode }) {
   return (
     <div>
       <label htmlFor={id} className="block text-[11px] text-cc-muted">{label}</label>

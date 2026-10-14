@@ -2148,6 +2148,10 @@ describe("brains API", () => {
     ["testBrain", () => api.testBrain("jarvis"), "/api/brains/jarvis/test", "POST", {}],
     ["refreshBrainSkill", () => api.refreshBrainSkill("jarvis"), "/api/brains/jarvis/skill/refresh", "POST", {}],
     ["adoptPluginAsBrain", () => api.adoptPluginAsBrain("jarvis", "jarvis-brain@lab"), "/api/brains/jarvis/adopt-plugin", "POST", { pluginId: "jarvis-brain@lab" }],
+    ["createBrain (embedded)", () => api.createBrain({ kind: "embedded", name: "Work", wikiDir: "/w" }), "/api/brains", "POST", { kind: "embedded", name: "Work", wikiDir: "/w" }],
+    ["brainProcess", () => api.brainProcess("work", "restart"), "/api/brains/work/restart", "POST", {}],
+    ["brainLogs", () => api.brainLogs("work"), "/api/brains/work/logs?lines=100", "GET", undefined],
+    ["brainLogs (lines)", () => api.brainLogs("work", 5), "/api/brains/work/logs?lines=5", "GET", undefined],
   ])("%s", async (_name, call, url, method, body) => {
     mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
     await call();

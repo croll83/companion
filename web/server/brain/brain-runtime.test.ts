@@ -18,7 +18,11 @@ vi.mock("../paths.js", () => ({
 }));
 
 import { createDomain, ensureGlobalDomain, getDomain, updateDomain, type DomainInfo } from "../domain-store.js";
-import { createRemoteBrain } from "./brain-store.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { createEmbeddedBrain, createRemoteBrain } from "./brain-store.js";
+import { embeddedKeys } from "./brain-token.js";
+import { verifyToken } from "./core/token.js";
+import { setCompanionPort, getCompanionPort } from "./brain-endpoints.js";
 import {
   adoptPluginAsBrain,
   brainForDomain,
@@ -206,5 +210,38 @@ describe("codexShellExcludeOverride", () => {
       'exclude = ["not-this-one"]',
     ].join("\n");
     expect(codexShellExcludeOverride(toml)).toBe('shell_environment_policy.exclude=["AWS_*", "MY_SECRET", "COMPANION_BRAIN_*"]');
+  });
+});
+
+describe("embedded brains", () => {
+  function embedded(): void {
+    const wiki = join(tmp, "wiki");
+    mkdirSync(wiki, { recursive: true });
+    writeFileSync(join(wiki, "SCHEMA.md"), "# s\n");
+    writeFileSync(join(wiki, "index.md"), "# i\n");
+    const r = createEmbeddedBrain({ name: "Work", wikiDir: wiki });
+    if (!r.ok) throw new Error(r.error);
+  }
+
+  // Sessions get the proxy on Companion's port and a brn_ token naming their domain and session.
+  it("gives each session the proxy URL and its own brn_ token, for both CLIs", () => {
+    embedded();
+    updateDomain("herd", { brain: "work" });
+    const port = getCompanionPort();
+    setCompanionPort(3456);
+    try {
+      const b = brainForDomain(ctx("herd"), "sess-42")!;
+      expect(b.mcpUrl).toBe("http://127.0.0.1:3456/brains/work/mcp");
+      expect(verifyToken(embeddedKeys("work")!.tokenKey, b.token)).toEqual({ domain: "herd", sessionId: "sess-42" });
+      expect(claudeBrainServer(b)).toEqual({ type: "http", url: b.mcpUrl, headers: { Authorization: `Bearer ${b.token}` } });
+      // Codex: an env var reference in config.toml (never the literal), the token on the process env.
+      expect(codexBrainServer(b).headers).toEqual({ Authorization: "Bearer ${COMPANION_BRAIN_WORK_TOKEN}" });
+      expect(codexBrainEnv(b)).toEqual({ COMPANION_BRAIN_WORK_TOKEN: b.token });
+      // Without a session (views, skill linking) no token is minted.
+      expect(brainForDomain(ctx("herd"))!.token).toBeUndefined();
+      expect(collidingPlugins(b.brain, [plugin("p@lab", "http://127.0.0.1:3456/other/mcp")])).toEqual([]);
+    } finally {
+      setCompanionPort(port);
+    }
   });
 });

@@ -22,6 +22,9 @@ import { registerBrainRoutes } from "./brain-routes.js";
 import { registerDomainRoutes } from "./domain-routes.js";
 import { getDomain } from "../domain-store.js";
 import type { FetchLike } from "../brain/brain-probe.js";
+import { embeddedKeys } from "../brain/brain-token.js";
+import { setChildPort } from "../brain/brain-endpoints.js";
+import type { BrainRuntimeStatus } from "../brain/brain-supervisor.js";
 
 const TOKEN = "super-secret-token-value";
 let tmp: string;
@@ -129,6 +132,160 @@ describe("secrets", () => {
     // The token did reach the brain (server side only).
     expect(fakeFetch.mock.calls.some(([, init]) => (init as RequestInit).headers && JSON.stringify((init as RequestInit).headers).includes(TOKEN))).toBe(true);
     expect(readFileSync(join(h.home, "brains", "team", "secret"), "utf-8").trim()).toBe(`${TOKEN}-2`);
+  });
+});
+
+/** A fake supervisor: "running" children on a fixed port, and a log. */
+function fakeSupervisor() {
+  const states = new Map<string, BrainRuntimeStatus["state"]>();
+  const sup = {
+    start: vi.fn((slug: string) => {
+      states.set(slug, "running");
+      setChildPort(slug, 45999);
+    }),
+    stop: vi.fn(async (slug: string) => {
+      states.set(slug, "stopped");
+      setChildPort(slug, null);
+    }),
+    restart: vi.fn(async (slug: string) => {
+      states.set(slug, "running");
+    }),
+    status: vi.fn((slug: string): BrainRuntimeStatus => ({ state: states.get(slug) ?? "stopped", crashes: 0, ...(states.get(slug) === "running" ? { port: 45999, pid: 4242 } : {}) })),
+    waitRunning: vi.fn(async (slug: string) => states.get(slug) === "running"),
+    logTail: vi.fn((_slug: string, n?: number) => ["line 1", "line 2"].slice(-(n ?? 200))),
+  };
+  return sup;
+}
+
+const SKILL_DOC = {
+  skill_api: 1,
+  name: "work-brain",
+  description: "Use the Work brain.",
+  skill_md: "---\nname: work-brain\ndescription: Use the Work brain.\n---\n# Work brain\n\nRules.\n",
+  server_version: "1.0.0",
+  content_hash: "h1",
+  tools: ["brain_search"],
+};
+
+function wikiFolder(): string {
+  const dir = join(tmp, "wiki");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "SCHEMA.md"), "# s\n");
+  writeFileSync(join(dir, "index.md"), "# i\n");
+  return dir;
+}
+
+describe("embedded brains", () => {
+  let sup: ReturnType<typeof fakeSupervisor>;
+  let eapp: Hono;
+  let childFetch: Mock<FetchLike>;
+
+  beforeEach(() => {
+    sup = fakeSupervisor();
+    eapp = new Hono();
+    childFetch = vi.fn<FetchLike>(async (url: string) => {
+      if (url.endsWith("/skill")) return new Response(JSON.stringify(SKILL_DOC), { headers: { etag: '"e1"' } });
+      if (url.endsWith("/healthz")) return new Response(JSON.stringify({ status: "ok", version: "1.0.0", pages: 9, content_hash: "h1" }));
+      return new Response("{}", { status: 404 });
+    });
+    registerBrainRoutes(eapp, { fetch: childFetch, supervisor: sup, readyWaitMs: 50 });
+    registerDomainRoutes(eapp, { listSessions: () => [] }, { refreshAccountMcp: async () => ({ servers: [], at: Date.now() }) });
+  });
+
+  afterEach(() => setChildPort("work", null));
+
+  async function createWork(extra: Record<string, unknown> = {}) {
+    const res = await eapp.request("/brains", send("POST", { kind: "embedded", name: "Work", about: "Team wiki", wikiDir: wikiFolder(), ...extra }));
+    expect(res.status).toBe(201);
+    return res.json();
+  }
+
+  // Created from an existing folder, started, and its own skill taken from the child.
+  it("creates, starts and takes the skill the child publishes", async () => {
+    const b = await createWork({ language: "it" });
+    expect(sup.start).toHaveBeenCalledWith("work");
+    expect(b).toMatchObject({
+      slug: "work", kind: "embedded", serverName: "work-brain", hasToken: false, domains: [],
+      embedded: { language: "it", autostart: true, redactSecrets: true },
+      runtime: { state: "running", port: 45999 },
+      skill: { source: "server" },
+    });
+    expect(b.urls.mcpUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/brains\/work\/mcp$/);
+    expect(b.skillText).toMatch(/^---\nname: work-brain\n/);
+    expect(childFetch.mock.calls.map(([u]) => u)).toContain("http://127.0.0.1:45999/skill");
+  });
+
+  it("rejects a folder that is not a wiki", async () => {
+    const res = await eapp.request("/brains", send("POST", { kind: "embedded", name: "Work", wikiDir: join(tmp, "nope") }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/does not exist/);
+    expect(sup.start).not.toHaveBeenCalled();
+  });
+
+  it("keeps the generated skill when the child does not come up", async () => {
+    sup.waitRunning.mockResolvedValue(false);
+    const b = await createWork();
+    expect(b.skill.source).toBe("generated");
+    expect(childFetch).not.toHaveBeenCalled();
+  });
+
+  it("starts, stops and restarts the child, and shows its log", async () => {
+    await createWork();
+    let res = await eapp.request("/brains/work/stop", send("POST"));
+    expect(await res.json()).toEqual({ runtime: { state: "stopped", crashes: 0 } });
+    res = await eapp.request("/brains/work/start", send("POST"));
+    expect((await res.json()).runtime.state).toBe("running");
+    res = await eapp.request("/brains/work/restart", send("POST"));
+    expect(sup.restart).toHaveBeenCalledWith("work");
+    expect((await res.json()).runtime.state).toBe("running");
+    expect(await (await eapp.request("/brains/work/logs?lines=1")).json()).toEqual({ lines: ["line 2"] });
+    expect(sup.logTail).toHaveBeenCalledWith("work", 1);
+    expect((await eapp.request("/brains/nope/start", send("POST"))).status).toBe(404);
+    expect((await eapp.request("/brains/nope/logs")).status).toBe(404);
+    // A remote brain does not run in Companion.
+    await eapp.request("/brains", send("POST", { name: "Far", baseUrl: "http://100.64.0.9:7421", skill: { source: "generated" } }));
+    expect((await eapp.request("/brains/far/restart", send("POST"))).status).toBe(409);
+  });
+
+  it("health includes the supervisor's state; a change in the child's env restarts it", async () => {
+    await createWork();
+    const health = await (await eapp.request("/brains/work/health")).json();
+    expect(health).toMatchObject({ reachable: true, pages: 9, runtime: { state: "running" } });
+    const res = await eapp.request("/brains/work", send("PATCH", { language: "en" }));
+    expect(res.status).toBe(200);
+    expect(sup.restart).toHaveBeenCalledWith("work");
+    expect((await res.json()).embedded.language).toBe("en");
+    sup.restart.mockClear();
+    await eapp.request("/brains/work", send("PATCH", { autostart: false }));
+    expect(sup.restart).not.toHaveBeenCalled();
+  });
+
+  it("deleting stops the child first and leaves the wiki folder alone", async () => {
+    await createWork();
+    const res = await eapp.request("/brains/work", send("DELETE"));
+    expect(res.status).toBe(200);
+    expect(sup.stop).toHaveBeenCalledWith("work");
+    expect(existsSync(join(tmp, "wiki", "SCHEMA.md"))).toBe(true);
+    expect(existsSync(join(h.home, "brains", "work"))).toBe(false);
+  });
+
+  // The embedded brain's secret, its derived keys and any session token never leave the server.
+  it("never returns the secret or the keys", async () => {
+    const bodies: string[] = [JSON.stringify(await createWork())];
+    for (const path of ["/brains", "/brains/work", "/brains/work/health", "/brains/work/logs", "/domains"]) {
+      const res = await eapp.request(path);
+      expect(res.status).toBe(200);
+      bodies.push(await res.text());
+    }
+    for (const action of ["start", "restart"]) bodies.push(await (await eapp.request(`/brains/work/${action}`, send("POST"))).text());
+    const secret = readFileSync(join(h.home, "brains", "work", "secret"), "utf-8").trim();
+    const keys = embeddedKeys("work")!;
+    for (const body of bodies) {
+      expect(body).not.toContain(secret);
+      expect(body).not.toContain(keys.tokenKey);
+      expect(body).not.toContain(keys.curatorKey);
+      expect(body).not.toContain("brn_");
+    }
   });
 });
 

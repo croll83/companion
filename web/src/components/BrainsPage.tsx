@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type BrainInfo, type BrainInput } from "../api.js";
+import { api, type BrainInfo, type BrainInput, type EmbeddedBrainInput } from "../api.js";
 import { useMediaQuery } from "../hooks/use-media-query.js";
 import { brainsHash } from "../utils/routing.js";
 import { BrainDetail, type BrainActions } from "./BrainDetail.js";
 import { BrainForm } from "./BrainForm.js";
+import { EmbeddedBrainForm } from "./EmbeddedBrainForm.js";
 import { BrainList, type BrainHealthState } from "./BrainList.js";
 import { Sheet } from "./Sheet.js";
 
 /**
  * Brains page (#/brains): knowledge bases with an MCP server that the
- * sessions of a domain can search and read. Phase 1 connects REMOTE brains
- * (an URL, no auth, a bearer token or OAuth with a pre-registered client).
+ * sessions of a domain can search and read: REMOTE brains (an URL, no auth,
+ * a bearer token or OAuth with a pre-registered client) and EMBEDDED brains
+ * (Companion runs the brain server on an existing wiki folder of this
+ * machine; start, stop, restart and its log in the brain's page).
  * One brain per domain, chosen on the domain's page; a new brain is on
  * nowhere. A health check that refetched the server's skill reloads the list.
  *
  * Phones: the list, then one brain (#/brains/<slug>); desktop: both side by
- * side. "Connect remote brain" opens a sheet. Health is checked once per
- * brain when the page opens, and on demand.
+ * side. "Connect remote brain" and "Embedded brain" open a sheet. Health is
+ * checked once per brain when the page opens, and on demand.
  */
 export function BrainsPage({ slug }: { slug?: string } = {}) {
   const [brains, setBrains] = useState<BrainInfo[] | null>(null);
@@ -24,6 +27,7 @@ export function BrainsPage({ slug }: { slug?: string } = {}) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [embedding, setEmbedding] = useState(false);
   const desktop = useMediaQuery("(min-width: 1024px)");
   const asked = useRef(new Set<string>());
 
@@ -70,9 +74,10 @@ export function BrainsPage({ slug }: { slug?: string } = {}) {
     }
   }, [reload]);
 
-  const connect = (input: BrainInput) => run(async () => {
+  const connect = (input: BrainInput | EmbeddedBrainInput) => run(async () => {
     const created = await api.createBrain(input);
     setConnecting(false);
+    setEmbedding(false);
     window.location.hash = brainsHash(created.slug);
   });
 
@@ -93,13 +98,21 @@ export function BrainsPage({ slug }: { slug?: string } = {}) {
     }),
     onCheckHealth: checkHealth,
     onRefreshSkill: (s) => run(() => api.refreshBrainSkill(s)),
+    onProcess: (s, action) => run(() => api.brainProcess(s, action)).then((ok) => {
+      if (ok && action !== "stop") checkHealth(s);
+      return ok;
+    }),
+    onLoadLogs: (s) => api.brainLogs(s).then((r) => r.lines).catch((e: unknown) => {
+      setError(e instanceof Error ? e.message : String(e));
+      return null;
+    }),
   };
 
   const selected = brains?.find((b) => b.slug === slug) ?? (desktop ? brains?.[0] : undefined);
   const unknown = !!brains && !!slug && !brains.some((b) => b.slug === slug);
 
   const list = brains && (
-    <BrainList brains={brains} health={health} selected={selected?.slug} onConnect={() => setConnecting(true)} />
+    <BrainList brains={brains} health={health} selected={selected?.slug} onConnect={() => setConnecting(true)} onEmbed={() => setEmbedding(true)} />
   );
   const detail = selected && (
     <BrainDetail key={selected.slug} brain={selected} health={health[selected.slug]} desktop={desktop} busy={busy} actions={actions} />
@@ -143,6 +156,17 @@ export function BrainsPage({ slug }: { slug?: string } = {}) {
             server and a skill to the sessions of the domains you choose; it never writes into the brain.
           </p>
           <BrainForm busy={busy} onSubmit={connect} onCancel={() => setConnecting(false)} />
+        </Sheet>
+      )}
+
+      {embedding && (
+        <Sheet title="Embedded brain" onClose={() => setEmbedding(false)}>
+          <p className="mb-3 text-[12px] text-cc-muted leading-relaxed">
+            Companion runs the brain server itself, on a wiki folder of this machine (a folder with SCHEMA.md and index.md, such as
+            an LLM wiki kept by an agent). Sessions of the domains you choose can search and read it and leave notes in its inbox;
+            Companion never writes the wiki.
+          </p>
+          <EmbeddedBrainForm busy={busy} onSubmit={connect} onCancel={() => setEmbedding(false)} />
         </Sheet>
       )}
     </div>

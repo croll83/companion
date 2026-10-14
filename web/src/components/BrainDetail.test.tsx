@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { BrainDetail, type BrainActions } from "./BrainDetail.js";
-import { jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
+import { embeddedBrain, jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
 import type { BrainInfo, BrainTestResult } from "../api.js";
 
 const okTest: BrainTestResult = {
@@ -24,6 +24,8 @@ function actions(over: Partial<BrainActions> = {}): BrainActions {
     onTest: vi.fn(async () => okTest),
     onCheckHealth: vi.fn(),
     onRefreshSkill: vi.fn(async () => true),
+    onProcess: vi.fn(async () => true),
+    onLoadLogs: vi.fn(async () => ["2026-10-13T10:00:00Z [supervisor] started pid 4242"]),
     ...over,
   };
 }
@@ -152,6 +154,41 @@ describe("BrainDetail", () => {
   it("passes axe accessibility scan for an OAuth brain", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<BrainDetail brain={oauthBrain()} health={{ reachable: true, checkedAt: 0 }} desktop busy={false} actions={actions()} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // An embedded brain: its folder instead of a health URL, the per-session
+  // token as auth, the process section, its own edit form, and a removal
+  // text that says the inbox goes and the wiki stays.
+  it("shows an embedded brain with its process, edit form and removal text", async () => {
+    const a = setup(embeddedBrain());
+    // In the header and in the troubleshooting details.
+    expect(screen.getAllByText("/home/me/wiki", { selector: "dd" })).toHaveLength(2);
+    expect(screen.getByText("A token per session, minted by Companion")).toBeInTheDocument();
+    expect(screen.queryByText("http://127.0.0.1:45999/healthz")).toBeNull();
+    const proc = screen.getByRole("region", { name: "Brain process" });
+    expect(proc).toHaveTextContent("Running");
+    fireEvent.click(within(proc).getByRole("button", { name: "Restart" }));
+    expect(a.onProcess).toHaveBeenCalledWith("work", "restart");
+    fireEvent.click(within(proc).getByRole("button", { name: "Show log" }));
+    expect(await within(proc).findByLabelText("Brain log")).toHaveTextContent("started pid 4242");
+    expect(a.onLoadLogs).toHaveBeenCalledWith("work");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit brain" }));
+    expect(screen.getByRole("form", { name: "Edit brain Work" })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Start with Companion"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(a.onUpdate).toHaveBeenCalledWith("work", { name: "Work", about: "Team wiki", language: "auto", redactSecrets: true, autostart: false });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit brain" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove brain…" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("deletes its settings, inbox and log; the wiki folder is not touched");
+  });
+
+  it("passes axe accessibility scan for an embedded brain", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<BrainDetail brain={embeddedBrain({ runtime: { state: "failed", crashes: 5, cause: "The wiki folder is missing.", action: "Restore it." } })} health={{ reachable: false, checkedAt: 0 }} desktop busy={false} actions={actions()} />);
+    await screen.findByLabelText("Brain log");
     expect(await axe(container)).toHaveNoViolations();
   });
 });

@@ -1,4 +1,5 @@
 import { brainUrls, readBrainToken, type BrainConfig } from "./brain-store.js";
+import { mintBrainToken } from "./brain-token.js";
 
 /**
  * Server-side checks of a remote brain, for the Brains page. Results never
@@ -72,6 +73,11 @@ export function errorText(err: unknown, timeoutMs: number): string {
 }
 
 function authHeaders(brain: BrainConfig): Record<string, string> {
+  // An embedded brain's MCP URL is Companion's own proxy: a token of its own, as if from a GLOBAL session.
+  if (brain.kind === "embedded") {
+    const token = mintBrainToken(brain.slug, "GLOBAL", "companion-test");
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
   if (brain.remote?.auth.mode !== "bearer") return {};
   const token = readBrainToken(brain.slug);
   return token ? { Authorization: `Bearer ${token}` } : {};

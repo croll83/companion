@@ -5,6 +5,8 @@
  * sheet, and every action through the API followed by a reload. Errors are
  * shown; an unknown brain in the URL is reported. A health check that
  * refetched a server skill reloads the list; "Refresh skill" goes to the API.
+ * Embedded brains: created from a sheet, started/stopped/restarted and their
+ * log read through the API.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -19,11 +21,13 @@ const mockApi = vi.hoisted(() => ({
   testBrain: vi.fn(),
   adoptPluginAsBrain: vi.fn(),
   refreshBrainSkill: vi.fn(),
+  brainProcess: vi.fn(),
+  brainLogs: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
 import { BrainsPage } from "./BrainsPage.js";
-import { jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
+import { embeddedBrain, jarvisBrain, oauthBrain, teamBrain } from "../test-fixtures/brains.js";
 
 const originalMatchMedia = window.matchMedia;
 function desktop(on: boolean) {
@@ -161,5 +165,36 @@ describe("BrainsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh skill" }));
     await waitFor(() => expect(mockApi.refreshBrainSkill).toHaveBeenCalledWith("hercle"));
     await waitFor(() => expect(mockApi.listBrains).toHaveBeenCalledTimes(3));
+  });
+
+  it("creates an embedded brain from its sheet and opens it", async () => {
+    mockApi.createBrain.mockResolvedValueOnce(embeddedBrain());
+    render(<BrainsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Embedded brain (existing wiki folder)" }));
+    expect(screen.getByRole("dialog", { name: "Embedded brain" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Work" } });
+    fireEvent.change(screen.getByLabelText("Wiki folder"), { target: { value: "/home/me/wiki" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create brain" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/brains/work"));
+    expect(mockApi.createBrain).toHaveBeenCalledWith({ kind: "embedded", name: "Work", about: "", wikiDir: "/home/me/wiki", language: "auto", redactSecrets: true });
+  });
+
+  // Start/Stop/Restart go to the API, then the list reloads and health is checked again (not after Stop).
+  it("drives an embedded brain's process and reads its log", async () => {
+    mockApi.listBrains.mockResolvedValue({ brains: [embeddedBrain()] });
+    mockApi.brainProcess.mockResolvedValue({ runtime: { state: "running", crashes: 0 } });
+    mockApi.brainLogs.mockResolvedValueOnce({ lines: ["hello log"] }).mockRejectedValueOnce(new Error("log unreadable"));
+    render(<BrainsPage slug="work" />);
+    await screen.findByRole("article", { name: "Brain Work" });
+    fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+    await waitFor(() => expect(mockApi.brainProcess).toHaveBeenCalledWith("work", "restart"));
+    await waitFor(() => expect(mockApi.brainHealth).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(mockApi.brainProcess).toHaveBeenCalledWith("work", "stop"));
+    fireEvent.click(screen.getByRole("button", { name: "Show log" }));
+    expect(await screen.findByLabelText("Brain log")).toHaveTextContent("hello log");
+    fireEvent.click(screen.getByRole("button", { name: "Reload log" }));
+    expect(await screen.findByText("log unreadable")).toBeInTheDocument();
+    expect(mockApi.brainHealth).toHaveBeenCalledTimes(2);
   });
 });

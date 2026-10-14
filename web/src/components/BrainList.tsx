@@ -26,19 +26,22 @@ export function brainDomainsText(brain: BrainInfo): string {
 }
 
 /**
- * The list of brains: name, about, URL, health, and the domains using each.
- * A row opens the brain (#/brains/<slug>); "Connect remote brain" opens the form.
+ * The list of brains: name, about, URL (or wiki folder), health, and the
+ * domains using each. A row opens the brain (#/brains/<slug>); "Connect
+ * remote brain" and "Embedded brain" open their forms.
  */
 export function BrainList({
   brains,
   health,
   selected,
   onConnect,
+  onEmbed,
 }: {
   brains: BrainInfo[];
   health: Record<string, BrainHealthState>;
   selected?: string;
   onConnect: () => void;
+  onEmbed: () => void;
 }) {
   return (
     <nav aria-label="Brains">
@@ -54,10 +57,10 @@ export function BrainList({
                 <div className="flex items-center gap-2">
                   <HealthDot health={health[b.slug]} />
                   <span className="text-[13px] font-semibold truncate">{b.name}</span>
-                  <span className="ml-auto text-[10px] text-cc-muted shrink-0">Remote</span>
+                  <span className="ml-auto text-[10px] text-cc-muted shrink-0">{b.kind === "embedded" ? "Embedded" : "Remote"}</span>
                 </div>
                 {b.about && <p className="text-[11px] text-cc-muted truncate">{b.about}</p>}
-                <p className="text-[10px] text-cc-muted font-mono-code truncate">{b.remote?.baseUrl ?? b.urls.mcpUrl}</p>
+                <p className="text-[10px] text-cc-muted font-mono-code truncate">{b.remote?.baseUrl ?? b.embedded?.wikiDir ?? b.urls.mcpUrl}</p>
                 <p className="text-[10px] text-cc-muted">
                   {brainDomainsText(b)}
                   {b.collisions.some((c) => c.domains.length > 0) ? " · a plugin serves the same URL" : ""}
@@ -68,7 +71,8 @@ export function BrainList({
         </ul>
       ) : (
         <p className="rounded-xl border border-cc-border bg-cc-card px-3 py-3 text-[12px] text-cc-muted">
-          No brain yet. Connect a remote one: a knowledge base with an MCP server, such as a wiki on your tailnet.
+          No brain yet. Connect a remote one (a knowledge base with an MCP server, such as a wiki on your tailnet), or let
+          Companion run one on a wiki folder of this machine.
         </p>
       )}
       <button
@@ -77,6 +81,13 @@ export function BrainList({
         className="mt-2 w-full px-3 py-2 rounded-xl border border-dashed border-cc-border text-[12px] text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
       >
         Connect remote brain
+      </button>
+      <button
+        type="button"
+        onClick={onEmbed}
+        className="mt-2 w-full px-3 py-2 rounded-xl border border-dashed border-cc-border text-[12px] text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+      >
+        Embedded brain (existing wiki folder)
       </button>
     </nav>
   );

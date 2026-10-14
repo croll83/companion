@@ -10,6 +10,7 @@ import {
   sameUrl,
   type BrainConfig,
 } from "./brain-store.js";
+import { mintBrainToken } from "./brain-token.js";
 
 /**
  * How a domain's brain reaches its sessions (used by domain-runtime.ts):
@@ -27,6 +28,13 @@ import {
  *    model (verified on 0.161), so the skill is linked into CODEX_HOME/skills
  *    and the generated AGENTS.md names the brain. An OAuth brain gets
  *    `[mcp_servers.<slug>-brain.oauth] client_id` (codexMcpTable).
+ *
+ * An EMBEDDED brain is the same for both CLIs, with the proxy on Companion's
+ * port as URL (`http://127.0.0.1:<port>/brains/<slug>/mcp`) and, as bearer
+ * token, a `brn_` token minted for the session at each spawn (it names the
+ * domain and the session: the brain's notes get a real author). Claude gets
+ * it as a literal header (0600 config), Codex through the env var, hidden
+ * from the commands it runs like any brain token.
  *
  * OAuth tokens are never Companion's: each CLI signs in once from a session's
  * MCP panel (Claude mcp_authenticate, Codex mcpServer/oauth/login) and keeps
@@ -63,11 +71,11 @@ export function brainTokenEnvVar(slug: string): string {
 
 /**
  * The brain of a domain (its own choice, else GLOBAL's), ready for a spawn:
- * plugin generated if missing, token read. Null when none, or when the brain
- * named no longer exists (a hand-edited registry; a deleted brain is cleared
- * from every domain).
+ * plugin generated if missing, token read (or, for an embedded brain, minted
+ * for `sessionId`). Null when none, or when the brain named no longer exists
+ * (a hand-edited registry; a deleted brain is cleared from every domain).
  */
-export function brainForDomain(r: { domain: DomainInfo; global: DomainInfo; isGlobal: boolean }): DomainBrain | null {
+export function brainForDomain(r: { domain: DomainInfo; global: DomainInfo; isGlobal: boolean }, sessionId?: string): DomainBrain | null {
   const own = r.isGlobal ? undefined : r.domain;
   const slug = effectiveBrainSlug(own, r.global);
   if (!slug) return null;
@@ -77,7 +85,9 @@ export function brainForDomain(r: { domain: DomainInfo; global: DomainInfo; isGl
     return null;
   }
   const auth = brain.remote?.auth;
-  const token = auth?.mode === "bearer" ? readBrainToken(slug) : undefined;
+  const token = brain.kind === "embedded"
+    ? sessionId ? mintBrainToken(slug, r.domain.slug, sessionId) ?? undefined : undefined
+    : auth?.mode === "bearer" ? readBrainToken(slug) : undefined;
   if (brain.remote?.auth.mode === "bearer" && !token) {
     console.warn(`[brain-runtime] Brain "${slug}" uses a bearer token but none is set: connecting without it`);
   }
