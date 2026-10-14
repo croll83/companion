@@ -26,6 +26,7 @@ import {
   type FolderMemory,
 } from "./session-folder.js";
 import { domainMemoryDir, getDomain, GLOBAL_DOMAIN } from "./domain-store.js";
+import { copyMemoryNotes, invalidNoteFiles, listMemoryNotes, type CopyNotesResult, type MemoryNote } from "./legacy-memory.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { applyChromePreference } from "./chrome-browser.js";
 import { listConnectedBrowsers } from "./chrome-browser-probe.js";
@@ -718,44 +719,113 @@ export class SessionOrchestrator {
     if (!usesDomain(info)) {
       return { ok: false, status: 409, error: "Sessions from before domains keep their own memory and cannot change domain yet" };
     }
-    if (typeof rawDomain !== "string" || !rawDomain) return { ok: false, status: 400, error: "Domain is required" };
-    if (rawDomain !== GLOBAL_DOMAIN && !getDomain(rawDomain)) return { ok: false, status: 404, error: `Domain not found: ${rawDomain}` };
-    if (rawDomain === info.domain) return { ok: false, status: 400, error: "The session is already in this domain" };
+    const target = this.targetDomain(rawDomain);
+    if (!target.ok) return target;
+    const to = target.slug;
+    if (to === info.domain) return { ok: false, status: 400, error: "The session is already in this domain" };
     const from = info.domain ?? GLOBAL_DOMAIN;
     const interruptsWork = this.interruptsWork(sessionId);
-    log.info("orchestrator", "Moving session to another domain", { sessionId, from, to: rawDomain });
-    this.launcher.setDomain(sessionId, rawDomain);
+    log.info("orchestrator", "Moving session to another domain", { sessionId, from, to });
+    this.launcher.setDomain(sessionId, to);
     const relaunch = await this.relaunchSession(sessionId, { force: true });
     if (!relaunch.ok) {
       return { ok: false, status: 503, error: relaunch.error || "Moved, but the CLI failed to restart" };
     }
-    return { ok: true, from, to: rawDomain, interruptsWork };
+    return { ok: true, from, to, interruptsWork };
   }
 
   /**
    * Migrate a legacy session (from before domains) into a domain and restart
    * its CLI on the same conversation and folder. From then on it reads and
    * writes the domain's memory, not its old folder-based one: notes there are
-   * not copied, so copy the ones to keep into the domain memory first.
+   * not copied here (see copyLegacyMemory, which the UI runs first).
    */
   async migrateSessionToDomain(sessionId: string, rawDomain: unknown): Promise<ChangeDomainResult> {
     const info = this.launcher.getSession(sessionId);
     if (!info) return { ok: false, status: 404, error: "Session not found" };
     if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
     if (usesDomain(info)) return { ok: false, status: 409, error: "The session already uses its domain: use Change domain" };
-    if (typeof rawDomain !== "string" || !rawDomain) return { ok: false, status: 400, error: "Domain is required" };
-    if (rawDomain !== GLOBAL_DOMAIN && !getDomain(rawDomain)) return { ok: false, status: 404, error: `Domain not found: ${rawDomain}` };
+    const target = this.targetDomain(rawDomain);
+    if (!target.ok) return target;
+    const to = target.slug;
     const oldMemory = this.sessionMemory(info)?.dir;
     const interruptsWork = this.interruptsWork(sessionId);
     log.info("orchestrator", "Migrating legacy session into a domain", {
-      sessionId, to: rawDomain, cwd: info.cwd, ...(oldMemory ? { oldMemory } : {}),
+      sessionId, to, cwd: info.cwd, ...(oldMemory ? { oldMemory } : {}),
     });
-    this.launcher.migrateToDomain(sessionId, rawDomain);
+    this.launcher.migrateToDomain(sessionId, to);
     const relaunch = await this.relaunchSession(sessionId, { force: true });
     if (!relaunch.ok) {
       return { ok: false, status: 503, error: relaunch.error || "Migrated, but the CLI failed to restart" };
     }
-    return { ok: true, from: "legacy", to: rawDomain, interruptsWork };
+    return { ok: true, from: "legacy", to, interruptsWork };
+  }
+
+  /** A valid target domain slug, or 400 when missing / 404 when unknown. */
+  private targetDomain(raw: unknown): { ok: true; slug: string } | { ok: false; status: 400 | 404; error: string } {
+    if (typeof raw !== "string" || !raw) return { ok: false, status: 400, error: "Domain is required" };
+    if (raw !== GLOBAL_DOMAIN && !getDomain(raw)) return { ok: false, status: 404, error: `Domain not found: ${raw}` };
+    return { ok: true, slug: raw };
+  }
+
+  /** The live legacy session `sessionId`, or why it is not one. */
+  private legacySession(sessionId: string): { ok: true; info: SdkSessionInfo } | { ok: false; status: 404 | 409; error: string } {
+    const info = this.launcher.getSession(sessionId);
+    if (!info) return { ok: false, status: 404, error: "Session not found" };
+    if (info.archived) return { ok: false, status: 409, error: "Session is archived" };
+    if (usesDomain(info)) return { ok: false, status: 409, error: "The session already uses its domain memory" };
+    return { ok: true, info };
+  }
+
+  // ── Legacy memory (guided migration) ───────────────────────────────────────
+
+  /**
+   * The folder memory a legacy session would stop reading once migrated, for
+   * the user to pick the notes to copy into the domain. Claude: the notes of
+   * the folder it reads now (pinned, else reported by the CLI at init, else
+   * Claude's default for its folder — see sessionMemory). Codex: nothing to
+   * copy (its ~/.codex/AGENTS.md is part of the domain AGENTS.md, project
+   * AGENTS.md files still apply, same thread). With `rawDomain`, each note
+   * says whether its file name is already in that domain's memory.
+   */
+  legacyMemory(sessionId: string, rawDomain?: unknown): LegacyMemoryResult {
+    const legacy = this.legacySession(sessionId);
+    if (!legacy.ok) return legacy;
+    const target = rawDomain === undefined ? undefined : this.targetDomain(rawDomain);
+    if (target && !target.ok) return target;
+    const memory = this.sessionMemory(legacy.info);
+    if (!memory) {
+      return {
+        ok: true,
+        backend: "codex",
+        notes: [],
+        info: "Codex sessions lose nothing: ~/.codex/AGENTS.md is part of the domain instructions, project AGENTS.md files still apply, and the thread is the same.",
+      };
+    }
+    const domainMemory = target ? domainMemoryDir(target.slug) : undefined;
+    return { ok: true, backend: "claude", dir: memory.dir, notes: listMemoryNotes(memory.dir, domainMemory) };
+  }
+
+  /**
+   * Copy notes of a legacy Claude session's folder memory into a domain's
+   * memory (never moving, deleting or overwriting anything) and index them
+   * in the domain MEMORY.md. Every name must be a note of the folder.
+   */
+  copyLegacyMemory(sessionId: string, rawDomain: unknown, files: unknown): CopyLegacyMemoryResult {
+    const legacy = this.legacySession(sessionId);
+    if (!legacy.ok) return legacy;
+    const target = this.targetDomain(rawDomain);
+    if (!target.ok) return target;
+    const memory = this.sessionMemory(legacy.info);
+    if (!memory) return { ok: false, status: 409, error: "Codex sessions have no folder memory to copy" };
+    const invalid = invalidNoteFiles(memory.dir, files);
+    if (invalid) return { ok: false, status: 400, error: invalid };
+    const dest = domainMemoryDir(target.slug);
+    const result = copyMemoryNotes(memory.dir, dest, files as string[]);
+    log.info("orchestrator", "Copied legacy memory notes into a domain", {
+      sessionId, from: memory.dir, to: dest, copied: result.copied.length, skipped: result.skipped.length,
+    });
+    return { ok: true, ...result };
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────
@@ -1030,6 +1100,15 @@ export type SessionFolderPreview =
       memory?: FolderMemory;
     }
   | { ok: false; status: 400 | 404 | 409 | 503; error: string };
+
+export type LegacyMemoryResult =
+  | { ok: true; backend: "claude"; dir: string; notes: MemoryNote[] }
+  | { ok: true; backend: "codex"; notes: []; info: string }
+  | { ok: false; status: 400 | 404 | 409; error: string };
+
+export type CopyLegacyMemoryResult =
+  | ({ ok: true } & CopyNotesResult)
+  | { ok: false; status: 400 | 404 | 409; error: string };
 
 export type ChangeDomainResult =
   | { ok: true; from: string; to: string; interruptsWork: boolean }

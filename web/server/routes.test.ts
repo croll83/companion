@@ -4388,6 +4388,30 @@ describe("session folder and domain routes", () => {
     expect((await app.request("/api/sessions/s1/migrate-domain", { method: "POST" })).status).toBe(409);
   });
 
+  // Guided migration: the routes pass the session, the target domain and the
+  // chosen files through to the orchestrator and map its refusals to statuses.
+  it("lists a legacy session's folder memory and copies chosen notes", async () => {
+    orchestrator.legacyMemory = vi.fn(() => ({ ok: true, backend: "claude", dir: "/m", notes: [{ file: "a.md" }] }));
+    const list = await app.request("/api/sessions/s1/legacy-memory?domain=herd");
+    expect(await list.json()).toEqual({ backend: "claude", dir: "/m", notes: [{ file: "a.md" }] });
+    expect(orchestrator.legacyMemory).toHaveBeenCalledWith("s1", "herd");
+    await app.request("/api/sessions/s1/legacy-memory");
+    expect(orchestrator.legacyMemory).toHaveBeenLastCalledWith("s1", undefined);
+    orchestrator.legacyMemory = vi.fn(() => ({ ok: false, status: 409, error: "not legacy" }));
+    expect((await app.request("/api/sessions/s1/legacy-memory")).status).toBe(409);
+
+    orchestrator.copyLegacyMemory = vi.fn(() => ({ ok: true, copied: ["a.md"], skipped: [] }));
+    const copy = await app.request("/api/sessions/s1/legacy-memory/copy", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: "herd", files: ["a.md"] }),
+    });
+    expect(await copy.json()).toEqual({ copied: ["a.md"], skipped: [] });
+    expect(orchestrator.copyLegacyMemory).toHaveBeenCalledWith("s1", "herd", ["a.md"]);
+    orchestrator.copyLegacyMemory = vi.fn(() => ({ ok: false, status: 400, error: "bad name" }));
+    const refused = await app.request("/api/sessions/s1/legacy-memory/copy", { method: "POST" });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "bad name" });
+  });
+
   // The Domains page lists the connected browsers via an isolated Claude query
   // (chrome-browser-probe); `force` bypasses the brief cache.
   it("lists Claude in Chrome browsers from the probe, passing force through", async () => {

@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1799,6 +1799,61 @@ describe("SessionOrchestrator domains", () => {
     deps.launcher.getSession.mockReturnValue(legacy);
     deps.launcher.relaunch.mockResolvedValue({ ok: false });
     expect(await orchestrator.migrateSessionToDomain("s1", "herd")).toMatchObject({ ok: false, status: 503 });
+  });
+
+  // Guided migration, Claude: the notes listed are the ones of the memory the
+  // session reads now (here the folder the CLI reported at init), flagged when
+  // the target domain already has the file; copying lands in the domain memory.
+  it("lists and copies a legacy Claude session's folder memory into a domain", () => {
+    const mem = join(folders, "projects", "-w", "memory");
+    mkdirSync(mem, { recursive: true });
+    writeFileSync(join(mem, "MEMORY.md"), "- [A](a.md) — a\n");
+    writeFileSync(join(mem, "a.md"), "---\nname: A\ndescription: first\nmetadata:\n  type: project\n---\nbody A");
+    writeFileSync(join(mem, "b.md"), "---\nname: B\n---\nbody B");
+    const herdMemory = join(domainDir("herd"), "memory");
+    mkdirSync(herdMemory, { recursive: true });
+    writeFileSync(join(herdMemory, "b.md"), "already here");
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", backendType: "claude", domain: "global", legacyMemory: true });
+    deps.wsBridge.getSession.mockReturnValue({ state: { memory_dir: mem } });
+
+    const listed = orchestrator.legacyMemory("s1", "herd");
+    expect(listed).toMatchObject({ ok: true, backend: "claude", dir: mem });
+    expect(listed.ok && listed.notes.map((n) => [n.file, n.type, n.existsInDomain])).toEqual([["a.md", "project", false], ["b.md", "", true]]);
+    // Without a target domain nothing is flagged.
+    const plain = orchestrator.legacyMemory("s1");
+    expect(plain.ok && plain.notes[0]).not.toHaveProperty("existsInDomain");
+
+    expect(orchestrator.copyLegacyMemory("s1", "herd", ["a.md", "b.md"])).toEqual({
+      ok: true, copied: ["a.md"], skipped: [{ file: "b.md", reason: expect.stringMatching(/already in the domain/) }],
+    });
+    expect(readFileSync(join(herdMemory, "MEMORY.md"), "utf-8")).toContain("- [A](a.md) — first");
+    expect(readFileSync(join(herdMemory, "b.md"), "utf-8")).toBe("already here");
+    // Copy, never move.
+    expect(existsSync(join(mem, "a.md"))).toBe(true);
+    // Bad names never reach the file system.
+    expect(orchestrator.copyLegacyMemory("s1", "herd", ["../a.md"])).toMatchObject({ ok: false, status: 400 });
+    expect(orchestrator.copyLegacyMemory("s1", "herd", [])).toMatchObject({ ok: false, status: 400 });
+  });
+
+  // Codex loses nothing on migration: no notes, an explanation, nothing to copy.
+  it("reports nothing to copy for a legacy Codex session", () => {
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", backendType: "codex", domain: "global", legacyMemory: true });
+    expect(orchestrator.legacyMemory("s1", "herd")).toMatchObject({ ok: true, backend: "codex", notes: [], info: expect.stringContaining("AGENTS.md") });
+    expect(orchestrator.copyLegacyMemory("s1", "herd", ["a.md"])).toMatchObject({ ok: false, status: 409 });
+  });
+
+  it("refuses the legacy memory of unknown, archived or non-legacy sessions and unknown domains", () => {
+    deps.launcher.getSession.mockReturnValue(undefined);
+    expect(orchestrator.legacyMemory("x")).toMatchObject({ ok: false, status: 404 });
+    expect(orchestrator.copyLegacyMemory("x", "herd", ["a.md"])).toMatchObject({ ok: false, status: 404 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "herd" });
+    expect(orchestrator.legacyMemory("s1")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global", legacyMemory: true, archived: true });
+    expect(orchestrator.legacyMemory("s1")).toMatchObject({ ok: false, status: 409 });
+    deps.launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/w", domain: "global", legacyMemory: true });
+    expect(orchestrator.legacyMemory("s1", "nope")).toMatchObject({ ok: false, status: 404 });
+    expect(orchestrator.legacyMemory("s1", "")).toMatchObject({ ok: false, status: 400 });
+    expect(orchestrator.copyLegacyMemory("s1", undefined, ["a.md"])).toMatchObject({ ok: false, status: 400 });
   });
 
   // Claude in Chrome on: after init the preferred browser is selected,

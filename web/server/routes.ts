@@ -489,6 +489,23 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // Guided migration of a legacy session: the notes of its folder memory
+  // (read-only; `?domain=` marks the ones already in that domain's memory)...
+  api.get("/sessions/:id/legacy-memory", (c) => {
+    const result = orchestrator.legacyMemory(c.req.param("id"), c.req.query("domain"));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    const { ok: _ok, ...body } = result;
+    return c.json(body);
+  });
+
+  // ...and copying the chosen ones into a domain's memory (never moved, never overwritten).
+  api.post("/sessions/:id/legacy-memory/copy", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { domain?: unknown; files?: unknown };
+    const result = orchestrator.copyLegacyMemory(c.req.param("id"), body.domain, body.files);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ copied: result.copied, skipped: result.skipped });
+  });
+
   api.post("/sessions/:id/relaunch", async (c) => {
     const id = c.req.param("id");
     const force = c.req.query("force") === "1";
