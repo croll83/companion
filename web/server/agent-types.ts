@@ -111,6 +111,15 @@ export interface AgentConfig {
     };
   };
 
+  /**
+   * The agent consolidates a brain's inbox into its wiki (set by the Brains
+   * page, never by the agent routes). For an embedded brain Companion runs
+   * it: it prepares the curator clone, gates the triggers and verifies the
+   * result (brain-consolidation.ts). For a remote brain it is only a link:
+   * the brain's page lists the agent's runs.
+   */
+  brainRole?: { slug: string; role: "consolidation" };
+
   // ── Tracking ──
   /**
    * Who created the agent: absent or "user" (the UI/API), or "session:<id>"
@@ -136,7 +145,7 @@ export type AgentConfigCreateInput = Omit<
 /** The portable/shareable JSON format (no internal tracking fields) */
 export type AgentConfigExport = Omit<
   AgentConfig,
-  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "createdBy"
+  "id" | "createdAt" | "updatedAt" | "totalRuns" | "consecutiveFailures" | "lastRunAt" | "lastSessionId" | "enabled" | "createdBy" | "brainRole"
 >;
 
 /**

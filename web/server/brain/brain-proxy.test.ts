@@ -19,7 +19,8 @@ vi.mock("../paths.js", () => ({
   },
 }));
 
-import { handleBrainProxy, isLoopbackAddress } from "./brain-proxy.js";
+import { curatorPassUrl, handleBrainProxy, isLoopbackAddress, issueCuratorPass, revokeCuratorPass } from "./brain-proxy.js";
+import { embeddedKeys } from "./brain-token.js";
 import { createEmbeddedBrain, createRemoteBrain, brainUrls, getBrain } from "./brain-store.js";
 import { mintBrainToken } from "./brain-token.js";
 import { embeddedProxyUrl, getCompanionPort, setChildPort, setCompanionPort } from "./brain-endpoints.js";
@@ -119,6 +120,69 @@ describe("handleBrainProxy", () => {
     expect(await get!.text()).toBe("undefined");
     const dead = await handleBrainProxy(req(token), "127.0.0.1", { supervisor: running, fetch: async () => { throw new Error("ECONNREFUSED"); } });
     expect(dead!.status).toBe(502);
+  });
+});
+
+/**
+ * The curator API through a consolidation run's pass: the URL a run's agent
+ * gets (BRAIN_API_URL). The pass is the only credential the agent holds, so
+ * the checks matter: loopback only, a live pass for THIS brain, GET/POST
+ * only, the child running; Companion adds the real X-Brain-Key, which never
+ * reaches the agent. A revoked pass is dead.
+ */
+describe("curator pass", () => {
+  const childOk = vi.fn(async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ counts: { pending: 2 } }), { status: 200, headers: { "content-type": "application/json" } }));
+  const deps = { supervisor: running, fetch: childOk };
+  const passReq = (pass: string, path = "/inbox/notes?status=pending", init: RequestInit = {}) =>
+    new Request(`http://127.0.0.1:3456/brains/work/curator/${pass}/api/v1${path}`, init);
+
+  it("forwards to the child's /api/v1 with the brain's curator key while the pass lives", async () => {
+    childOk.mockClear();
+    const pass = issueCuratorPass("work");
+    expect(curatorPassUrl("work", pass)).toBe(`http://127.0.0.1:${getCompanionPort()}/brains/work/curator/${pass}/api/v1`);
+    const res = await handleBrainProxy(passReq(pass), "127.0.0.1", deps);
+    expect(res!.status).toBe(200);
+    expect(await res!.json()).toEqual({ counts: { pending: 2 } });
+    const [url, init] = childOk.mock.calls[0];
+    expect(url).toBe("http://127.0.0.1:45678/api/v1/inbox/notes?status=pending");
+    expect((init.headers as Record<string, string>)["X-Brain-Key"]).toBe(embeddedKeys("work")!.curatorKey);
+
+    const post = await handleBrainProxy(passReq(pass, "/consolidation/runs", { method: "POST", body: "{}", headers: { "content-type": "application/json" } }), "127.0.0.1", deps);
+    expect(post!.status).toBe(200);
+    const [, postInit] = childOk.mock.calls[1];
+    expect(new TextDecoder().decode(postInit.body as ArrayBuffer)).toBe("{}");
+    expect((postInit.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+
+    revokeCuratorPass(pass);
+    revokeCuratorPass(undefined);
+    expect((await handleBrainProxy(passReq(pass), "127.0.0.1", deps))!.status).toBe(401);
+  });
+
+  it("refuses other machines, unknown passes, another brain's pass and other methods", async () => {
+    const pass = issueCuratorPass("work");
+    const other = issueCuratorPass("team");
+    try {
+      expect((await handleBrainProxy(passReq(pass), "100.64.0.9", deps))!.status).toBe(403);
+      expect((await handleBrainProxy(passReq("x".repeat(30)), "127.0.0.1", deps))!.status).toBe(401);
+      expect((await handleBrainProxy(passReq(other), "127.0.0.1", deps))!.status).toBe(401);
+      expect((await handleBrainProxy(passReq(pass, "/inbox/notes", { method: "DELETE" }), "127.0.0.1", deps))!.status).toBe(405);
+    } finally {
+      revokeCuratorPass(pass);
+      revokeCuratorPass(other);
+    }
+  });
+
+  it("answers 503 when the brain is not running and 502 when the child does not answer", async () => {
+    const pass = issueCuratorPass("work");
+    try {
+      const down = await handleBrainProxy(passReq(pass), "127.0.0.1", { supervisor: { waitRunning: vi.fn(async () => false) }, fetch: childOk, waitMs: 1 });
+      expect(down!.status).toBe(503);
+      const dead = await handleBrainProxy(passReq(pass), "127.0.0.1", { supervisor: running, fetch: async () => { throw new Error("ECONNREFUSED"); } });
+      expect(dead!.status).toBe(502);
+      expect(await dead!.json()).toEqual({ error: "The brain did not answer: ECONNREFUSED" });
+    } finally {
+      revokeCuratorPass(pass);
+    }
   });
 });
 

@@ -27,6 +27,7 @@ import { gitStatus } from "../brain/brain-git.js";
 import { ScaffoldError, scaffoldWiki } from "../brain/wiki-scaffold.js";
 import { applyLintFix, checkAdoptFolder, explainLint, isLintFix, type LintFinding, type LintReport } from "../brain/wiki-lint-guide.js";
 import { slugify } from "../domain-store.js";
+import { getBrainConsolidation, type BrainConsolidation, type ConsolidationRunStatus } from "../brain/brain-consolidation.js";
 import type { Context } from "hono";
 
 /**
@@ -55,6 +56,12 @@ import type { Context } from "hono";
  * POST /brains/:slug/skill/refresh fetches it again; a health check that
  * reports another wiki version refetches a "server" skill.
  *
+ * Consolidation (brain-consolidation.ts): GET /brains/:slug/consolidation
+ * (settings, agent, runs, next run), PUT it (embedded: settings, which create
+ * or update the agent; remote: {agentId} links an existing agent), POST
+ * .../consolidation/run ("Consolidate now") and .../consolidation/sync
+ * (retry the sync of a not-synced run).
+ *
  * No response ever carries a bearer token or an embedded brain's keys: only `hasToken`.
  */
 
@@ -74,6 +81,21 @@ export interface BrainView extends BrainConfig {
   collisions: { pluginId: string; pluginName: string; servers: string[]; domains: string[] }[];
   /** Embedded brains: the supervisor's view of the child (state, cause and action when failing). */
   runtime?: BrainRuntimeStatus;
+  /** For the list: whether it consolidates, and when it last did. */
+  consolidationSummary?: { enabled: boolean; lastSuccessAt?: number; lastStatus?: ConsolidationRunStatus };
+}
+
+type Consolidation = Pick<BrainConsolidation, "view" | "configure" | "linkAgent" | "trigger" | "retrySync" | "forget">;
+
+function summaryOf(slug: string, consolidation: Consolidation | undefined): BrainView["consolidationSummary"] {
+  const view = consolidation?.view(slug);
+  if (!view) return undefined;
+  const enabled = view.config.enabled || (!!view.agent && !!view.config.agentId);
+  return {
+    enabled,
+    ...(view.lastSuccessAt !== undefined ? { lastSuccessAt: view.lastSuccessAt } : {}),
+    ...(view.runs[0] ? { lastStatus: view.runs[0].status } : {}),
+  };
 }
 
 type Supervisor = Pick<BrainSupervisor, "start" | "stop" | "restart" | "status" | "waitRunning" | "logTail">;
@@ -94,7 +116,7 @@ function collisionsOf(brain: BrainConfig, plugins: InstalledPlugin[], domains: D
   }));
 }
 
-function brainView(brain: BrainConfig, ctx: { domains: DomainInfo[]; global: DomainInfo; plugins: InstalledPlugin[]; supervisor: Supervisor }): BrainView {
+function brainView(brain: BrainConfig, ctx: { domains: DomainInfo[]; global: DomainInfo; plugins: InstalledPlugin[]; supervisor: Supervisor; consolidation?: Consolidation }): BrainView {
   return {
     ...brain,
     urls: brainUrls(brain),
@@ -106,6 +128,7 @@ function brainView(brain: BrainConfig, ctx: { domains: DomainInfo[]; global: Dom
     domains: domainsUsing(brain.slug, ctx.domains, ctx.global),
     collisions: collisionsOf(brain, ctx.plugins, ctx.domains, ctx.global),
     ...(brain.kind === "embedded" ? { runtime: ctx.supervisor.status(brain.slug) } : {}),
+    ...(summaryOf(brain.slug, ctx.consolidation) ? { consolidationSummary: summaryOf(brain.slug, ctx.consolidation) } : {}),
   };
 }
 
@@ -119,6 +142,8 @@ export interface BrainRouteDeps {
   readyWaitMs?: number;
   /** fetch for the embedded brains' curator API; injected in tests (a core brain in-process). */
   curatorFetch?: CuratorFetch;
+  /** The consolidation service (default: the server's, set at startup); a fake in tests. */
+  consolidation?: Consolidation;
 }
 
 /** Statuses of the Inbox tab ("discarded" is shown as Dismissed). */
@@ -139,9 +164,10 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
   const probe = { fetch: deps.fetch, timeoutMs: deps.timeoutMs };
   const supervisor: Supervisor = deps.supervisor ?? brainSupervisor;
   const readyWaitMs = deps.readyWaitMs ?? 15_000;
+  const consolidation = () => deps.consolidation ?? getBrainConsolidation();
   const context = () => {
     const global = ensureGlobalDomain();
-    return { global, domains: listDomains(), plugins: listInstalledPlugins(), supervisor };
+    return { global, domains: listDomains(), plugins: listInstalledPlugins(), supervisor, consolidation: consolidation() };
   };
   const embeddedOr404 = (slug: string) => {
     const brain = getBrain(slug);
@@ -275,6 +301,8 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
   // Cleared from every domain, then its folder (config, token, plugin) removed.
   // An embedded brain is stopped first; its wiki folder is never touched.
   api.delete("/brains/:slug", async (c) => {
+    const existing = getBrain(c.req.param("slug"));
+    if (existing) consolidation()?.forget(existing);
     if (embeddedOr404(c.req.param("slug"))) await supervisor.stop(c.req.param("slug"));
     const result = deleteBrain(c.req.param("slug"));
     if (!result.ok) return c.json({ error: result.error }, result.status);
@@ -375,6 +403,42 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
     await curator(brain.slug, "/admin/refresh", { method: "POST", body: {} });
     if (brain.skill.source === "server") await refreshBrainSkill(brain.slug, probe);
     return { done, lint: explainLint(await curator<LintReport>(brain.slug, "/lint")) };
+  }));
+
+  // ── Consolidation ─────────────────────────────────────────────────────────
+  const withConsolidation = (fn: (svc: Consolidation, slug: string, c: Context) => Promise<Response> | Response) => async (c: Context) => {
+    const svc = consolidation();
+    if (!svc) return c.json({ error: "Consolidation is not available on this server" }, 503);
+    const slug = c.req.param("slug") ?? "";
+    if (!getBrain(slug)) return c.json({ error: "Brain not found" }, 404);
+    return fn(svc, slug, c);
+  };
+
+  api.get("/brains/:slug/consolidation", withConsolidation((svc, slug, c) => c.json(svc.view(slug))));
+
+  // Embedded: the settings (turning it on creates the agent from the template).
+  // Remote: {agentId} links an existing agent (null unlinks); nothing else changes.
+  api.put("/brains/:slug/consolidation", withConsolidation(async (svc, slug, c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const result = getBrain(slug)?.kind === "remote"
+      ? svc.linkAgent(slug, typeof body.agentId === "string" && body.agentId ? body.agentId : null)
+      : svc.configure(slug, body);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(svc.view(slug));
+  }));
+
+  // "Consolidate now": skipped (recorded) when no note waits; 409 while a run is in progress.
+  api.post("/brains/:slug/consolidation/run", withConsolidation(async (svc, slug, c) => {
+    const result = await svc.trigger(slug, "manual");
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ started: result.started, ...(result.run ? { run: result.run } : {}), consolidation: svc.view(slug) });
+  }));
+
+  // After a not-synced run (the wiki was edited by hand), once the wiki is clean again.
+  api.post("/brains/:slug/consolidation/sync", withConsolidation(async (svc, slug, c) => {
+    const result = await svc.retrySync(slug);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ run: result.run, consolidation: svc.view(slug) });
   }));
 
   // "Adopt plugin as brain": where the plugin is on, the brain replaces it (one registry write).

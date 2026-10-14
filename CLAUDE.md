@@ -19,7 +19,7 @@ Messages flow browser <-> `/ws/browser/:id` <-> server <-> CLI process.
   - This host runs `"stdio"`, set in `~/.companion/settings.json`. The CLI is spawned without `--sdk-url`, and the protocol runs over its stdin/stdout. Keep this host on stdio.
   - The code default is still `"loopback"` (`--sdk-url` to `/ws/cli/:id`), which current Claude CLIs reject.
 - Codex speaks JSON-RPC to `codex app-server`. `COMPANION_CODEX_TRANSPORT` picks the transport (default `ws`). Mapping notes are in `web/CODEX_MAPPING.md`.
-- To add a Claude model, add it to `CLAUDE_MODELS` (`src/utils/backends.ts`).
+- To add a Claude model, add it to `CLAUDE_MODELS` (`server/claude-models.ts`, re-exported by `src/utils/backends.ts`). Brains consolidate on the newest Sonnet of that list.
   - Add it to `MODEL_EFFORT_LEVELS` (`server/effort.ts`) only if it accepts `--effort`. Models missing from that map never receive the flag.
   - For flagship models, check `REFUSAL_CHAIN` in `src/utils/refusal-fallback.ts`.
 - Sessions persist to `COMPANION_SESSION_DIR`. The service sets it to `~/.companion/sessions/`. That directory includes `launcher.json`, which holds each `cliSessionId` used for `--resume`. If the variable is unset, sessions go to `$TMPDIR/vibe-sessions`.

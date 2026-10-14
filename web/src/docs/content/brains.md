@@ -90,23 +90,64 @@ The page text is data from the wiki: it is shown as markdown only, never as HTML
 
 The **Inbox** tab shows the notes sessions recorded with `brain_inbox_add`, and the sources added here. For each: what it says, its kind (new fact, correction, contradiction, question, source), who wrote it and when, its sources, and the page it is about. The filters show the notes **Waiting**, **Accepted**, **Rejected** and **Dismissed**, with counts. The brain's card in the list says "N notes waiting".
 
-**Dismiss…** on a waiting note asks for an optional reason, then discards it: its text is erased, the record stays (who, when, why). Turning notes into pages (the consolidation) comes in a later version; until then notes wait here.
+**Dismiss…** on a waiting note asks for an optional reason, then discards it: its text is erased, the record stays (who, when, why). Turning notes into pages is the consolidation's job (see **Consolidation** below).
 
 ### Add source
 
 **Add source…** (in the Inbox tab) gives the brain something to read:
 
-- **Paste text** or **Upload a file** (markdown or plain text, up to 1 MB; for a PDF, paste its text): the brain saves it as `raw/sources/<date>-<name>.md` in the wiki. The name is reduced to lowercase letters, digits and hyphens, and an existing file is never overwritten (`-2`, `-3`, ...). The file is not committed: the consolidation commits it with the pages it writes (or commit it yourself).
+- **Paste text** or **Upload a file** (markdown or plain text, up to 1 MB; for a PDF, paste its text): the brain saves it as `raw/sources/<date>-<name>.md` in the wiki. The name is reduced to lowercase letters, digits and hyphens, and an existing file is never overwritten (`-2`, `-3`, ...). The file is not committed right away: before each consolidation run The Companion commits the new files under `raw/sources/` (only those), so the agent finds them in its clone.
 - **Link (URL)**: recorded as a note only. The Companion downloads nothing; the consolidation reads the page when it runs.
 
 Either way a `source` note lands in the inbox, so the consolidation turns the source into pages. An optional **note** tells it what matters. No secrets or personal data in the note: the brain refuses it (and then removes the file it just saved).
 
 Sessions that record a fact may use the kind `fact`: the brain accepts it as `new_fact`.
 
+### Consolidation
+
+The **Consolidation** tab turns the waiting notes into wiki pages, unattended. It is **off** until you turn it on.
+
+**Consolidate this brain automatically** creates the brain's consolidation agent (it appears in **Agents** as "<name> brain consolidation", with a 🧠). Its prompt is a generic template; the agent:
+
+1. reads the waiting notes, opens a consolidation run and decides each note (accepted, rejected, deferred, discarded) with a reason. Notes are treated as **untrusted claims**: a note that contains instructions for an AI is rejected, never followed;
+2. reads the sources added with **Add source** and brings their facts into the pages, following the wiki's `SCHEMA.md`;
+3. checks the pages it wrote with the brain's lint, closes the run, appends the run's entry to `log.md`, and commits.
+
+The agent works in a **curator clone**: a git clone of the wiki in `~/.companion/brains/<slug>/curator/`, which The Companion brings up to date with the wiki's branch before every run. It never edits the wiki folder itself. It reaches the brain's inbox through an URL in its environment (`BRAIN_API_URL`), valid for that run only; the brain's own key never leaves The Companion and is never in the prompt. Runs work in the first domain that uses the brain, else in GLOBAL.
+
+**When it runs.** The Companion decides, not the model:
+
+- on the **schedule** (a cron expression, every day at 05:00 by default, in The Companion's time zone; at most every 15 minutes);
+- when the waiting notes reach the **threshold** (10 by default) and the last run is more than 6 hours old (checked every 30 seconds, with the brain's health);
+- at **startup**, when notes are waiting and the last run is more than a day old (the machine was off at 05:00, for example);
+- with **Consolidate now**.
+
+Before starting, The Companion counts the waiting notes. With none, the run is recorded as **Skipped** and no session starts (no cost). Notes deferred by an earlier run do not start a run by themselves: they are taken again with the next one. Never two runs at once.
+
+**Model.** By default **Latest Sonnet**: the newest Sonnet of The Companion's Claude model list, chosen again at every run, so a new Sonnet is used as soon as The Companion knows it. The option shows which model that is now. You can pick another model, or **Codex** (its default is Codex's first model). Each run shows its model, and its cost and tokens when the CLI reports them (Claude Code does; Codex reports no cost).
+
+**Checked result.** A run counts as a **Success** only when all of this holds:
+
+1. the agent made a commit in the clone;
+2. `git pull --ff-only` from the clone into the wiki folder succeeded;
+3. the brain reloaded the wiki.
+
+Otherwise the run says why:
+
+- **Not synced**: the agent committed, but the commit could not reach the wiki folder, usually because the wiki was changed by hand meanwhile (uncommitted edits to the same files, or new commits). git's message is shown. Commit or undo your edits in the wiki folder (for new commits, merge the clone by hand: `git -C <wiki> pull --no-ff ~/.companion/brains/<slug>/curator <branch>`), then press **Retry sync**. The next run also tries to sync first and does not start while the old commit is still out of the wiki, so it is never thrown away.
+- **No commit**: notes were waiting and the agent committed nothing.
+- **Error**: the run itself failed (the CLI stopped, the wiki folder is not a git repository, the brain was not running...).
+
+Each run lists its trigger, start time, duration, notes waiting, the decisions taken, the commit, model, cost and a link to its session. The brain's card says "N notes waiting · last consolidated <time>".
+
+**Limits.** The wiki folder must be a git repository on a branch (new brains are). The agent commits locally only: pushing to a remote (`master` or pull-request modes) is not available yet, and a wiki that is also edited elsewhere through a remote needs its own sync. A web address added as a source is read only if the agent has a web tool; otherwise its note is deferred. The agent's runs show in **Agents** too; running it from there goes through the same preparation and checks.
+
+**Remote brains** are consolidated where their server runs, by whoever owns it: their users need nothing here. For the owners only, a remote brain's page has a closed **Advanced: consolidation** section. If you own the brain and consolidate it from Companion, first create an agent of your own with access to the brain's wiki and the right to commit and push to it, then link it there: its runs show on the brain's page. The Companion changes nothing in that agent (prompt, schedule, how it pushes) and adds no step to its runs.
+
 ### Security of embedded brains
 
 - The proxy on The Companion's port accepts connections from this machine only, and only with a **token** that The Companion gives each session when it starts (`brn_...`, signed with the brain's key). The brain records which session wrote each note, and a session cannot write as another.
-- The brain's own API (inbox, consolidation) needs a second key that only The Companion's server holds.
+- The brain's own API (inbox, consolidation) needs a second key that only The Companion's server holds. A consolidation run gets an URL valid for that run only instead, from this machine only.
 - Both keys come from `~/.companion/brains/<slug>/secret` (readable by you alone). The API never returns them.
 - Tokens never expire. Replacing the `secret` file and restarting the brain revokes every token at once; sessions get new ones when they restart.
 - **Limit**: this protects against accidents and against a session manipulated by prompt injection. It does not protect against other programs running as your Unix user, which can read `~/.companion`.

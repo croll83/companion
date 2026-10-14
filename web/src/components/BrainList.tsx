@@ -31,9 +31,18 @@ export function waitingText(health: BrainHealthState): string {
   return n > 0 ? `${n} note${n === 1 ? "" : "s"} waiting` : "";
 }
 
+/** "last consolidated 14/10/2026, 05:12" (or "not consolidated yet") for a brain that consolidates; "" otherwise. */
+export function consolidatedText(brain: BrainInfo): string {
+  const s = brain.consolidationSummary;
+  if (!s?.enabled) return "";
+  const last = s.lastSuccessAt ? `last consolidated ${new Date(s.lastSuccessAt).toLocaleString()}` : "not consolidated yet";
+  return s.lastStatus === "not_synced" ? `${last} · last run not synced` : last;
+}
+
 /**
  * The list of brains: name, about, URL (or wiki folder), health, the
- * domains using each and the notes waiting in its inbox. A row opens the
+ * domains using each, the notes waiting in its inbox and when it was last
+ * consolidated. A row opens the
  * brain (#/brains/<slug>); "New brain", "Adopt existing folder" and
  * "Connect remote brain" open their forms.
  */
@@ -76,7 +85,13 @@ export function BrainList({
                   {brainDomainsText(b)}
                   {b.collisions.some((c) => c.domains.length > 0) ? " · a plugin serves the same URL" : ""}
                 </p>
-                {waitingText(health[b.slug]) && <p className="text-[10px] font-medium text-cc-primary">{waitingText(health[b.slug])}</p>}
+                {(waitingText(health[b.slug]) || consolidatedText(b)) && (
+                  <p className="text-[10px] text-cc-muted">
+                    {waitingText(health[b.slug]) && <span className="font-medium text-cc-primary">{waitingText(health[b.slug])}</span>}
+                    {waitingText(health[b.slug]) && consolidatedText(b) ? " · " : ""}
+                    {consolidatedText(b)}
+                  </p>
+                )}
               </a>
             </li>
           ))}

@@ -6,6 +6,7 @@ import { COMPANION_HOME } from "../paths.js";
 import { ensurePrivateDir, writePrivateFile } from "../private-file.js";
 import { isValidSlug, slugify, updateDomainsAtomically } from "../domain-store.js";
 import { childBaseUrl, embeddedProxyUrl } from "./brain-endpoints.js";
+import { cronRunsMoreOftenThan, validateSchedule } from "../agent-schedule.js";
 
 /**
  * Brains: a knowledge base (an LLM wiki behind an MCP server) that the
@@ -29,6 +30,9 @@ import { childBaseUrl, embeddedProxyUrl } from "./brain-endpoints.js";
  *  - logs/brain.log (embedded): the child's output, size-capped,
  *  - server-skill.md: the skill fetched from the brain's server (`<base>/skill`,
  *    brain-skill-fetch.ts), when the skill's source is "server",
+ *  - curator/ (embedded, consolidation on): a git clone of the wiki where the
+ *    consolidation agent works; its commits are synced into the wiki folder,
+ *  - reports/runs.jsonl: the consolidation runs (brain-consolidation.ts),
  *  - plugin/: generated at every change, a Claude plugin
  *    (`.claude-plugin/plugin.json` named companion-brain-<slug>) whose only
  *    content is the skill `skills/<slug>-brain/SKILL.md`, which Codex sessions
@@ -98,6 +102,37 @@ export interface EmbeddedBrainConfig {
   language: BrainLanguage;
 }
 
+/**
+ * How a brain's inbox becomes wiki pages (brain-consolidation.ts).
+ *
+ * Embedded brains: Companion runs a consolidation agent (made from
+ * consolidation-template.ts) in a curator clone of the wiki, on a schedule,
+ * when enough notes wait, or at startup after a long pause; it skips the run
+ * when no note waits, and syncs the agent's commit into the wiki folder.
+ * Remote brains: `agentId` only links an agent the user runs (its runs show
+ * on the brain's page); nothing else applies.
+ */
+export interface ConsolidationConfig {
+  enabled: boolean;
+  /** 5-field cron in Companion's time zone. */
+  schedule: string;
+  /** "local": commit in the curator clone, synced into the wiki folder. "master"/"pr" (push) are not available yet. */
+  mode: "local" | "master" | "pr";
+  backend: "claude" | "codex";
+  /** Absent: the latest Sonnet of the catalog (Claude) or Codex's first model, resolved at every run. */
+  model?: string;
+  /** Pending notes that start a run before the schedule (at most every 6 hours). */
+  threshold: number;
+  /** The consolidation agent (Companion's own for embedded brains, linked for remote ones). */
+  agentId?: string;
+}
+
+export const DEFAULT_CONSOLIDATION_SCHEDULE = "0 5 * * *";
+export const DEFAULT_CONSOLIDATION_THRESHOLD = 10;
+const MAX_THRESHOLD = 1000;
+/** The schedule may not run more often than this: each run is a CLI session. */
+const MIN_SCHEDULE_INTERVAL_MINUTES = 15;
+
 export interface BrainConfig {
   slug: string;
   name: string;
@@ -108,6 +143,7 @@ export interface BrainConfig {
   remote?: RemoteBrainConfig;
   embedded?: EmbeddedBrainConfig;
   skill: BrainSkillConfig;
+  consolidation?: ConsolidationConfig;
 }
 
 export interface BrainUrls {
@@ -278,6 +314,26 @@ function normalizeEmbedded(raw: unknown): EmbeddedBrainConfig | null {
   };
 }
 
+/** The consolidation settings with their defaults; undefined when never set. */
+function normalizeConsolidation(raw: unknown): ConsolidationConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as Partial<ConsolidationConfig>;
+  return {
+    enabled: c.enabled === true,
+    schedule: typeof c.schedule === "string" && c.schedule.trim() ? c.schedule.trim() : DEFAULT_CONSOLIDATION_SCHEDULE,
+    mode: c.mode === "master" || c.mode === "pr" ? c.mode : "local",
+    backend: c.backend === "codex" ? "codex" : "claude",
+    ...(typeof c.model === "string" && c.model.trim() ? { model: c.model.trim() } : {}),
+    threshold: typeof c.threshold === "number" && Number.isInteger(c.threshold) && c.threshold >= 1 ? Math.min(c.threshold, MAX_THRESHOLD) : DEFAULT_CONSOLIDATION_THRESHOLD,
+    ...(typeof c.agentId === "string" && c.agentId ? { agentId: c.agentId } : {}),
+  };
+}
+
+/** The consolidation settings of a brain, defaults filled in (off). */
+export function consolidationOf(brain: Pick<BrainConfig, "consolidation">): ConsolidationConfig {
+  return brain.consolidation ?? normalizeConsolidation({})!;
+}
+
 function normalize(raw: unknown, slug: string): BrainConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const b = raw as Partial<BrainConfig>;
@@ -305,6 +361,7 @@ function normalize(raw: unknown, slug: string): BrainConfig | null {
     } : {}),
     ...(embedded ? { embedded } : {}),
     skill: normalizeSkill(b.skill),
+    ...(normalizeConsolidation(b.consolidation) ? { consolidation: normalizeConsolidation(b.consolidation) } : {}),
   };
 }
 
@@ -705,6 +762,74 @@ export function updateBrain(slug: string, patch: BrainPatch): BrainResult {
   // An embedded brain's secret is its key, not a bearer token: never touched here.
   if (next.remote && next.remote.auth.mode !== "bearer") writeBrainToken(slug, null);
   else if (next.remote && token !== undefined) writeBrainToken(slug, token);
+  return { ok: true, brain: next };
+}
+
+export interface ConsolidationPatch {
+  enabled?: unknown;
+  schedule?: unknown;
+  mode?: unknown;
+  backend?: unknown;
+  /** A model id; null or "" = the default (latest Sonnet / Codex's first model). */
+  model?: unknown;
+  threshold?: unknown;
+  /** Set by the routes (the agent they created or linked); null unlinks. */
+  agentId?: unknown;
+}
+
+/** Validate and apply a consolidation patch onto `cur`; an error message when invalid. */
+export function mergeConsolidation(cur: ConsolidationConfig, patch: ConsolidationPatch): ConsolidationConfig | string {
+  const next: ConsolidationConfig = { ...cur };
+  if (patch.enabled !== undefined) {
+    if (typeof patch.enabled !== "boolean") return "enabled must be true or false";
+    next.enabled = patch.enabled;
+  }
+  if (patch.schedule !== undefined) {
+    const expression = typeof patch.schedule === "string" ? patch.schedule.trim() : "";
+    if (!expression) return "The schedule is required (a cron expression such as 0 5 * * *)";
+    const error = validateSchedule({ enabled: true, expression, recurring: true });
+    if (error) return error;
+    if (cronRunsMoreOftenThan(expression, MIN_SCHEDULE_INTERVAL_MINUTES)) {
+      return `The schedule may not run more often than every ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes`;
+    }
+    next.schedule = expression;
+  }
+  if (patch.mode !== undefined) {
+    if (patch.mode !== "local") return "Only the local mode is available for now (push to a remote comes later)";
+    next.mode = "local";
+  }
+  if (patch.backend !== undefined) {
+    if (patch.backend !== "claude" && patch.backend !== "codex") return "backend must be claude or codex";
+    if (patch.backend !== next.backend && patch.model === undefined) delete next.model;
+    next.backend = patch.backend;
+  }
+  if (patch.model !== undefined) {
+    if (patch.model === null || patch.model === "") delete next.model;
+    else if (typeof patch.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/.test(patch.model.trim())) return "Invalid model id";
+    else next.model = patch.model.trim();
+  }
+  if (patch.threshold !== undefined) {
+    if (typeof patch.threshold !== "number" || !Number.isInteger(patch.threshold) || patch.threshold < 1 || patch.threshold > MAX_THRESHOLD) {
+      return `The threshold must be a whole number from 1 to ${MAX_THRESHOLD}`;
+    }
+    next.threshold = patch.threshold;
+  }
+  if (patch.agentId !== undefined) {
+    if (patch.agentId === null || patch.agentId === "") delete next.agentId;
+    else if (typeof patch.agentId !== "string") return "Invalid agent id";
+    else next.agentId = patch.agentId;
+  }
+  return next;
+}
+
+/** Change a brain's consolidation settings (validated, see mergeConsolidation). */
+export function updateConsolidation(slug: string, patch: ConsolidationPatch): BrainResult {
+  const cur = getBrain(slug);
+  if (!cur) return fail(404, "Brain not found");
+  const merged = mergeConsolidation(consolidationOf(cur), patch);
+  if (typeof merged === "string") return fail(400, merged);
+  const next = { ...cur, consolidation: merged };
+  saveBrain(next);
   return { ok: true, brain: next };
 }
 

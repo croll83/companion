@@ -141,8 +141,16 @@ function cmdline(pid: number): string[] | null {
   }
 }
 
+/** What a good health check reported, for listeners (brain-consolidation.ts: the threshold trigger). */
+export interface BrainHealthTick {
+  contentHash?: string;
+  /** Notes by status, when the child reports them. */
+  inbox?: Record<string, number>;
+}
+
 export class BrainSupervisor {
   private entries = new Map<string, Entry>();
+  private healthListeners = new Set<(slug: string, tick: BrainHealthTick) => void>();
   private o: Required<Omit<SupervisorOptions, "onReady" | "onHealth" | "spawn">> & Pick<SupervisorOptions, "onReady" | "onHealth" | "spawn">;
 
   constructor(opts: SupervisorOptions = {}) {
@@ -163,6 +171,12 @@ export class BrainSupervisor {
       onReady: opts.onReady,
       onHealth: opts.onHealth,
     };
+  }
+
+  /** Called after each good health check of any brain; returns the unsubscribe function. */
+  addHealthListener(fn: (slug: string, tick: BrainHealthTick) => void): () => void {
+    this.healthListeners.add(fn);
+    return () => this.healthListeners.delete(fn);
   }
 
   private entry(slug: string): Entry {
@@ -513,11 +527,13 @@ export class BrainSupervisor {
     if (!base || !e.child) return;
     let ok = false;
     let contentHash: string | undefined;
+    let inbox: Record<string, number> | undefined;
     try {
       const res = await this.o.fetch(`${base}/healthz`, { signal: AbortSignal.timeout(5000) });
       ok = res.ok;
-      const body = (await res.json().catch(() => ({}))) as { content_hash?: unknown };
+      const body = (await res.json().catch(() => ({}))) as { content_hash?: unknown; inbox?: unknown };
       if (typeof body?.content_hash === "string") contentHash = body.content_hash;
+      if (body?.inbox && typeof body.inbox === "object") inbox = body.inbox as Record<string, number>;
     } catch {
       ok = false;
     }
@@ -525,10 +541,12 @@ export class BrainSupervisor {
     if (ok) {
       e.healthFailures = 0;
       if (e.state === "unhealthy") this.setState(e, "running");
-      try {
-        this.o.onHealth?.(e.slug, contentHash);
-      } catch {
-        /* the hook's problem, not the brain's */
+      for (const fn of [(slug: string) => this.o.onHealth?.(slug, contentHash), ...this.healthListeners]) {
+        try {
+          fn(e.slug, { contentHash, inbox });
+        } catch {
+          /* the hook's problem, not the brain's */
+        }
       }
       return;
     }

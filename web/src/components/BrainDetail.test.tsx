@@ -3,13 +3,20 @@
  * One brain: URLs and auth (never a token), health and "Test connection",
  * the domains using it (links to each), the collision banner with "Adopt
  * plugin as brain", the skill, editing and removal with confirmation.
- * Embedded brains: the Overview / Pages / Inbox tabs (the inbox count from
- * health) and the wiki check; OAuth brains: the per-CLI sign-in chips.
+ * Embedded brains: the Overview / Pages / Inbox / Consolidation tabs (the
+ * inbox count from health) and the wiki check; OAuth brains: the per-CLI
+ * sign-in chips; remote brains: the consolidation agent link in the overview.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
-const mockApi = vi.hoisted(() => ({ brainPages: vi.fn(), brainPage: vi.fn(), brainInbox: vi.fn(), brainLint: vi.fn(), fixBrainLint: vi.fn() }));
+// The Consolidation section (tab for embedded brains, overview for remote ones) loads its view: an empty one here.
+const consolidationView = { config: { enabled: false, schedule: "0 5 * * *", mode: "local", backend: "claude", threshold: 10 }, agent: null, resolvedModel: "claude-sonnet-5-5", running: false, nextRunAt: null, runs: [], domain: "global" };
+const mockApi = vi.hoisted(() => ({
+  brainPages: vi.fn(), brainPage: vi.fn(), brainInbox: vi.fn(), brainLint: vi.fn(), fixBrainLint: vi.fn(),
+  brainConsolidation: vi.fn(), listAgents: vi.fn(async () => []),
+}));
+mockApi.brainConsolidation.mockImplementation(async () => consolidationView);
 vi.mock("../api.js", () => ({ api: mockApi }));
 
 import { BrainDetail, type BrainActions } from "./BrainDetail.js";
@@ -235,5 +242,29 @@ describe("BrainDetail", () => {
     expect(screen.queryByRole("tablist")).toBeNull();
     expect(screen.getByRole("list", { name: "Sign-in state" })).toHaveTextContent("Claude Code: unknown");
     expect(screen.queryByRole("region", { name: "Wiki check" })).toBeNull();
+  });
+
+  // The Consolidation tab of an embedded brain gets the waiting count from health,
+  // and a change there rechecks the brain (card and inbox counts).
+  it("opens the Consolidation tab of an embedded brain", async () => {
+    const a = actions();
+    render(<BrainDetail brain={embeddedBrain()} health={{ reachable: true, pages: 1, inbox: { pending: 4 }, checkedAt: 0 }} desktop busy={false} actions={a} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Consolidation" }));
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "brain-tab-consolidation");
+    expect(await screen.findByText(/4 notes waiting · never consolidated/)).toBeInTheDocument();
+    expect(mockApi.brainConsolidation).toHaveBeenCalledWith("work");
+  });
+
+  // A remote brain is consolidated on its own server: linking an agent is for
+  // the brain's owners only, so it sits in a closed "Advanced" section that
+  // explains what such an agent needs (Marco, 2026-10-14).
+  it("keeps the consolidation agent link of a remote brain under a closed Advanced section", async () => {
+    setup(jarvisBrain({ collisions: [] }));
+    const section = screen.getByRole("group", { name: "Consolidation agent" });
+    expect(section).not.toHaveAttribute("open");
+    expect(within(section).getByText(/brain owners only/)).toBeInTheDocument();
+    expect(within(section).getByText(/right to\s+commit and push/)).toBeInTheDocument();
+    fireEvent.click(within(section).getByText(/brain owners only/));
+    expect(await within(section).findByRole("form", { name: "Link the consolidation agent" })).toBeInTheDocument();
   });
 });

@@ -142,6 +142,25 @@ describe("BrainSupervisor", () => {
     expect(JSON.parse(envLine.slice(envLine.indexOf("{"))).fake_env.BRAIN_OWNER).toBe(brainOwner());
   });
 
+  // Consolidation's threshold and catch-up ride on the health ticks: a
+  // listener gets the inbox counts of each good answer, until it unsubscribes,
+  // and a throwing listener never breaks the supervisor.
+  it("hands each good health answer's inbox counts to the health listeners", async () => {
+    makeBrain("alpha");
+    sup = new BrainSupervisor({ bundlePath: FAKE, execPath: process.execPath, healthIntervalMs: 40 });
+    const ticks: unknown[] = [];
+    sup.addHealthListener(() => { throw new Error("listener bug"); });
+    const off = sup.addHealthListener((slug, tick) => ticks.push({ slug, ...tick }));
+    sup.start("alpha");
+    expect(await sup.waitRunning("alpha", 5000)).toBe(true);
+    await waitFor(() => ticks.length > 0);
+    expect(ticks[0]).toEqual({ slug: "alpha", contentHash: "fake", inbox: { pending: 2 } });
+    off();
+    const seen = ticks.length;
+    await new Promise((r) => setTimeout(r, 120));
+    expect(ticks.length).toBe(seen);
+  });
+
   it("restarts a crashing child with backoff, then fails with the cause", async () => {
     makeBrain("beta", "crash");
     sup.start("beta");

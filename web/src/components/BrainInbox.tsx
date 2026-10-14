@@ -79,8 +79,8 @@ function NoteItem({ note, busy, onDismiss }: { note: BrainNote; busy: boolean; o
  * The Inbox tab of an embedded brain: the notes sessions recorded (and the
  * sources added here), by status. A waiting note can be dismissed, with an
  * optional reason: its text is erased, the record stays. "Add source" gives
- * the brain something new to read. The consolidation that turns notes into
- * pages comes later; until then notes wait here.
+ * the brain something new to read. The consolidation (its own tab) turns
+ * the waiting notes into pages.
  */
 export function BrainInbox({ slug, onChanged }: { slug: string; onChanged?: () => void }) {
   const [status, setStatus] = useState<BrainNoteStatus>("pending");

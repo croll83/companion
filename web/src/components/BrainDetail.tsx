@@ -10,6 +10,7 @@ import { BrainLoginChips } from "./BrainLoginChips.js";
 import { BrainPages } from "./BrainPages.js";
 import { BrainInbox } from "./BrainInbox.js";
 import { WikiCheck } from "./WikiCheck.js";
+import { BrainConsolidation } from "./BrainConsolidation.js";
 
 export interface BrainActions {
   onUpdate: (slug: string, input: BrainInput) => Promise<boolean>;
@@ -85,7 +86,7 @@ function TestResult({ result }: { result: BrainTestResult }) {
   );
 }
 
-type Tab = "overview" | "pages" | "inbox";
+type Tab = "overview" | "pages" | "inbox" | "consolidation";
 
 /**
  * One brain: where it points, its health and a connection test, which
@@ -93,7 +94,9 @@ type Tab = "overview" | "pages" | "inbox";
  * domain), plugins serving the same URL with "Adopt plugin as brain", its
  * skill, editing and removal. An embedded brain also has the Pages tab (read
  * its wiki), the Inbox tab (notes, Dismiss, Add source) and a wiki check
- * with one-click fixes in its overview.
+ * with one-click fixes in its overview, and the Consolidation tab (its
+ * agent, triggers and runs). A remote brain's overview can link the agent
+ * that consolidates it, to list that agent's runs.
  */
 export function BrainDetail({
   brain,
@@ -120,6 +123,7 @@ export function BrainDetail({
     { id: "overview", label: "Overview" },
     { id: "pages", label: "Pages" },
     { id: "inbox", label: waiting ? `Inbox (${waiting})` : "Inbox" },
+    { id: "consolidation", label: "Consolidation" },
   ];
 
   const runTest = async () => {
@@ -170,6 +174,12 @@ export function BrainDetail({
       {embedded && tab === "inbox" && (
         <div role="tabpanel" id="brain-panel-inbox" aria-labelledby="brain-tab-inbox">
           <BrainInbox slug={brain.slug} onChanged={() => actions.onCheckHealth(brain.slug)} />
+        </div>
+      )}
+
+      {embedded && tab === "consolidation" && (
+        <div role="tabpanel" id="brain-panel-consolidation" aria-labelledby="brain-tab-consolidation">
+          <BrainConsolidation brain={brain} waiting={waiting} onChanged={() => actions.onCheckHealth(brain.slug)} />
         </div>
       )}
 
@@ -245,6 +255,21 @@ export function BrainDetail({
             same tools, the skill, and a line in their AGENTS.md. Changes apply when a session starts or reloads.
           </p>
         </section>
+
+        {/* A remote brain is consolidated on its own server: only its owners may run that from Companion, so it hides under Advanced. */}
+        {!embedded && (
+          <details aria-label="Consolidation agent" className="space-y-1">
+            <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-cc-muted">
+              Advanced: consolidation (brain owners only)
+            </summary>
+            <p className="text-[12px]">
+              A remote brain is normally consolidated on its own server, by whoever runs it: its users need nothing here. If you own this
+              brain and consolidate it from Companion, first create an agent of your own with access to the brain&apos;s wiki and the right to
+              commit and push to it (its prompt, schedule and push are yours), then link it here to follow its runs.
+            </p>
+            <BrainConsolidation brain={brain} waiting={waiting} />
+          </details>
+        )}
 
         <BrainSkill
           key={`${brain.skill.source}:${brain.skill.custom ?? ""}:${brain.skill.server?.fetchedAt ?? ""}`}

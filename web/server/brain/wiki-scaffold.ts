@@ -137,7 +137,7 @@ export function wikiTemplate({ name, about, tags, date }: WikiTemplateInput): Re
       "- Pages link each other as `[[slug]]`: each page links at least two others and is listed in `index.md`.",
       "- Sources live in `raw/` and are never edited: list them in `sources` and cite them in the text as `^[raw/<path>]`.",
       "- No secrets (passwords, tokens, keys) and no personal data: write where a secret lives, never its value.",
-      "- `log.md` is append-only: one `## [YYYY-MM-DD] <action> | <subject>` entry per change.",
+      "- `log.md` is append-only: one `## [YYYY-MM-DD HH:MM] <action> | <subject>` entry per change.",
       "",
       "## Lint",
       "",

@@ -42,7 +42,7 @@ if (mode === "hang") {
   const server = createServer((req, res) => {
     if (req.url === "/healthz") {
       res.writeHead(mode === "unhealthy" ? 500 : 200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: mode === "unhealthy" ? "broken" : "ok", content_hash: "fake" }));
+      res.end(JSON.stringify({ status: mode === "unhealthy" ? "broken" : "ok", content_hash: "fake", inbox: { pending: 2 } }));
       return;
     }
     res.writeHead(404);
