@@ -13,6 +13,19 @@ import { findPersonalData, findSecrets } from "./redact.js";
 
 export const NOTE_KINDS = ["new_fact", "correction", "contradiction", "question", "source_pointer"] as const;
 export type NoteKind = (typeof NOTE_KINDS)[number];
+/**
+ * Other names agents use for a kind: real Claude and Codex sessions called
+ * brain_inbox_add with kind "fact" and had the note rejected. An alias is
+ * accepted by the tool and stored under its canonical kind.
+ */
+export const NOTE_KIND_ALIASES: Record<string, NoteKind> = { fact: "new_fact" };
+/** Every kind the tool accepts: the canonical ones, then the aliases. */
+export const ACCEPTED_NOTE_KINDS = [...NOTE_KINDS, ...Object.keys(NOTE_KIND_ALIASES)] as [string, ...string[]];
+
+/** The canonical kind of `kind` (an alias mapped, anything else as given). */
+export function canonicalKind(kind: string): string {
+  return NOTE_KIND_ALIASES[kind] ?? kind;
+}
 export const NOTE_STATUSES = ["pending", "batched", "accepted", "rejected", "deferred", "discarded", "withdrawn"] as const;
 /** Statuses whose text is erased (tombstone): not pertinent, or withdrawn by the author. */
 export const TOMBSTONE_STATUSES = ["discarded", "withdrawn"] as const;
@@ -139,7 +152,8 @@ export interface ValidationOptions {
 /** Pure validation against the current wiki snapshot. */
 export function validateNote(input: NoteInput, wiki: WikiSnapshot, opts: ValidationOptions = {}): ValidationResult {
   const errors: string[] = [];
-  if (!(NOTE_KINDS as readonly string[]).includes(input.kind)) errors.push(`kind must be one of: ${NOTE_KINDS.join(", ")}`);
+  const kind = canonicalKind(input.kind) as NoteKind;
+  if (!(NOTE_KINDS as readonly string[]).includes(kind)) errors.push(`kind must be one of: ${NOTE_KINDS.join(", ")}`);
   const statement = (input.statement ?? "").trim();
   if (statement.length < LIMITS.statementMin) errors.push(`statement too short (at least ${LIMITS.statementMin} characters)`);
   if (statement.length > LIMITS.statementMax) errors.push(`statement too long (at most ${LIMITS.statementMax} characters)`);
@@ -197,7 +211,7 @@ export function validateNote(input: NoteInput, wiki: WikiSnapshot, opts: Validat
     ok: true,
     errors: [],
     normalized: {
-      kind: input.kind,
+      kind,
       statement,
       pages,
       new_page_hint: hint,

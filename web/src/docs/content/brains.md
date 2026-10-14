@@ -14,7 +14,102 @@ Open **Brains** in the sidebar (`#/brains`).
 There are two kinds:
 
 - **Remote**: a server that runs elsewhere and is reachable at an URL, such as a brain on your tailnet or a team brain.
-- **Embedded**: The Companion runs the brain server itself, on a wiki folder of this machine. Nothing to install or keep running.
+- **Embedded**: The Companion runs the brain server itself, on a wiki folder of this machine. Nothing to install or keep running. **New brain** creates the wiki for you; **Adopt existing folder** uses one you already have.
+
+## New brain
+
+Click **New brain** and answer three questions:
+
+- **Name**.
+- **What it is about**: a few sentences. They become the *Domain* section of the wiki's `SCHEMA.md` and the description of the brain's skill, which tells the model when to use it. The language of this text (Italian or English) sets how search matches word forms; a mix gives both.
+- **Tags** (optional): the first tags of the wiki's taxonomy, comma-separated. Without tags the wiki starts with `overview, procedure, decision, reference`.
+
+The Companion then:
+
+1. creates the folder `~/companion_brain_<name>` (another new or empty folder can be chosen under **Advanced**; a folder with files in it is refused);
+2. writes the wiki from its template: `SCHEMA.md` (Domain, Page Types, Tag Taxonomy, Conventions, Lint), `index.md` with a *Start Here* section, `log.md` with a first `create` entry, the page folders `entities/`, `concepts/`, `comparisons/`, `queries/`, `raw/` for the sources, and a `.gitignore`;
+3. makes it a git repository on `main` with a first commit, authored with your git identity (`git config user.name` and `user.email`, else "Companion");
+4. creates the embedded brain (it starts with The Companion, and hides secrets) and starts it.
+
+The new brain is **on no domain**: the last step tells you to choose it in a domain (**Domains** → the domain → **Brain**). Deleting the brain later never deletes its folder.
+
+git is required. If it is missing, the wizard shows a card with the install commands (`sudo apt install git`, `xcode-select --install`, or git-scm.com) and a **Check again** button; nothing is created.
+
+The template passes the brain's own lint as it is. An empty wiki has no pages to describe, so its skill says what it covers from your about text.
+
+## Adopt existing folder
+
+Click **Adopt existing folder** and fill in:
+
+- **Name** and **What it is about** (the skill's description).
+- **Wiki folder**: an existing folder of this machine, as an absolute path or `~/...` (an LLM wiki: pages over sources in `raw/`, a tag taxonomy in `SCHEMA.md`, an append-only `log.md`).
+- **Language of the wiki**: how search matches word forms. "Italian and English" indexes both forms of every word, for mixed wikis.
+- **Hide secrets** (on by default): tokens and passwords found in the wiki reach sessions as `[REDACTED:<rule>]`.
+
+The brain needs `SCHEMA.md` and `index.md` at the root of the folder. If one is missing, The Companion says so and offers **Create SCHEMA.md** / **Create index.md**; the brain is created once both are there.
+
+The brain then starts, and with The Companion afterwards (**Start with Companion**, in **Edit brain**). Right away it checks the wiki (see **Wiki check** below) and shows what it found.
+
+### Wiki check
+
+In the brain's **Overview**, **Check the wiki** runs the brain's own lint and explains the findings in plain sentences, grouped, problems first: "3 pages are not listed in index.md", "SCHEMA.md has no tag taxonomy", "2 pages have broken [[links]]", and so on, with the files concerned.
+
+The simple ones have a button:
+
+| Problem | Fix |
+|---|---|
+| No tag taxonomy in `SCHEMA.md` | **Add the tag taxonomy section**, with the tags the pages already use |
+| Pages use tags missing from the taxonomy | **Add these tags to the taxonomy** (a line at the end of the section) |
+| Pages not listed in `index.md` | **List them in index.md**, under a new *Other pages* section |
+| No `index.md` / `log.md` / `SCHEMA.md` | **Create** it |
+
+Fixes only **add**: a missing file is created (never over an existing one), a section or a line is appended. Nothing is deleted or rewritten. The brain reloads the wiki at once. Fixed files are not committed: commit them yourself, or leave them to the consolidation.
+
+## Embedded brains
+
+How it runs:
+
+- Each embedded brain is a separate process: the brain server bundled with The Companion (`dist/brain/brain.js`), run by the same Bun. A crash or a stuck brain never takes The Companion or its sessions down.
+- The process listens on `127.0.0.1` on a port of its own, which sessions never see. Sessions use The Companion's port: `http://127.0.0.1:<port>/brains/<slug>/mcp`. A restart of the brain is invisible to them.
+- The wiki is re-read every 2 minutes, so edits show up without a restart.
+- Sessions can search and read the wiki, and record notes in the brain's **inbox** (`brain_inbox_add`). Notes never change the wiki: a consolidation (a job or a person) reviews them first. The inbox lives in `~/.companion/brains/<slug>/data/inbox.db`.
+
+Its skill comes from the brain server. The skill's description lists the sections of `index.md` with their page titles and the taxonomy tags (each cut to 60 characters, 1000 in total), after your about text; when the wiki changes, the health check (every 30 seconds) notices the new content and the skill is fetched again. The skill says whose knowledge base it is with your git name (`git config user.name`), or your login when git has none.
+
+The brain's page shows its **Brain process**: running, starting, restarting after a crash, or stopped. **Start**, **Stop** and **Restart** act on it. If it crashes 5 times in 10 minutes, or cannot start at all (for example the wiki folder is gone), it stops trying and the page says why and what to do. **Troubleshooting** shows the process id, its own port and the last lines of its log (`~/.companion/brains/<slug>/logs/brain.log`).
+
+Removing an embedded brain stops it and deletes its settings, inbox and log. The wiki folder is not touched.
+
+### Pages
+
+The **Pages** tab lists the wiki's pages (title, path, tags). **Search** finds pages the way sessions do (`brain_search`), with a snippet. Clicking a page opens it: its type, update date, tags and sources, then the text. `[[links]]` open the linked page in the tab. Shortcuts open `index.md`, `SCHEMA.md` and `log.md`.
+
+The page text is data from the wiki: it is shown as markdown only, never as HTML. With **Hide secrets** on, secrets appear redacted, as sessions see them.
+
+### Inbox
+
+The **Inbox** tab shows the notes sessions recorded with `brain_inbox_add`, and the sources added here. For each: what it says, its kind (new fact, correction, contradiction, question, source), who wrote it and when, its sources, and the page it is about. The filters show the notes **Waiting**, **Accepted**, **Rejected** and **Dismissed**, with counts. The brain's card in the list says "N notes waiting".
+
+**Dismiss…** on a waiting note asks for an optional reason, then discards it: its text is erased, the record stays (who, when, why). Turning notes into pages (the consolidation) comes in a later version; until then notes wait here.
+
+### Add source
+
+**Add source…** (in the Inbox tab) gives the brain something to read:
+
+- **Paste text** or **Upload a file** (markdown or plain text, up to 1 MB; for a PDF, paste its text): the brain saves it as `raw/sources/<date>-<name>.md` in the wiki. The name is reduced to lowercase letters, digits and hyphens, and an existing file is never overwritten (`-2`, `-3`, ...). The file is not committed: the consolidation commits it with the pages it writes (or commit it yourself).
+- **Link (URL)**: recorded as a note only. The Companion downloads nothing; the consolidation reads the page when it runs.
+
+Either way a `source` note lands in the inbox, so the consolidation turns the source into pages. An optional **note** tells it what matters. No secrets or personal data in the note: the brain refuses it (and then removes the file it just saved).
+
+Sessions that record a fact may use the kind `fact`: the brain accepts it as `new_fact`.
+
+### Security of embedded brains
+
+- The proxy on The Companion's port accepts connections from this machine only, and only with a **token** that The Companion gives each session when it starts (`brn_...`, signed with the brain's key). The brain records which session wrote each note, and a session cannot write as another.
+- The brain's own API (inbox, consolidation) needs a second key that only The Companion's server holds.
+- Both keys come from `~/.companion/brains/<slug>/secret` (readable by you alone). The API never returns them.
+- Tokens never expire. Replacing the `secret` file and restarting the brain revokes every token at once; sessions get new ones when they restart.
+- **Limit**: this protects against accidents and against a session manipulated by prompt injection. It does not protect against other programs running as your Unix user, which can read `~/.companion`.
 
 ## Remote brains
 
@@ -25,36 +120,6 @@ Click **Connect remote brain** and fill in:
 - **Authentication**: none, a bearer token, or OAuth with a pre-registered client (see below). A bearer token is stored only in `~/.companion/brains/<slug>/secret` (readable by you alone) and is never shown again or returned by the API.
 
 **Test connection** checks the health URL and performs an MCP `initialize` against the server, then closes the test session.
-
-## Embedded brains
-
-Click **Embedded brain (existing wiki folder)** and fill in:
-
-- **Name** and **What it is about** (the skill's description).
-- **Wiki folder**: an existing folder of this machine, as an absolute path or `~/...`, with `SCHEMA.md` and `index.md` at its root (an LLM wiki: pages over sources in `raw/`, a tag taxonomy in `SCHEMA.md`, an append-only `log.md`). The Companion only reads it. Creating a new wiki from a template comes in a later version.
-- **Language of the wiki**: how search matches word forms. "Italian and English" indexes both forms of every word, for mixed wikis.
-- **Hide secrets** (on by default): tokens and passwords found in the wiki reach sessions as `[REDACTED:<rule>]`.
-
-The brain starts at once, and with The Companion afterwards (**Start with Companion**, in **Edit brain**). Its skill comes from the brain server, built from your about text and the titles of `index.md`.
-
-How it runs:
-
-- Each embedded brain is a separate process: the brain server bundled with The Companion (`dist/brain/brain.js`), run by the same Bun. A crash or a stuck brain never takes The Companion or its sessions down.
-- The process listens on `127.0.0.1` on a port of its own, which sessions never see. Sessions use The Companion's port: `http://127.0.0.1:<port>/brains/<slug>/mcp`. A restart of the brain is invisible to them.
-- The wiki is re-read every 2 minutes, so edits show up without a restart.
-- Sessions can search and read the wiki, and record notes in the brain's **inbox** (`brain_inbox_add`). Notes never change the wiki: a consolidation (a job or a person) reviews them first. The inbox lives in `~/.companion/brains/<slug>/data/inbox.db`.
-
-The brain's page shows its **Brain process**: running, starting, restarting after a crash, or stopped. **Start**, **Stop** and **Restart** act on it. If it crashes 5 times in 10 minutes, or cannot start at all (for example the wiki folder is gone), it stops trying and the page says why and what to do. **Troubleshooting** shows the process id, its own port and the last lines of its log (`~/.companion/brains/<slug>/logs/brain.log`).
-
-Removing an embedded brain stops it and deletes its settings, inbox and log. The wiki folder is not touched.
-
-### Security of embedded brains
-
-- The proxy on The Companion's port accepts connections from this machine only, and only with a **token** that The Companion gives each session when it starts (`brn_...`, signed with the brain's key). The brain records which session wrote each note, and a session cannot write as another.
-- The brain's own API (inbox, consolidation) needs a second key that only The Companion's server holds.
-- Both keys come from `~/.companion/brains/<slug>/secret` (readable by you alone). The API never returns them.
-- Tokens never expire. Replacing the `secret` file and restarting the brain revokes every token at once; sessions get new ones when they restart.
-- **Limit**: this protects against accidents and against a session manipulated by prompt injection. It does not protect against other programs running as your Unix user, which can read `~/.companion`.
 
 ## OAuth (pre-registered client)
 
@@ -70,6 +135,8 @@ The Companion never sees the OAuth tokens. Each CLI signs in by itself, **once**
 3. In the session's MCP panel, find `<slug>-brain` and press **Sign in**.
 
 Do it once from a Claude Code session and once from a Codex session if you use both. The brain's page explains this and links to a domain that uses the brain.
+
+Two chips on the brain's page show where each CLI stands: **Claude Code: signed in / sign-in needed / unknown**, and the same for **Codex**. They come from the MCP status of the active sessions in the domains using the brain (Codex's "not logged in" counts as sign-in needed). **Unknown** means no active session of that CLI uses the brain, or its MCP panel has not been opened in this browser yet: open a session in that domain and look at its MCP panel.
 
 The health check (`/healthz`) does not need a sign-in on brain servers, so the dot still says whether the brain is up. **Test connection** reports an MCP answer of `401` with a sign-in challenge as "reachable, sign-in required", not as a failure.
 

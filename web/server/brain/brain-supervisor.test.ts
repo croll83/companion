@@ -26,6 +26,7 @@ import { BrainSupervisor, BRAIN_PROTOCOL_EXPECTED, explainFailure, type BrainRun
 import { brainDataDir, brainDir, brainLogPath, createEmbeddedBrain, getBrain } from "./brain-store.js";
 import { childBaseUrl } from "./brain-endpoints.js";
 import { BRAIN_PROTOCOL } from "./core/version.js";
+import { brainOwner } from "./brain-git.js";
 
 const FAKE = join(__dirname, "__tests__", "fake-brain-child.mjs");
 let tmp: string;
@@ -123,6 +124,22 @@ describe("BrainSupervisor", () => {
     expect(existsSync(join(brainDataDir("alpha"), "brain.pid"))).toBe(false);
     expect(childBaseUrl("alpha")).toBeNull();
     expect(await sup.waitRunning("alpha", 100)).toBe(false);
+  });
+
+  // The skill fetched from the child follows its wiki: each health answer's
+  // content hash reaches onHealth. The owner is a person (git user.name),
+  // not the Unix login, so the brain's text does not read "the knowledge base of jarvis".
+  it("reports each health check's content hash, and names the owner from git", async () => {
+    makeBrain("alpha");
+    const onHealth = vi.fn();
+    sup = new BrainSupervisor({ bundlePath: FAKE, execPath: process.execPath, healthIntervalMs: 40, onHealth });
+    sup.start("alpha");
+    expect(await sup.waitRunning("alpha", 5000)).toBe(true);
+    await waitFor(() => onHealth.mock.calls.length > 0);
+    expect(onHealth).toHaveBeenCalledWith("alpha", "fake");
+    await waitFor(() => sup.logTail("alpha").some((l) => l.includes("fake_env")));
+    const envLine = sup.logTail("alpha").find((l) => l.includes("fake_env"))!;
+    expect(JSON.parse(envLine.slice(envLine.indexOf("{"))).fake_env.BRAIN_OWNER).toBe(brainOwner());
   });
 
   it("restarts a crashing child with backoff, then fails with the cause", async () => {

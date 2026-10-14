@@ -5,7 +5,8 @@
  * sheet, and every action through the API followed by a reload. Errors are
  * shown; an unknown brain in the URL is reported. A health check that
  * refetched a server skill reloads the list; "Refresh skill" goes to the API.
- * Embedded brains: created from a sheet, started/stopped/restarted and their
+ * Embedded brains: adopted from a sheet (folder checked, then the wiki
+ * check), created by the "New brain" wizard, started/stopped/restarted and their
  * log read through the API.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -23,6 +24,10 @@ const mockApi = vi.hoisted(() => ({
   refreshBrainSkill: vi.fn(),
   brainProcess: vi.fn(),
   brainLogs: vi.fn(),
+  checkAdoptFolder: vi.fn(),
+  brainLint: vi.fn(),
+  brainGit: vi.fn(),
+  createNewBrain: vi.fn(),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
@@ -167,16 +172,37 @@ describe("BrainsPage", () => {
     await waitFor(() => expect(mockApi.listBrains).toHaveBeenCalledTimes(3));
   });
 
-  it("creates an embedded brain from its sheet and opens it", async () => {
+  // Adopt: the folder is checked, the brain created and listed, its wiki check shown, then "Done" opens it.
+  it("adopts an existing folder from its sheet, shows the wiki check, and opens the brain", async () => {
     mockApi.createBrain.mockResolvedValueOnce(embeddedBrain());
+    mockApi.checkAdoptFolder.mockResolvedValueOnce({ ok: true, path: "/home/me/wiki", ready: true, advice: [] });
+    mockApi.brainLint.mockResolvedValueOnce({ ok: true, errors: 0, warnings: 0, pages: 3, advice: [] });
     render(<BrainsPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Embedded brain (existing wiki folder)" }));
-    expect(screen.getByRole("dialog", { name: "Embedded brain" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Adopt existing folder" }));
+    expect(screen.getByRole("dialog", { name: "Adopt existing folder" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Work" } });
     fireEvent.change(screen.getByLabelText("Wiki folder"), { target: { value: "/home/me/wiki" } });
     fireEvent.click(screen.getByRole("button", { name: "Create brain" }));
-    await waitFor(() => expect(window.location.hash).toBe("#/brains/work"));
+    expect(await screen.findByText(/nothing to fix/)).toBeInTheDocument();
     expect(mockApi.createBrain).toHaveBeenCalledWith({ kind: "embedded", name: "Work", about: "", wikiDir: "/home/me/wiki", language: "auto", redactSecrets: true });
+    await waitFor(() => expect(mockApi.listBrains).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("link", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("opens the New brain wizard and lists the brain it creates", async () => {
+    mockApi.brainGit.mockResolvedValue({ available: true });
+    mockApi.createNewBrain.mockResolvedValueOnce({ brain: embeddedBrain({ slug: "boat", name: "Boat" }), wiki: { dir: "/home/me/companion_brain_boat", language: "it", tags: ["overview"], commit: "abcdef123456" } });
+    render(<BrainsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "New brain" }));
+    expect(screen.getByRole("dialog", { name: "New brain" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Boat" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create brain" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Create brain" }));
+    expect(await screen.findByText("Brain Boat is ready.")).toBeInTheDocument();
+    await waitFor(() => expect(mockApi.listBrains).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   // Start/Stop/Restart go to the API, then the list reloads and health is checked again (not after Stop).

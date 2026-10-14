@@ -202,7 +202,8 @@ describe("HTTP endpoints", () => {
     const fm = parseYaml(/^---\n([\s\S]*?)\n---\n/.exec(doc.skill_md)![1]);
     expect(fm).toEqual({ name: "team-brain", description: doc.description });
     expect(doc.description).toMatch(/^Use Team brain, the knowledge base of Northwind/);
-    expect(doc.description).toMatch(/Wiki sections: Start Here; Systems; Analyses\.$/);
+    // index.md sections with their page titles, then the taxonomy tags (contents.test.ts covers the limits).
+    expect(doc.description).toMatch(/Wiki sections: Start Here \(Deploy Pipeline, Billing Service\); Systems \([^)]+\); Analyses \([^)]+\)\. Tags: billing, deploy, network, backup, queue, comparison, capacity, procedure\.$/);
     for (const r of brainRules(true)) expect(doc.skill_md).toContain(r);
     expect(doc.skill_md).not.toMatch(/jarvis/i);
     const etag = res.headers.get("etag")!;

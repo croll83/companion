@@ -8,8 +8,9 @@
 // copy would lose its secrets. Redaction applies to the MCP tools only.
 
 import { timingSafeEqual } from "node:crypto";
-import { parsePage, resolvePage } from "./wiki.js";
-import { envelope } from "./redact.js";
+import { parsePage, resolvePage, NAV_FILES, type Page } from "./wiki.js";
+import { envelope, redactor } from "./redact.js";
+import { addSource } from "./sources.js";
 import { Consolidation, HttpError } from "./consolidation.js";
 import { lintPages, lintWiki } from "./lint.js";
 import { NOTE_STATUSES } from "./inbox.js";
@@ -87,18 +88,43 @@ export function createApi(brain: Brain): (req: Request, url: URL) => Promise<Res
       const w = brain.wiki();
       return { wiki_commit: w.commit, content_hash: w.contentHash, schema: w.nav.get("SCHEMA.md"), taxonomy: [...w.taxonomy] };
     }),
-    compile("GET", "/wiki/pages", () => {
+    /**
+     * Every page (path order), or with ?q= the pages that match a search
+     * (BM25 order, with a snippet). ?redact=1 hides secrets in snippets when
+     * the brain redacts them for sessions (Companion's Pages tab shows what
+     * sessions see).
+     */
+    compile("GET", "/wiki/pages", ({ query }) => {
       const w = brain.wiki();
+      const meta = (p: Page) => ({ slug: p.slug, path: p.path, title: p.title, type: p.type, tags: p.tags, updated: p.updated, subwiki: p.subwiki });
+      const q = query.get("q")?.trim();
+      if (!q) return { wiki_commit: w.commit, pages: [...w.pages.values()].sort((a, b) => a.path.localeCompare(b.path)).map(meta) };
+      const red = redactor(query.get("redact") === "1" && brain.cfg.redactSecrets);
+      const hits = brain.index().search(q.slice(0, 300), { limit: int(query.get("limit"), 50, 1, 200), includeRaw: false });
       return {
         wiki_commit: w.commit,
-        pages: [...w.pages.values()].map((p) => ({ slug: p.slug, path: p.path, title: p.title, type: p.type, tags: p.tags, updated: p.updated, subwiki: p.subwiki })),
+        query: q,
+        pages: hits.flatMap((h) => {
+          const p = w.pages.get(h.ref);
+          return p ? [{ ...meta(p), score: h.score, snippet: red(h.snippet).text }] : [];
+        }),
       };
     }),
-    compile("GET", "/wiki/pages/:slug", ({ params }) => {
+    /**
+     * One page (slug, [[slug]] or path), or a navigation file by name (index,
+     * schema, log, readme). ?redact=1 as above.
+     */
+    compile("GET", "/wiki/pages/:slug", ({ params, query }) => {
       const w = brain.wiki();
+      const red = redactor(query.get("redact") === "1" && brain.cfg.redactSecrets);
       const p = resolvePage(w, params.slug);
-      if (!p) throw new HttpError(404, `no page ${params.slug}`);
-      return { wiki_commit: w.commit, slug: p.slug, path: p.path, markdown: p.text };
+      if (!p) {
+        const nav = NAV_FILES.find((f) => f.toLowerCase() === `${params.slug.toLowerCase().replace(/\.md$/, "")}.md`);
+        const text = nav ? w.nav.get(nav) : undefined;
+        if (nav && text !== undefined) return { wiki_commit: w.commit, slug: nav.replace(/\.md$/, ""), path: nav, title: nav, type: "navigation", tags: [], updated: null, sources: [], markdown: red(text).text };
+        throw new HttpError(404, `no page ${params.slug}`);
+      }
+      return { wiki_commit: w.commit, slug: p.slug, path: p.path, title: p.title, type: p.type, tags: p.tags, updated: p.updated, sources: p.sources, markdown: red(p.text).text };
     }),
     compile("GET", "/wiki/sources", ({ query }) => {
       const w = brain.wiki();
@@ -170,6 +196,13 @@ export function createApi(brain: Brain): (req: Request, url: URL) => Promise<Res
       if (!r.ok) throw new HttpError(r.error === "no such note" ? 404 : 409, r.error ?? "not dismissed");
       return { note_id: params.note, status: "discarded" };
     }),
+
+    /**
+     * "Add source" from Companion: {name, text, note?} writes raw/sources/<date>-<name>.md
+     * (never overwriting) and records a source_pointer note; {url, title?, note?}
+     * records the note only (sources.ts).
+     */
+    compile("POST", "/sources", ({ body }) => addSource(brain, body)),
 
     // --- consolidation of the inbox ------------------------------------------
     compile("GET", "/consolidation/runs", () => ({ runs: cons.list() })),

@@ -2152,6 +2152,20 @@ describe("brains API", () => {
     ["brainProcess", () => api.brainProcess("work", "restart"), "/api/brains/work/restart", "POST", {}],
     ["brainLogs", () => api.brainLogs("work"), "/api/brains/work/logs?lines=100", "GET", undefined],
     ["brainLogs (lines)", () => api.brainLogs("work", 5), "/api/brains/work/logs?lines=5", "GET", undefined],
+    // Phase 2b: new wiki, adoption check, guided lint, pages, inbox, sources.
+    ["brainGit", () => api.brainGit(), "/api/brains/git", "GET", undefined],
+    ["createNewBrain", () => api.createNewBrain({ name: "Boat", about: "x", tags: ["a"] }), "/api/brains/new", "POST", { name: "Boat", about: "x", tags: ["a"] }],
+    ["checkAdoptFolder", () => api.checkAdoptFolder({ wikiDir: "/w", fix: "create-index" }), "/api/brains/adopt-check", "POST", { wikiDir: "/w", fix: "create-index" }],
+    ["brainLint", () => api.brainLint("work"), "/api/brains/work/lint", "GET", undefined],
+    ["fixBrainLint", () => api.fixBrainLint("work", "add-tags"), "/api/brains/work/lint/fix", "POST", { fix: "add-tags" }],
+    ["brainPages", () => api.brainPages("work"), "/api/brains/work/pages", "GET", undefined],
+    ["brainPages (search)", () => api.brainPages("work", " deploy plan "), "/api/brains/work/pages?q=deploy%20plan", "GET", undefined],
+    ["brainPage", () => api.brainPage("work", "handbook/index"), "/api/brains/work/pages/handbook%2Findex", "GET", undefined],
+    ["brainInbox", () => api.brainInbox("work"), "/api/brains/work/inbox?status=pending", "GET", undefined],
+    ["brainInbox (status)", () => api.brainInbox("work", "discarded"), "/api/brains/work/inbox?status=discarded", "GET", undefined],
+    ["dismissBrainNote", () => api.dismissBrainNote("work", "N1", "noise"), "/api/brains/work/inbox/N1/dismiss", "POST", { reason: "noise" }],
+    ["dismissBrainNote (no reason)", () => api.dismissBrainNote("work", "N1"), "/api/brains/work/inbox/N1/dismiss", "POST", {}],
+    ["addBrainSource", () => api.addBrainSource("work", { url: "https://x.org" }), "/api/brains/work/sources", "POST", { url: "https://x.org" }],
   ])("%s", async (_name, call, url, method, body) => {
     mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
     await call();

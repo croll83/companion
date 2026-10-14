@@ -576,7 +576,7 @@ export interface CreateEmbeddedBrainInput {
 }
 
 /** `~/x` → the home folder's x; anything else as given, resolved. Null when not absolute. */
-function absoluteDir(value: string): string | null {
+export function absoluteDir(value: string): string | null {
   const v = value.trim();
   const expanded = v === "~" ? homedir() : v.startsWith("~/") ? join(homedir(), v.slice(2)) : v;
   return isAbsolute(expanded) ? resolve(expanded) : null;
