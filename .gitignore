@@ -16,3 +16,6 @@ docs/mocks/
 docs/repo-only/
 scripts/test-codex-*.ts
 web/dev-dist/
+
+# npm pack output: never commit release tarballs
+*.tgz
