@@ -461,6 +461,26 @@ export interface SessionFolderPreview {
   memory?: { dir: string; notes: number };
 }
 
+/** A note of a legacy Claude session's folder memory (server/legacy-memory.ts). */
+export interface LegacyMemoryNote {
+  file: string;
+  name: string;
+  description: string;
+  type: string;
+  preview: string;
+  /** Present when a target domain was given: a file with this name is already in its memory. */
+  existsInDomain?: boolean;
+}
+
+export type LegacyMemory =
+  | { backend: "claude"; dir: string; notes: LegacyMemoryNote[] }
+  | { backend: "codex"; notes: []; info: string };
+
+export interface LegacyMemoryCopyResult {
+  copied: string[];
+  skipped: { file: string; reason: string }[];
+}
+
 export interface DomainMcpServerView {
   name: string;
   /** "account": the user's own Claude config or a claude.ai connector (Claude-only). */
@@ -1308,6 +1328,18 @@ export const api = {
   /** Migrate a legacy session (from before domains) into a domain; its CLI restarts on the same conversation. */
   migrateSessionToDomain: (sessionId: string, domain: string) =>
     post<{ ok: true; from: string; to: string; interruptsWork: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/migrate-domain`, { domain }),
+
+  /**
+   * The folder memory a legacy session would stop reading once migrated
+   * (Claude); Codex has nothing to copy. With `domain`, notes already in that
+   * domain's memory are flagged `existsInDomain`.
+   */
+  getLegacyMemory: (sessionId: string, domain?: string) =>
+    get<LegacyMemory>(`/sessions/${encodeURIComponent(sessionId)}/legacy-memory${domain ? `?domain=${encodeURIComponent(domain)}` : ""}`),
+
+  /** Copy notes of a legacy session's folder memory into a domain's memory (never overwriting). */
+  copyLegacyMemory: (sessionId: string, domain: string, files: string[]) =>
+    post<LegacyMemoryCopyResult>(`/sessions/${encodeURIComponent(sessionId)}/legacy-memory/copy`, { domain, files }),
 
   // Domains
   listDomains: () => get<DomainsResponse>("/domains"),
