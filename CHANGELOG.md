@@ -1,5 +1,75 @@
 # Changelog
 
+## [1.4.0](https://github.com/croll83/companion/compare/the-companion-v1.3.0...the-companion-v1.4.0) (2026-10-14)
+
+
+### Features
+
+* **agents:** archive a successful run's session after a grace period ([82c9a76](https://github.com/croll83/companion/commit/82c9a76e97fc454b63498f71b430edb85740d06b))
+* **agents:** run agents in a domain ([3fad654](https://github.com/croll83/companion/commit/3fad6542346569a593f65dba2480af7bedcb17d4))
+* **agents:** run hooks around the runs of brain consolidation agents ([ca0cdc5](https://github.com/croll83/companion/commit/ca0cdc56bb6558f5b0271ced7fefa8dbd4cbdecc))
+* **brains:** brains API with health, connection test and plugin adoption ([d9b785d](https://github.com/croll83/companion/commit/d9b785d07fd02369fd9f05640c7ab27be757cf82))
+* **brains:** Brains page to connect and manage remote brains ([40297f6](https://github.com/croll83/companion/commit/40297f6e9ef9a2f741d1d9e0fa1227720ed1b221))
+* **brains:** connect a domain's brain to Claude Code and Codex sessions ([6eedf24](https://github.com/croll83/companion/commit/6eedf24a6e96f1f026e23ff76697c70de4e3d38c))
+* **brains:** connect remote brains and give each domain one brain ([f0e116b](https://github.com/croll83/companion/commit/f0e116bb4e0c914602092546df7a2d16259673dc))
+* **brains:** consolidation of embedded brains with verified post-sync ([7c6d9fd](https://github.com/croll83/companion/commit/7c6d9fdc81c96279d238e6ff0d2578c51af9e908))
+* **brains:** Consolidation tab, and the last consolidation on the card ([209f7c9](https://github.com/croll83/companion/commit/209f7c9417f93445c11ea98fa72ebae378dcea82))
+* **brains:** embedded brains in the Brains page ([047cd80](https://github.com/croll83/companion/commit/047cd80f873262d7ba175c1aad3cea628c749c65))
+* **brains:** generic brain server core and its Bun bundle ([04b1c9f](https://github.com/croll83/companion/commit/04b1c9f3ca875d08461074406d2d3410b8873b4a))
+* **brains:** new brain wizard, adoption check, Pages and Inbox tabs ([c95cf8a](https://github.com/croll83/companion/commit/c95cf8a6a55ff5f524da7b08bb41c2600b335bb3))
+* **brains:** new wiki from a template, guided lint, content routes ([26266ef](https://github.com/croll83/companion/commit/26266ef6ba57fdca871d99615e32f373e3c2c628))
+* **brains:** OAuth and server skill in the Brains page ([c4c33b0](https://github.com/croll83/companion/commit/c4c33b01db1432da6f34c5f73e7592d5f61af4aa))
+* **brains:** OAuth remote brains and the skill published by the brain server ([3e539d1](https://github.com/croll83/companion/commit/3e539d1f07919340e33401d3a716bb5830db8ef1))
+* **brains:** OAuth remote brains and the skill published by the brain server ([51d7523](https://github.com/croll83/companion/commit/51d752385017266803a79ebf9de8bd45752b80b2))
+* **brains:** page, source and inbox API in the brain core ([d2e675b](https://github.com/croll83/companion/commit/d2e675b0b2de4c92353f5c157a2145275a8af70c))
+* **brains:** run embedded brains in Companion ([c6f169f](https://github.com/croll83/companion/commit/c6f169fbcd8a1b89a9a7f17d5ad95c0e7bfe5ecc))
+* **brains:** store remote brains and give each domain one brain ([fa14f45](https://github.com/croll83/companion/commit/fa14f45d8ffd9032e18ba1b9ff1990051481efed))
+* domains — shared memory, skills, MCP and instructions per session group (Claude + Codex) ([ab1b2bf](https://github.com/croll83/companion/commit/ab1b2bfb106128a8353b01e232db590ce2ad9fea))
+* **domains:** choose the domain's brain on its page ([afb17d6](https://github.com/croll83/companion/commit/afb17d669fd5e2c2fa10997c0ca31f996efe6fce))
+* **domains:** domain registry and per-spawn context for Claude and Codex ([31779a0](https://github.com/croll83/companion/commit/31779a01ec4194d8a6573ed12fce84a7341bc5fc))
+* **domains:** list and turn off per domain the MCP servers Claude loads by itself ([fe53bf4](https://github.com/croll83/companion/commit/fe53bf4bd71d8bc7984ee4dd3fea725b321eceea))
+* **domains:** migrate a legacy session into a domain ([d572108](https://github.com/croll83/companion/commit/d5721081ce5208646cd98e08247ebcb4fa88324e))
+* **domains:** new Domains page — domain list, per-domain views for MCP, skills, plugins ([d1132b7](https://github.com/croll83/companion/commit/d1132b707587acf712b88455320c70c9c60e1df5))
+* **domains:** partial on/off maps, MCP follows domain &gt; GLOBAL &gt; on, single-skill choices ([31e3024](https://github.com/croll83/companion/commit/31e302405c7ae5d72a2ac1207a367bdf166e138d))
+* **domains:** per-domain Claude in Chrome browser, including remote ([4f59dc1](https://github.com/croll83/companion/commit/4f59dc1b8e90e1c44a2cb60b37f2a76ebbd4ce5b))
+* **domains:** plugins per domain, MCP server management, OAuth sign-in for MCP ([1846552](https://github.com/croll83/companion/commit/184655237f424d721f9245b6fdb34388cc6954b9))
+* **domains:** sessions by domain, Domains API, change folder/domain, Chrome browser ([d42cb2d](https://github.com/croll83/companion/commit/d42cb2dd984cb1535964118e667751464b2f30d7))
+* **domains:** turn marketplace plugins on per domain, add/remove MCP servers ([517b89e](https://github.com/croll83/companion/commit/517b89ebe6555a1dcf2d2b0492d18b8d53084fe3))
+* **home:** always start session creation on "New folder in this domain" ([a545d0d](https://github.com/croll83/companion/commit/a545d0dfd885056cfcf50167c09d26cd7b2a3abe))
+* **mcp:** sign in to OAuth MCP servers from the session panel; OAuth and env headers for Codex ([af81283](https://github.com/croll83/companion/commit/af812834d063992a1cbc237d575fac63740d1925))
+* **models:** add Haiku 5.5; drop Opus 5, Sonnet 5 and Haiku 4.5 from the picker ([4b62272](https://github.com/croll83/companion/commit/4b62272beb3f06f47982c22750e7c9e9dfe214a9))
+* **models:** add Haiku 5.5; drop Opus 5, Sonnet 5 and Haiku 4.5 from the picker ([53dc5d3](https://github.com/croll83/companion/commit/53dc5d3cd4a4afa766f612f81f55b7ac730e1034))
+* **sessions:** amber title for legacy sessions, Copy ID button ([2e08775](https://github.com/croll83/companion/commit/2e08775583a22802d57878b733bc73be1ef78ab3))
+* **sessions:** change a session's folder; group the sidebar by its own folder ([6df1f7f](https://github.com/croll83/companion/commit/6df1f7fb897546d0dc32ce6cd658e002c4708f00))
+* **sessions:** Reload button under wake-ups to force-relaunch the focused session ([928d557](https://github.com/croll83/companion/commit/928d5575cd4f60bad1e2abfe54a8a289864b4c7a))
+* **sessions:** Reload button under wake-ups to force-relaunch the focused session ([8c503c7](https://github.com/croll83/companion/commit/8c503c7f74fd6961acd73693e122749dcb25c537))
+* **sidebar:** group sessions by domain only, no folder level ([4b8996b](https://github.com/croll83/companion/commit/4b8996bbfa689694bc4903c08a25e8ea465814d2))
+* **sidebar:** group sessions by domain, then by their own folder ([249edc2](https://github.com/croll83/companion/commit/249edc215caf74b79ffdb7b3477facc2159a4c32))
+* **ui:** Domains page ([df7b879](https://github.com/croll83/companion/commit/df7b8792a930b13a75a50a3e4cbc46c5c572a43b))
+* **ui:** manual-only skill badge, preferred Chrome browser, agent domain ([449b2a0](https://github.com/croll83/companion/commit/449b2a05624cc88c5bd7e892ebde1059645d488f))
+* **ui:** session domain, legacy badge and change folder/domain in the panel ([d7f57c4](https://github.com/croll83/companion/commit/d7f57c4eae8882a84b48ff4a3dd3bdc0da213650))
+* **ui:** start a session in a domain, in a new or existing folder ([ee7c6af](https://github.com/croll83/companion/commit/ee7c6af60e0a6746940af4db03d1a6f91c5810dc))
+
+
+### Bug Fixes
+
+* **brains:** a second consolidation the same day gets its own run; remote consolidation under Advanced ([27defb5](https://github.com/croll83/companion/commit/27defb5c8a404801af68232477f12f7b574ce7ca))
+* **brains:** clear a recovered brain's crash explanation ([fbb6c2a](https://github.com/croll83/companion/commit/fbb6c2ab41e7b3a7e03d5a932224d56882d3a96f))
+* **brains:** keep brain tokens out of the shell commands Codex runs ([d5bfe77](https://github.com/croll83/companion/commit/d5bfe77562721aece9af896298808021702dcd1f))
+* **brains:** lint the wiki after the sync, and log entries in the SCHEMA.md shape ([725515c](https://github.com/croll83/companion/commit/725515cdd2b9716508ed62e46b67a342d79d6eb1))
+* **brains:** reload the wiki before the wiki check and the page list ([8618777](https://github.com/croll83/companion/commit/861877784265a029ef217aac409537d05d6e51b8))
+* **codex:** a Codex session without a model gets the catalogue's default ([7d0fb93](https://github.com/croll83/companion/commit/7d0fb931d034a594e950601504d8837049271806))
+* **codex:** an unreadable model catalogue never stops a launch ([50a48d8](https://github.com/croll83/companion/commit/50a48d8c6e9b6fc3b955bff2e87235e0a5994e47))
+* **codex:** every init-error listener is called, so a failed agent run ends ([a0fc619](https://github.com/croll83/companion/commit/a0fc619ffb064390d1f5f3db34353b1382055705))
+* **codex:** keep a single WebSocket in the Codex proxy ([98db3c8](https://github.com/croll83/companion/commit/98db3c8af82fb8a4d1585fbcab8ee87ca554ba97))
+* **composer:** list each skill once in the / menu ([601e574](https://github.com/croll83/companion/commit/601e57478e10d3efb804f94259a958757c608fc7))
+* **domains:** show every skill's switch right away in the Skills view ([40e74b0](https://github.com/croll83/companion/commit/40e74b0f419cbbfe07cfafb4303e4ef917516483))
+
+
+### Code Refactoring
+
+* **models:** share the Claude model catalog with the server ([9c24f58](https://github.com/croll83/companion/commit/9c24f58c91213d455bb25abfdb9ceeb952cf2d93))
+
 ## [1.3.0](https://github.com/croll83/companion/compare/the-companion-v1.2.0...the-companion-v1.3.0) (2026-10-05)
 
 
