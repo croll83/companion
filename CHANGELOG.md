@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0](https://github.com/croll83/companion/compare/the-companion-v1.4.1...the-companion-v1.5.0) (2026-10-14)
+
+
+### Features
+
+* guided memory migration for legacy sessions ([7ceb55b](https://github.com/croll83/companion/commit/7ceb55ba60ec08fc0407b404dc2be90431d0f02b))
+* **server:** list and copy a legacy session's folder memory ([b1588ec](https://github.com/croll83/companion/commit/b1588ec3ff5440624c4a8d3479dc36c333d49c6b))
+* **ui:** guided memory migration for legacy sessions ([6cae57a](https://github.com/croll83/companion/commit/6cae57a208df98cae0b94b5ebbf39f33620963de))
+
 ## [1.4.1](https://github.com/croll83/companion/compare/the-companion-v1.4.0...the-companion-v1.4.1) (2026-10-14)
 
 
