@@ -65,6 +65,9 @@ The built-in `companion` MCP server of each session uses its own token (`cmcp_â€
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Archive a session |
 | `POST` | `/api/sessions/:id/message` | Send a user message (`{"content": "..."}`). A stopped CLI is relaunched on its conversation and gets the message queued (`"delivery": "queued"`); archived sessions get `409` |
+| `GET` | `/api/sessions/:id/legacy-memory` | Legacy session (from before domains): the notes of the Claude folder memory it would stop reading once migrated (`{backend, dir, notes}`); `?domain=<slug>` flags each note already in that domain's memory (`existsInDomain`). Codex sessions answer `{"backend": "codex", "notes": []}`. `404` unknown session, `409` not legacy |
+| `POST` | `/api/sessions/:id/legacy-memory/copy` | Copy notes of that folder memory into a domain's memory: `{"domain": "herd", "files": ["note.md"]}`. Never moves, deletes or overwrites; returns `{copied, skipped}` |
+| `POST` | `/api/sessions/:id/migrate-domain` | Migrate a legacy session into a domain (`{"domain": "herd"}`); its CLI restarts on the same conversation |
 | `GET` | `/api/sessions/:id/wakeups` | List the session's wake-ups (pending and recently skipped, missed or delivered) |
 | `POST` | `/api/sessions/:id/wakeups` | Schedule a wake-up: `{"message": "...", "at": "2026-10-06T09:00"}` or `{"message": "...", "cron": "0 9 * * 1-5"}`, optional `"createdBy": "session:<id>"` |
 | `DELETE` | `/api/sessions/:id/wakeups/:wakeupId` | Cancel (or dismiss) a wake-up |
