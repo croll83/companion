@@ -10,9 +10,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const h = vi.hoisted(() => ({ legacy: "", companion: "" }));
+const h = vi.hoisted(() => ({ legacy: "", companion: "", broken: false }));
 vi.mock("./codex-home.js", () => ({
-  getLegacyCodexHome: () => h.legacy,
+  getLegacyCodexHome: () => { if (h.broken) throw new Error("no home"); return h.legacy; },
   resolveCompanionCodexHome: () => h.companion,
 }));
 // No codex binary: the cache is read without a version check.
@@ -27,6 +27,7 @@ beforeEach(() => {
   h.companion = join(root, "homes");
   mkdirSync(h.legacy, { recursive: true });
   mkdirSync(h.companion, { recursive: true });
+  h.broken = false;
   resetCodexModelsCache();
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -47,5 +48,11 @@ describe("defaultCodexModel", () => {
       ],
     }));
     expect(defaultCodexModel()).toBe("gpt-6.1-sol");
+  });
+
+  // A catalogue that cannot be read never stops a session from launching.
+  it("is undefined when the catalogue cannot be read", () => {
+    h.broken = true;
+    expect(defaultCodexModel()).toBeUndefined();
   });
 });

@@ -219,8 +219,13 @@ export function pickerModels(cache: CodexModelsCache): CodexPickerModel[] {
  * Undefined while no catalogue exists yet: Codex then picks its own.
  */
 export function defaultCodexModel(): string | undefined {
-  const cache = loadCodexCache();
-  return cache ? pickerModels(cache)[0]?.value : undefined;
+  try {
+    const cache = loadCodexCache();
+    return cache ? pickerModels(cache)[0]?.value : undefined;
+  } catch {
+    // An unreadable catalogue must never stop a session from launching.
+    return undefined;
+  }
 }
 
 /** Test seam: drop the memos. */
