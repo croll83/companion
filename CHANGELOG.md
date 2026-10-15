@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.0](https://github.com/croll83/companion/compare/the-companion-v1.5.0...the-companion-v1.6.0) (2026-10-15)
+
+
+### Features
+
+* **agents:** choose the reasoning effort of an agent's runs ([c306541](https://github.com/croll83/companion/commit/c3065410dceb94fba465bf8cb6a0cbd94c0bf48d))
+* **agents:** reasoning effort for agents and brain consolidation ([0131ae8](https://github.com/croll83/companion/commit/0131ae87fafce9f646c9df29e592a0972c5fc69d))
+* **brains:** consolidation runs at high reasoning effort by default ([e3d9d7b](https://github.com/croll83/companion/commit/e3d9d7b71742b18bcdc757f082f068198c33189e))
+
+
+### Bug Fixes
+
+* **codex:** keep the reasoning effort on relaunch and report it in session_init ([88a6361](https://github.com/croll83/companion/commit/88a6361fa320c1abb65ca4c32aded180c8a2297b))
+
 ## [1.5.0](https://github.com/croll83/companion/compare/the-companion-v1.4.1...the-companion-v1.5.0) (2026-10-14)
 
 
