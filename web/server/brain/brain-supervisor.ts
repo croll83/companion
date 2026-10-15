@@ -106,7 +106,7 @@ function defaultBundlePath(): string {
   return join(root, "dist", "brain", "brain.js");
 }
 
-/** The BRAIN_PROTOCOL Companion speaks; must equal the bundle's (core/version.ts, checked by a test). */
+/** The BRAIN_PROTOCOL Companion speaks; must equal the bundle's (brain-bundle/bundle.json, checked by a test and by the smoke script). */
 export const BRAIN_PROTOCOL_EXPECTED = 1;
 const STDERR_TAIL = 20;
 

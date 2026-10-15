@@ -8,6 +8,7 @@ const BUTTON = "px-2.5 py-1 rounded-md text-[12px] bg-cc-hover hover:bg-cc-activ
 /** The filters of the tab, by note status ("discarded" is what Dismiss does). */
 const FILTERS: { status: BrainNoteStatus; label: string }[] = [
   { status: "pending", label: "Waiting" },
+  { status: "needs_human", label: "Needs you" },
   { status: "accepted", label: "Accepted" },
   { status: "rejected", label: "Rejected" },
   { status: "discarded", label: "Dismissed" },
@@ -27,11 +28,16 @@ function when(iso: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-/** One note: what it says, what kind, who wrote it and when, its sources; Dismiss for a waiting note. */
-function NoteItem({ note, busy, onDismiss }: { note: BrainNote; busy: boolean; onDismiss?: (reason: string) => Promise<boolean> }) {
-  const [asking, setAsking] = useState(false);
+/**
+ * One note: what it says, what kind, who wrote it and when, its sources;
+ * Dismiss for an open note, Include for one waiting for a person.
+ */
+function NoteItem({ note, busy, onDismiss, onInclude }: { note: BrainNote; busy: boolean; onDismiss?: (reason: string) => Promise<boolean>; onInclude?: (comment: string) => Promise<boolean> }) {
+  const [asking, setAsking] = useState<"" | "dismiss" | "include">("");
   const [reason, setReason] = useState("");
+  const [comment, setComment] = useState("");
   const reasonId = useId();
+  const commentId = useId();
   const target = note.pages?.length ? note.pages.join(", ") : note.new_page_hint ? `new page ${note.new_page_hint}` : "";
   return (
     <li className="p-2 rounded-md border border-cc-border space-y-1">
@@ -50,27 +56,57 @@ function NoteItem({ note, busy, onDismiss }: { note: BrainNote; busy: boolean; o
       )}
       {note.status !== "pending" && note.status_reason && (
         <p className="text-[11px] text-cc-muted">
-          {note.status === "discarded" ? "Dismissed" : note.status[0].toUpperCase() + note.status.slice(1)}
+          {note.status === "discarded" ? "Dismissed" : note.status === "needs_human" ? "Waiting for you" : note.status[0].toUpperCase() + note.status.slice(1)}
           {note.status_by ? ` by ${note.status_by}` : ""}{note.status_changed_at ? ` on ${when(note.status_changed_at)}` : ""}: {note.status_reason}
         </p>
       )}
-      {onDismiss && (asking ? (
+      {note.status === "pending" && note.deferrals ? (
+        <p className="text-[11px] text-cc-muted">Left undecided by {note.deferrals} consolidation run{note.deferrals === 1 ? "" : "s"}.</p>
+      ) : null}
+      {note.release && (
+        <p className="text-[11px] text-cc-muted">
+          Included by {note.release.by} on {when(note.release.at)}{note.release.comment ? `: ${note.release.comment}` : ""}
+        </p>
+      )}
+      {asking === "dismiss" && onDismiss ? (
         <form
           aria-label="Dismiss note"
           className="flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            void onDismiss(reason.trim()).then((ok) => { if (ok) setAsking(false); });
+            void onDismiss(reason.trim()).then((ok) => { if (ok) setAsking(""); });
           }}
         >
           <label htmlFor={reasonId} className="text-[11px] text-cc-muted">Reason (optional)</label>
           <input id={reasonId} value={reason} onChange={(e) => setReason(e.target.value)} className={`${FIELD} max-w-xs`} />
           <button type="submit" disabled={busy} className={BUTTON}>Dismiss note</button>
-          <button type="button" onClick={() => setAsking(false)} className="text-[12px] text-cc-muted hover:underline cursor-pointer">Cancel</button>
+          <button type="button" onClick={() => setAsking("")} className="text-[12px] text-cc-muted hover:underline cursor-pointer">Cancel</button>
         </form>
-      ) : (
-        <button type="button" onClick={() => setAsking(true)} className={BUTTON}>Dismiss…</button>
-      ))}
+      ) : asking === "include" && onInclude ? (
+        <form
+          aria-label="Include note"
+          className="space-y-1"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onInclude(comment.trim()).then((ok) => { if (ok) setAsking(""); });
+          }}
+        >
+          <p className="text-[11px] text-cc-muted">
+            The next consolidation gets it as pertinent and must bring it into the wiki or reject it with a reason: it can no longer put it off or hand it back to you.
+          </p>
+          <label htmlFor={commentId} className="block text-[11px] text-cc-muted">Comment for the consolidation (optional)</label>
+          <textarea id={commentId} value={comment} rows={2} maxLength={1000} onChange={(e) => setComment(e.target.value)} placeholder="e.g. I confirm it: put it in the launch section." className={FIELD} />
+          <div className="flex items-center gap-2">
+            <button type="submit" disabled={busy} className={BUTTON}>Include note</button>
+            <button type="button" onClick={() => setAsking("")} className="text-[12px] text-cc-muted hover:underline cursor-pointer">Cancel</button>
+          </div>
+        </form>
+      ) : (onDismiss || onInclude) && (
+        <div className="flex flex-wrap gap-1.5">
+          {onInclude && <button type="button" onClick={() => setAsking("include")} className={BUTTON}>Include…</button>}
+          {onDismiss && <button type="button" onClick={() => setAsking("dismiss")} className={BUTTON}>Dismiss…</button>}
+        </div>
+      )}
     </li>
   );
 }
@@ -78,7 +114,9 @@ function NoteItem({ note, busy, onDismiss }: { note: BrainNote; busy: boolean; o
 /**
  * The Inbox tab of an embedded brain: the notes sessions recorded (and the
  * sources added here), by status. A waiting note can be dismissed, with an
- * optional reason: its text is erased, the record stays. "Add source" gives
+ * optional reason: its text is erased, the record stays. A note the
+ * consolidation left to a person ("Needs you": a doubt, or runs kept
+ * leaving it undecided) is included, with a comment, or dismissed. "Add source" gives
  * the brain something new to read. The consolidation (its own tab) turns
  * the waiting notes into pages.
  */
@@ -121,6 +159,21 @@ export function BrainInbox({ slug, onChanged }: { slug: string; onChanged?: () =
     }
   };
 
+  const include = async (id: string, comment: string): Promise<boolean> => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.includeBrainNote(slug, id, comment || undefined);
+      onChanged?.();
+      await load(status);
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+      return false;
+    }
+  };
+
   return (
     <section aria-label="Inbox" className="space-y-2">
       <p className="text-[11px] text-cc-muted">
@@ -147,11 +200,17 @@ export function BrainInbox({ slug, onChanged }: { slug: string; onChanged?: () =
       {error && <p role="alert" className="text-[12px] text-cc-error">{error}</p>}
       {!notes && busy && <p className="text-[12px] text-cc-muted">Loading notes…</p>}
       {notes && (notes.length === 0 ? (
-        <p className="text-[12px] text-cc-muted">{status === "pending" ? "No notes waiting." : "No notes here."}</p>
+        <p className="text-[12px] text-cc-muted">{status === "pending" ? "No notes waiting." : status === "needs_human" ? "Nothing needs you: notes the consolidation cannot decide wait here." : "No notes here."}</p>
       ) : (
         <ul className="space-y-1.5">
           {notes.map((n) => (
-            <NoteItem key={n.note_id} note={n} busy={busy} onDismiss={n.status === "pending" ? (reason) => dismiss(n.note_id, reason) : undefined} />
+            <NoteItem
+              key={n.note_id}
+              note={n}
+              busy={busy}
+              onDismiss={n.status === "pending" || n.status === "needs_human" ? (reason) => dismiss(n.note_id, reason) : undefined}
+              onInclude={n.status === "needs_human" ? (comment) => include(n.note_id, comment) : undefined}
+            />
           ))}
         </ul>
       ))}

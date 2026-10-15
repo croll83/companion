@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
  * Smoke test of the built brain bundle (dist/brain/brain.js) under Bun, the
- * way Companion's supervisor runs it. Unit tests run the core under Node
- * (vitest); this is the only check of the real bundle, its Bun.serve
- * transport and SQLite under Bun.
+ * way Companion's supervisor runs it. The bundle is built by the brains
+ * project and copied into brain-bundle/ (brain-bundle/README.md); this checks
+ * the copy Companion ships, its Bun.serve transport and SQLite under Bun.
  *
  *   bun run build && bun scripts/brain-smoke.ts [path/to/brain.js]
  *
@@ -15,13 +15,21 @@
  * refused. Exits non-zero on the first failure. Writes only to temp folders.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { makeWiki, tmp } from "../server/brain/core/__tests__/fixture.js";
-import { mintToken } from "../server/brain/core/token.js";
-import { BRAIN_PROTOCOL } from "../server/brain/core/version.js";
+import { createHmac } from "node:crypto";
+import { makeWiki, tmp } from "../server/brain/__tests__/wiki-fixture.js";
+
+/** The protocol the bundle was built with (brain-bundle/bundle.json, written when it is copied from brains). */
+const BRAIN_PROTOCOL = (JSON.parse(readFileSync(resolve(import.meta.dir, "../brain-bundle/bundle.json"), "utf-8")) as { protocol: number }).protocol;
+
+/** A brn_ token in the format of server/brain/brain-token.ts (not imported: it reads Companion's brain store). */
+function signBrainToken(tokenKey: string, domain: string, sessionId: string): string {
+  const payload = Buffer.from(`${domain}|${sessionId}`).toString("base64url");
+  return `brn_${payload}.${createHmac("sha256", tokenKey).update(payload).digest("base64url")}`;
+}
 
 const bundle = resolve(process.argv[2] ?? resolve(import.meta.dir, "../dist/brain/brain.js"));
 const TOKEN_KEY = "smoke-token-key-".padEnd(48, "x");
@@ -87,7 +95,7 @@ async function main(): Promise<void> {
     const denied = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     check(denied.status === 401, "MCP without a brn_ token is refused");
 
-    const token = mintToken(TOKEN_KEY, { domain: "GLOBAL", sessionId: "smoke-session" });
+    const token = signBrainToken(TOKEN_KEY, "GLOBAL", "smoke-session");
     const client = new Client({ name: "smoke", version: "1.0" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
     check((client.getInstructions() ?? "").includes("Smoke brain"), "MCP initialize (instructions from the wiki)");
@@ -106,6 +114,9 @@ async function main(): Promise<void> {
     check(started.run_id === "smoke-run" && started.counts.notes === 2, "consolidation run started with the two notes");
     const fin = await api("/consolidation/runs/smoke-run/finalize", { summary: "smoke" });
     check(fin.status === 200, "consolidation run finalized");
+    const pending = (await (await fetch(`${base}/api/v1/inbox/notes?status=pending`, { headers: { "x-brain-key": CURATOR_KEY } })).json()) as { notes: { deferrals?: number }[] };
+    check(pending.notes.length === 2 && pending.notes.every((n) => n.deferrals === 1), "undecided notes back to pending, one deferral counted");
+    check((await api("/inbox/notes/NO-SUCH-NOTE/release", { comment: "x" })).status === 404, "include (release) route of a note waiting for a person");
 
     // Phase 2b: Add source writes raw/sources/ under Bun, and the Pages API searches and reads.
     const source = (await (await api("/sources", { name: "Smoke source", text: "# Smoke\n\nA source added by the smoke test." })).json()) as { path?: string; note_id?: string };
