@@ -12,16 +12,21 @@ import { join } from "node:path";
  * is resolved at every call (latest Sonnet, a chosen one, or Codex's first).
  */
 
-const h = vi.hoisted(() => ({ home: "", codex: null as null | { models: { slug: string; visibility: string; priority?: number }[] } }));
+type CodexEntry = { slug: string; visibility: string; priority?: number; default_reasoning_level?: string; supported_reasoning_levels?: { effort: string }[] };
+const h = vi.hoisted(() => ({ home: "", codex: null as null | { models: CodexEntry[] } }));
 vi.mock("../paths.js", () => ({
   get COMPANION_HOME() {
     return h.home;
   },
 }));
 // Codex's default model: the first of its catalogue by priority (codex-models.ts).
+// Effort levels and default: what the catalogue lists for the model (codex-models.ts).
 vi.mock("../codex-models.js", () => ({
   defaultCodexModel: () =>
     h.codex ? [...(h.codex as { models: { slug: string; priority?: number }[] }).models].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))[0]?.slug : undefined,
+  getCodexEffortLevels: (model: string | undefined) =>
+    (h.codex?.models.find((m) => m.slug === model)?.supported_reasoning_levels ?? []).map((l) => l.effort),
+  getCodexDefaultEffort: (model: string | undefined) => h.codex?.models.find((m) => m.slug === model)?.default_reasoning_level ?? null,
 }));
 
 import {
@@ -30,6 +35,7 @@ import {
   consolidationDomain,
   consolidationPrompt,
   curatorDir,
+  resolveConsolidationEffort,
   resolveConsolidationModel,
 } from "./consolidation-template.js";
 import { latestSonnet } from "../claude-models.js";
@@ -45,7 +51,7 @@ beforeEach(() => {
 afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 const brain: BrainConfig = { slug: "work", name: "Work", kind: "embedded", createdAt: 0, about: "", skill: { source: "generated" }, embedded: { wikiDir: "/w", autostart: true, redactSecrets: true, language: "auto" } };
-const config: ConsolidationConfig = { enabled: true, schedule: "0 5 * * *", mode: "local", backend: "claude", threshold: 10 };
+const config: ConsolidationConfig = { enabled: true, schedule: "0 5 * * *", mode: "local", backend: "claude", effort: "high", threshold: 10 };
 
 describe("consolidation template", () => {
   it("writes a generic prompt: env credential, untrusted notes, no push", () => {
@@ -98,5 +104,28 @@ describe("consolidation template", () => {
     expect(consolidationAgentFields(brain, { ...config, backend: "codex", enabled: false })).toMatchObject({ backendType: "codex", model: "gpt-a", enabled: false });
     h.codex = { models: [] };
     expect(consolidationAgentFields(brain, { ...config, backend: "codex" }).model).toBe("");
+  });
+
+  // The effort of a run follows the model resolved now: the brain's level when
+  // the model takes it (Marco wanted "high", not the CLI's own low/medium), else
+  // the model's default with `fallback` set so the tab can say so, and nothing
+  // for a model without effort control (the CLI would drop the flag).
+  it("settles the effort against the model resolved now, falling back to its default", () => {
+    const sonnet = latestSonnet();
+    expect(resolveConsolidationEffort({ backend: "claude", effort: "high" })).toEqual({ effort: "high", fallback: false });
+    expect(resolveConsolidationEffort({ backend: "claude", effort: "max" }, sonnet)).toEqual({ effort: "max", fallback: false });
+    // Opus 4.6 has no xhigh: Companion's default instead.
+    expect(resolveConsolidationEffort({ backend: "claude", model: "claude-opus-4-6", effort: "xhigh" })).toEqual({ effort: "high", fallback: true });
+    // A model outside the effort table: no level at all.
+    expect(resolveConsolidationEffort({ backend: "claude", model: "claude-sonnet-4-6", effort: "high" })).toEqual({ fallback: true });
+    h.codex = { models: [{ slug: "gpt-sol", visibility: "list", priority: 1, default_reasoning_level: "low", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] };
+    expect(resolveConsolidationEffort({ backend: "codex", effort: "high" })).toEqual({ effort: "high", fallback: false });
+    expect(resolveConsolidationEffort({ backend: "codex", effort: "ultra" })).toEqual({ effort: "low", fallback: true });
+  });
+
+  it("writes the settled effort into the agent, and clears it when the model has none", () => {
+    expect(consolidationAgentFields(brain, config).effort).toBe("high");
+    const fields = consolidationAgentFields(brain, { ...config, model: "claude-sonnet-4-6" });
+    expect("effort" in fields && fields.effort === undefined).toBe(true);
   });
 });

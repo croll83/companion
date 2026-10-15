@@ -254,6 +254,20 @@ describe("AgentCard", () => {
     expect(card?.className).toContain("opacity-75");
   });
 
+  // The card shows an agent's effort only when one is set (absent = the model's default).
+  it("shows the effort badge only when the agent has an effort", () => {
+    const { rerender } = render(<AgentCard {...makeProps({ agent: makeAgent({ effort: "xhigh" }) })} />);
+    expect(screen.getByTestId("effort-badge")).toHaveTextContent("X-High effort");
+    rerender(<AgentCard {...makeProps({ agent: makeAgent() })} />);
+    expect(screen.queryByTestId("effort-badge")).toBeNull();
+  });
+
+  it("passes axe accessibility checks with an effort badge", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<AgentCard {...makeProps({ agent: makeAgent({ effort: "high" }) })} />);
+    expect(await axe(container, { rules: { "heading-order": { enabled: false } } })).toHaveNoViolations();
+  });
+
   // ── Accessibility ─────────────────────────────────────────────────────────
 
   // Test 19: Accessibility scan — enabled agent

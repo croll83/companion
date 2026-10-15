@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { api, type McpServerConfigAgent, type CompanionEnv, type LinearOAuthConnectionSummary, type DomainSummary } from "../api.js";
 import { useStore } from "../store.js";
-import { getModelsForBackend, getDefaultModel, getDefaultAgentMode } from "../utils/backends.js";
+import { getModelsForBackend, getDefaultModel, getDefaultAgentMode, effortChoiceFor, toModelOptions } from "../utils/backends.js";
+import { useCodexModels } from "../utils/use-codex-models.js";
+import { EffortSelect } from "./EffortSelect.js";
 import { AgentPermissionPill } from "./AgentPermissionPill.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { AgentIcon, AGENT_ICON_OPTIONS } from "./AgentIcon.js";
@@ -22,6 +24,8 @@ export interface AgentFormData {
   icon: string;
   backendType: "claude" | "codex";
   model: string;
+  // Reasoning effort of the runs; "" = the model's default
+  effort: string;
   permissionMode: string;
   cwd: string;
   prompt: string;
@@ -56,6 +60,7 @@ export const EMPTY_FORM: AgentFormData = {
   icon: "",
   backendType: "claude",
   model: getDefaultModel("claude"),
+  effort: "",
   permissionMode: getDefaultAgentMode("claude"),
   cwd: "",
   prompt: "",
@@ -117,7 +122,11 @@ export function AgentEditor({
   onCancel: () => void;
   linearOAuthConfigured: boolean;
 }) {
-  const models = getModelsForBackend(form.backendType);
+  // Codex: its live catalogue (models, and each model's effort levels); the
+  // static list only while it loads or when Codex never ran here.
+  const codexModels = useCodexModels(form.backendType === "codex");
+  const models = form.backendType === "codex" && codexModels ? toModelOptions(codexModels) : getModelsForBackend(form.backendType);
+  const effortChoice = effortChoiceFor(form.backendType, form.model, codexModels);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(() => countAdvancedFeatures(form) > 0);
   const [showMcpForm, setShowMcpForm] = useState(false);
@@ -176,7 +185,18 @@ export function AgentEditor({
       ...prev,
       backendType: backend,
       model: getDefaultModel(backend),
+      effort: "",
       permissionMode: getDefaultAgentMode(backend),
+    }));
+  }
+
+  /** A new model keeps the chosen effort only if it takes it; else back to its default. */
+  function handleModelChange(model: string) {
+    const { levels } = effortChoiceFor(form.backendType, model, codexModels);
+    setForm((prev) => ({
+      ...prev,
+      model,
+      effort: prev.effort && levels.includes(prev.effort as (typeof levels)[number]) ? prev.effort : "",
     }));
   }
 
@@ -467,7 +487,7 @@ export function AgentEditor({
                   {models.map((m) => (
                     <button
                       key={m.value}
-                      onClick={() => { updateField("model", m.value); setShowModelDropdown(false); }}
+                      onClick={() => { handleModelChange(m.value); setShowModelDropdown(false); }}
                       className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${m.value === form.model ? "text-cc-primary font-medium" : "text-cc-fg"}`}
                     >
                       <span>{m.icon}</span>
@@ -477,6 +497,19 @@ export function AgentEditor({
                 </div>
               )}
             </div>
+
+            {/* Reasoning effort: only the levels this backend and model take */}
+            <EffortSelect
+              label="Reasoning effort"
+              levels={effortChoice.levels}
+              value={form.effort}
+              onChange={(effort) => updateField("effort", effort)}
+              defaultEffort={effortChoice.defaultEffort}
+              unavailableNote={form.backendType === "codex" && !codexModels
+                ? "Effort levels unknown until Codex has run once on this machine."
+                : "This model has no effort setting."}
+              className={`${pillDefault} bg-transparent`}
+            />
 
             {/* Permissions: fixed for Claude, the sandbox for Codex */}
             <AgentPermissionPill

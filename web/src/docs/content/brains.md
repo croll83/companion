@@ -126,6 +126,8 @@ Before starting, The Companion counts the waiting notes. With none, the run is r
 
 **Model.** By default **Latest Sonnet**: the newest Sonnet of The Companion's Claude model list, chosen again at every run, so a new Sonnet is used as soon as The Companion knows it. The option shows which model that is now. You can pick another model, or **Codex** (its default is Codex's first model). Each run shows its model, and its cost and tokens when the CLI reports them (Claude Code does; Codex reports no cost).
 
+**Reasoning effort.** **High** by default, also for brains set up before this option existed: consolidation is careful work, and left to the CLI the runs got the model's own default (Low on GPT-6.1-Sol). The list shows the levels of the model the runs use now. When that model does not support the chosen level (the latest Sonnet changed, or you picked another model), the runs use the model's default and the tab says so under the option. A model with no effort setting gets none. For Codex the levels come from the catalogue Codex publishes; until Codex has run once on this machine they are unknown and the option is disabled. The level is also written into the consolidation agent (shown on its card in Agents), and each run shows the effort it ran with. An agent linked to a remote brain keeps its own effort: The Companion does not change it.
+
 **Checked result.** A run counts as a **Success** only when all of this holds:
 
 1. the agent made a commit in the clone;
@@ -138,7 +140,7 @@ Otherwise the run says why:
 - **No commit**: notes were waiting and the agent committed nothing.
 - **Error**: the run itself failed (the CLI stopped, the wiki folder is not a git repository, the brain was not running...).
 
-Each run lists its trigger, start time, duration, notes waiting, the decisions taken, the commit, model, cost and a link to its session. The brain's card says "N notes waiting · last consolidated <time>".
+Each run lists its trigger, start time, duration, notes waiting, the decisions taken, the commit, model, effort, cost and a link to its session. The brain's card says "N notes waiting · last consolidated <time>".
 
 **Limits.** The wiki folder must be a git repository on a branch (new brains are). The agent commits locally only: pushing to a remote (`master` or pull-request modes) is not available yet, and a wiki that is also edited elsewhere through a remote needs its own sync. A web address added as a source is read only if the agent has a web tool; otherwise its note is deferred. The agent's runs show in **Agents** too; running it from there goes through the same preparation and checks.
 

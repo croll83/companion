@@ -53,6 +53,7 @@ const defaultForm: AgentFormData = {
   icon: "",
   backendType: "claude",
   model: "claude-sonnet-4-6",
+  effort: "",
   permissionMode: "allowEdits",
   cwd: "",
   prompt: "",

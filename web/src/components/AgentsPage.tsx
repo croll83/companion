@@ -132,6 +132,7 @@ export function AgentsPage({ route }: Props) {
       icon: agent.icon || "",
       backendType: agent.backendType,
       model: agent.model,
+      effort: agent.effort || "",
       permissionMode: agent.permissionMode,
       cwd: agent.cwd === "temp" ? "" : agent.cwd,
       prompt: agent.prompt,
@@ -244,6 +245,8 @@ export function AgentsPage({ route }: Props) {
         icon: form.icon || undefined,
         backendType: form.backendType,
         model: form.model,
+        // null clears a saved effort (back to the model's default)
+        effort: form.effort || null,
         // Claude agents always run with full permissions (see AgentEditor);
         // for Codex the mode selects the sandbox.
         permissionMode: form.backendType === "claude" ? "bypassPermissions" : form.permissionMode,

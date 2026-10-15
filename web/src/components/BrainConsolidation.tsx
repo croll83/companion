@@ -7,7 +7,9 @@ import {
   type BrainConsolidationView,
   type BrainInfo,
 } from "../api.js";
-import { CLAUDE_MODELS, CODEX_MODELS, latestSonnet, toModelOptions, type ModelOption } from "../utils/backends.js";
+import { CLAUDE_MODELS, CODEX_MODELS, effortChoiceFor, effortLabel, latestSonnet, settleEffort, toModelOptions } from "../utils/backends.js";
+import { useCodexModels } from "../utils/use-codex-models.js";
+import { EffortSelect } from "./EffortSelect.js";
 import { sessionHash } from "../utils/routing.js";
 import { FIELD } from "./BrainForm.js";
 
@@ -70,6 +72,7 @@ function RunItem({ run }: { run: BrainConsolidationRun }) {
     run.commit ? `commit ${run.commit}` : "",
     run.lint ? (run.lint.errors || run.lint.warnings ? `wiki check: ${run.lint.errors} errors, ${run.lint.warnings} warnings` : "wiki check clean") : "",
     run.model ?? "",
+    run.effort ? `${effortLabel(run.effort)} effort` : "",
     run.costUsd ? `$${run.costUsd.toFixed(2)}` : "",
     run.tokens ? `${run.tokens.input.toLocaleString()} in / ${run.tokens.output.toLocaleString()} out tokens` : "",
   ].filter(Boolean);
@@ -97,21 +100,27 @@ function RunList({ runs }: { runs: BrainConsolidationRun[] }) {
   );
 }
 
-/** The schedule, backend, model and threshold of an embedded brain, saved together. */
+/**
+ * The note under the effort picker: what the runs really use when the chosen
+ * level is not one the resolved model takes ("latest Sonnet" moves with the
+ * catalog), mirroring the server's resolveConsolidationEffort.
+ */
+function effortFallbackNote(effort: string, model: string | undefined, levels: string[], settled: { effort?: string; fallback: boolean }): string {
+  if (!settled.fallback || levels.length === 0) return "";
+  const runsAt = settled.effort ? `its default (${effortLabel(settled.effort)})` : "the CLI's own level";
+  return `${model ?? "This model"} does not support ${effortLabel(effort)}: runs use ${runsAt}.`;
+}
+
+/** The schedule, backend, model, effort and threshold of an embedded brain, saved together. */
 function Settings({ view, busy, onSave }: { view: BrainConsolidationView; busy: boolean; onSave: (patch: BrainConsolidationPatch) => void }) {
   const ids = { schedule: useId(), backend: useId(), model: useId(), threshold: useId() };
   const [schedule, setSchedule] = useState(view.config.schedule);
   const [backend, setBackend] = useState(view.config.backend);
   const [model, setModel] = useState(view.config.model ?? "");
   const [threshold, setThreshold] = useState(String(view.config.threshold));
-  const [codexModels, setCodexModels] = useState<ModelOption[]>(CODEX_MODELS);
-
-  useEffect(() => {
-    if (backend !== "codex") return;
-    let live = true;
-    api.getBackendModels("codex").then((m) => { if (live && m.length) setCodexModels(toModelOptions(m)); }).catch(() => {});
-    return () => { live = false; };
-  }, [backend]);
+  const [effort, setEffort] = useState(view.config.effort);
+  const codexCatalog = useCodexModels(backend === "codex");
+  const codexModels = codexCatalog ? toModelOptions(codexCatalog) : CODEX_MODELS;
 
   const models = backend === "codex" ? codexModels : CLAUDE_MODELS;
   // The saved default as the server resolved it; for an unsaved backend, the same rule here.
@@ -121,6 +130,10 @@ function Settings({ view, busy, onSave }: { view: BrainConsolidationView; busy: 
   const defaultLabel = backend === "claude"
     ? `Latest Sonnet (now: ${resolved ?? "none in the catalog"})`
     : `Codex's first model (now: ${resolved ?? "chosen by Codex"})`;
+  // The effort is settled against the model the runs would get now.
+  const runModel = model || resolved;
+  const choice = effortChoiceFor(backend, runModel, codexCatalog);
+  const settled = settleEffort(effort, choice.levels, choice.defaultEffort);
 
   return (
     <form
@@ -128,7 +141,7 @@ function Settings({ view, busy, onSave }: { view: BrainConsolidationView; busy: 
       className="space-y-2"
       onSubmit={(e) => {
         e.preventDefault();
-        onSave({ schedule: schedule.trim(), backend, model: model || null, threshold: Number(threshold) });
+        onSave({ schedule: schedule.trim(), backend, model: model || null, effort, threshold: Number(threshold) });
       }}
     >
       <div className="grid grid-cols-2 gap-2">
@@ -158,6 +171,20 @@ function Settings({ view, busy, onSave }: { view: BrainConsolidationView; busy: 
             <option value="">{defaultLabel}</option>
             {models.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
+        </div>
+        <div>
+          <span aria-hidden="true" className="block text-[11px] text-cc-muted">Reasoning effort</span>
+          <EffortSelect
+            label="Reasoning effort"
+            levels={choice.levels}
+            value={effort}
+            onChange={setEffort}
+            unavailableNote={backend === "codex" && !codexCatalog
+              ? "Effort levels unknown until Codex has run once on this machine: runs use the model's default."
+              : "This model has no effort setting: the CLI picks its own."}
+            note={effortFallbackNote(effort, runModel, choice.levels, settled)}
+            className={FIELD}
+          />
         </div>
       </div>
       <p className="text-[10px] text-cc-muted">
@@ -318,7 +345,7 @@ export function BrainConsolidation({ brain, waiting, onChanged }: { brain: Brain
               <a href={sessionHash(view.runningSessionId)} className="self-center text-[12px] text-cc-primary hover:underline">Open the running session</a>
             )}
           </div>
-          <Settings key={`${view.config.schedule}|${view.config.backend}|${view.config.model ?? ""}|${view.config.threshold}`} view={view} busy={busy} onSave={(p) => void save(p)} />
+          <Settings key={`${view.config.schedule}|${view.config.backend}|${view.config.model ?? ""}|${view.config.effort}|${view.config.threshold}`} view={view} busy={busy} onSave={(p) => void save(p)} />
         </>
       ) : (
         <LinkAgent key={view.agent?.id ?? ""} view={view} busy={busy} onLink={(agentId) => void save({ agentId }, agentId ? "Linked." : "Unlinked.")} />

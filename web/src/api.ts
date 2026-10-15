@@ -231,6 +231,10 @@ export interface BackendModelInfo {
   value: string;
   label: string;
   description: string;
+  /** Codex: the model's reasoning-effort levels, from its catalogue (absent = none listed). */
+  efforts?: string[];
+  /** Codex: the level the model runs at when none is chosen. */
+  defaultEffort?: string;
 }
 
 export interface ClaudeDiscoveredSession {
@@ -650,6 +654,8 @@ export interface BrainConsolidationConfig {
   backend: "claude" | "codex";
   /** Absent: the latest Sonnet (Claude) or Codex's first model, resolved at every run. */
   model?: string;
+  /** Reasoning effort of the runs (default "high"), settled against the resolved model. */
+  effort: string;
   threshold: number;
   agentId?: string;
 }
@@ -667,6 +673,8 @@ export interface BrainConsolidationRun {
   sessionId?: string;
   backend?: "claude" | "codex";
   model?: string;
+  /** The reasoning effort the run was launched with. */
+  effort?: string;
   decided?: Record<string, number>;
   commit?: string;
   costUsd?: number;
@@ -681,6 +689,10 @@ export interface BrainConsolidationView {
   config: BrainConsolidationConfig;
   agent: { id: string; name: string; backendType: "claude" | "codex"; model: string; enabled: boolean } | null;
   resolvedModel: string | null;
+  /** The effort the next run would use (null: the model has no effort control). */
+  resolvedEffort: string | null;
+  /** The configured effort is not one resolvedModel takes: runs use resolvedEffort, its default. */
+  effortFallback: boolean;
   running: boolean;
   runningSessionId?: string;
   nextRunAt: number | null;
@@ -689,7 +701,7 @@ export interface BrainConsolidationView {
   domain: string;
 }
 
-export type BrainConsolidationPatch = Partial<Pick<BrainConsolidationConfig, "enabled" | "schedule" | "backend" | "threshold">> & {
+export type BrainConsolidationPatch = Partial<Pick<BrainConsolidationConfig, "enabled" | "schedule" | "backend" | "effort" | "threshold">> & {
   /** null or "": the default model. */
   model?: string | null;
   /** Remote brains: the agent to link (null unlinks). */
@@ -984,6 +996,8 @@ export interface AgentInfo {
   icon?: string;
   backendType: "claude" | "codex";
   model: string;
+  /** Reasoning effort of the runs; absent = the model's default. Null in an update clears it. */
+  effort?: string | null;
   permissionMode: string;
   cwd: string;
   envSlug?: string;

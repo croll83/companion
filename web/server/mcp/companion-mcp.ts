@@ -227,6 +227,7 @@ function agentSummary(a: JsonObject): JsonObject {
     enabled: a.enabled,
     backend: a.backendType,
     model: a.model || "(default)",
+    effort: a.effort || "(model default)",
     cwd: a.cwd,
     contextMode: a.contextMode ?? "brief",
     schedule: schedule?.enabled ? { expression: schedule.expression, recurring: schedule.recurring } : undefined,
@@ -285,6 +286,16 @@ async function describeAgent(agent: JsonObject, ctx: ToolContext, headline: stri
   if (summary.scheduleError) lines.push(`Schedule problem: ${summary.scheduleError}`);
   return reply(lines.join("\n"), summary);
 }
+
+/**
+ * The agents' reasoning effort. The server checks it against the agent's model
+ * (each model has its own levels, Codex's come from its catalogue), so the
+ * levels are only described here: this module imports nothing from server/.
+ */
+const EFFORT_PROP = {
+  type: "string",
+  description: "Reasoning effort of the runs: low, medium, high, xhigh, max or ultra, as far as the model supports it (refused otherwise). Default: the model's default.",
+};
 
 const TOOLS: ToolDef[] = [
   {
@@ -365,6 +376,7 @@ const TOOLS: ToolDef[] = [
         cwd: { type: "string", description: "Working folder of the runs. Default: this session's folder." },
         backend: { type: "string", enum: ["claude", "codex"], description: "Default: this session's backend." },
         model: { type: "string", description: "Default: this session's model when the backend is the same." },
+        effort: EFFORT_PROP,
         context_mode: { type: "string", enum: ["brief", "fork"], description: "brief (default): fresh session with only the prompt; fork: a copy of this conversation." },
         enabled: { type: "boolean", description: "Default true. A disabled agent keeps its schedule but does not fire." },
       },
@@ -388,6 +400,7 @@ const TOOLS: ToolDef[] = [
         description: str(args, "description") ?? "",
         backendType: backend,
         model: str(args, "model") ?? (backend === selfBackend ? (self.model as string | undefined) ?? "" : ""),
+        ...(str(args, "effort") ? { effort: str(args, "effort") } : {}),
         // Codex agents get this session's access: full, unless it is sandboxed.
         permissionMode: backend === "codex" && sandboxed ? "default" : "bypassPermissions",
         cwd: str(args, "cwd") ?? (self.cwd as string | undefined) ?? "temp",
@@ -422,7 +435,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "update_agent",
-    description: "Change an agent THIS session created: name, prompt, schedule (at / in_minutes / cron, or clear_schedule), webhook on/off, folder, model, context mode, enabled. Only the given fields change. Agents created by the user or by other sessions can only be changed from the Companion UI. Renaming changes the id (the new one is returned).",
+    description: "Change an agent THIS session created: name, prompt, schedule (at / in_minutes / cron, or clear_schedule), webhook on/off, folder, model, effort, context mode, enabled. Only the given fields change. Agents created by the user or by other sessions can only be changed from the Companion UI. Renaming changes the id (the new one is returned).",
     inputSchema: {
       type: "object",
       properties: {
@@ -435,6 +448,7 @@ const TOOLS: ToolDef[] = [
         webhook: { type: "boolean", description: "Turn the webhook on or off (the URL stays the same)." },
         cwd: { type: "string" },
         model: { type: "string" },
+        effort: { ...EFFORT_PROP, description: `${EFFORT_PROP.description} "" = back to the model's default.` },
         context_mode: { type: "string", enum: ["brief", "fork"], description: "fork = runs start from a copy of THIS session's conversation." },
         enabled: { type: "boolean" },
       },
@@ -445,10 +459,12 @@ const TOOLS: ToolDef[] = [
       const id = str(args, "agent_id", true)!;
       const existing = await ctx.api("GET", `/agents/${enc(id)}`) as JsonObject;
       const body: JsonObject = {};
-      for (const key of ["name", "prompt", "description", "cwd", "model"]) {
+      for (const key of ["name", "prompt", "description", "cwd", "model", "effort"]) {
         const value = str(args, key);
         if (value !== undefined) body[key] = value;
       }
+      // "" clears the effort (str() treats it as not given).
+      if (args.effort === "") body.effort = null;
       const enabled = bool(args, "enabled");
       if (enabled !== undefined) body.enabled = enabled;
       const contextMode = str(args, "context_mode");

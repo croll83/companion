@@ -33,8 +33,11 @@ export const DEFAULT_EFFORT: EffortLevel = "high";
  * dropping its row here would silently stop passing --effort mid-session.
  *
  * A model absent from this map does not
- * support effort at all (e.g. Sonnet/Haiku, Codex) and must never receive a
- * `--effort` flag — passing one to a non-supporting model is rejected.
+ * support effort at all (e.g. Sonnet 4.6, Codex) and must never receive a
+ * `--effort` flag. The CLI does not reject a level it cannot apply: it drops
+ * it silently (probed on CLI 2.1.293: `--effort xhigh` on Opus 4.6 runs at
+ * high, `--effort ultra` on Sonnet 5.5 at medium), so a wrong row here means a
+ * session that runs at a level other than the one shown.
  */
 const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
   "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
@@ -45,6 +48,10 @@ const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
   "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
   // Opus 4.6 supports `max` but not `xhigh` (matches CLI gating).
   "claude-opus-4-6": ["low", "medium", "high", "max"],
+  // Probed on CLI 2.1.293 (get_settings `applied.effort` after `--effort`):
+  // low, high, xhigh and max are applied as given. Without this row a brain
+  // consolidating on "latest Sonnet" ran at the CLI's own default (medium).
+  "claude-sonnet-5-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-haiku-5-5": ["low", "medium", "high", "xhigh", "max"],
 };
 
@@ -52,6 +59,34 @@ const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
 export function getEffortLevels(model: string | undefined | null): EffortLevel[] {
   if (!model) return [];
   return MODEL_EFFORT_LEVELS[model] ?? [];
+}
+
+/**
+ * Companion's default level for a Claude model that takes effort: DEFAULT_EFFORT
+ * (what a new session starts on), or the model's highest level should it ever
+ * lack it. Null for a model without effort control.
+ */
+export function getDefaultEffort(model: string | undefined | null): EffortLevel | null {
+  const levels = getEffortLevels(model);
+  if (levels.length === 0) return null;
+  return levels.includes(DEFAULT_EFFORT) ? DEFAULT_EFFORT : levels[levels.length - 1];
+}
+
+/**
+ * A wanted level settled against what a model takes: the wanted one when the
+ * model supports it, else the model's default. `fallback` says the wanted level
+ * was not usable, so a UI can say so. No level at all when the model has none
+ * (the CLI then runs on its own). Pure, shared by the server (agent runs, brain
+ * consolidation) and the browser (the notes next to the effort pickers).
+ */
+export function settleEffort(
+  wanted: string | undefined | null,
+  levels: readonly string[],
+  modelDefault: EffortLevel | null | undefined,
+): { effort?: EffortLevel; fallback: boolean } {
+  if (wanted && levels.includes(wanted)) return { effort: wanted as EffortLevel, fallback: false };
+  const effort = modelDefault && levels.includes(modelDefault) ? modelDefault : undefined;
+  return { ...(effort ? { effort } : {}), fallback: !!wanted };
 }
 
 /** Whether a model exposes reasoning-effort control. */

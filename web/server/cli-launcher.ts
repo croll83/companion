@@ -758,6 +758,10 @@ export class CliLauncher {
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, {
         model: info.model,
+        // Codex takes effort only at spawn: without it every relaunch (an
+        // effort change from the session toolbar included) ran at the model's
+        // default while the toolbar showed the chosen level.
+        effort: info.effort,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
         codexSandbox: info.codexSandbox,
@@ -1283,6 +1287,14 @@ export class CliLauncher {
    * Spawn a Codex app-server subprocess for a session.
    * Transport (stdio vs WebSocket) is selected by `COMPANION_CODEX_TRANSPORT`.
    */
+  /**
+   * The effort a Codex spawn passes (`-c model_reasoning_effort`), and reports
+   * in its session_init: only a level the model accepts (levels are per model).
+   */
+  private codexLaunchEffort(options: LaunchOptions): string | undefined {
+    return options.effort && isValidCodexEffort(options.model, options.effort) ? options.effort : undefined;
+  }
+
   private spawnCodex(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
     const useWs = isCodexWsTransportEnabled();
     if (useWs) {
@@ -1340,9 +1352,8 @@ export class CliLauncher {
     // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
     // not as a runtime call — same shape as Claude's `--effort` flag, so a change
     // means relaunch with thread/resume. Levels are per-model, hence the check.
-    if (options.effort && isValidCodexEffort(options.model, options.effort)) {
-      args.push("-c", `model_reasoning_effort=${options.effort}`);
-    }
+    const effort = this.codexLaunchEffort(options);
+    if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1412,6 +1423,7 @@ export class CliLauncher {
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
       extraWritableRoots: writableRoots,
+      effort,
       killProcess: async () => {
         try {
           proxyProc.kill("SIGTERM");
@@ -1518,9 +1530,8 @@ export class CliLauncher {
     // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
     // not as a runtime call — same shape as Claude's `--effort` flag, so a change
     // means relaunch with thread/resume. Levels are per-model, hence the check.
-    if (options.effort && isValidCodexEffort(options.model, options.effort)) {
-      args.push("-c", `model_reasoning_effort=${options.effort}`);
-    }
+    const effort = this.codexLaunchEffort(options);
+    if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -1565,6 +1576,7 @@ export class CliLauncher {
       recorder: this.recorder ?? undefined,
       systemPrompt: options.systemPrompt,
       extraWritableRoots: writableRoots,
+      effort,
     });
 
     // Handle init errors — mark session as exited so UI shows failure.

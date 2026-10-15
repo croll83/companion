@@ -28,16 +28,18 @@ import { embeddedBrain, jarvisBrain } from "../test-fixtures/brains.js";
 import { latestSonnet } from "../utils/backends.js";
 
 const runs: BrainConsolidationRun[] = [
-  { id: "r3", trigger: "threshold", status: "not_synced", startedAt: Date.UTC(2026, 9, 14, 9), finishedAt: Date.UTC(2026, 9, 14, 9, 2, 5), pending: 12, sessionId: "s3", model: "claude-sonnet-5-5", decided: { accepted: 3, rejected: 1, undecided: 0 }, commit: "abc1234", costUsd: 0.42, tokens: { input: 1500, output: 300 }, error: "Consolidated but not synced: git pull --ff-only failed" },
+  { id: "r3", trigger: "threshold", status: "not_synced", startedAt: Date.UTC(2026, 9, 14, 9), finishedAt: Date.UTC(2026, 9, 14, 9, 2, 5), pending: 12, sessionId: "s3", model: "claude-sonnet-5-5", effort: "high", decided: { accepted: 3, rejected: 1, undecided: 0 }, commit: "abc1234", costUsd: 0.42, tokens: { input: 1500, output: 300 }, error: "Consolidated but not synced: git pull --ff-only failed" },
   { id: "r2", trigger: "schedule", status: "skipped", startedAt: Date.UTC(2026, 9, 13, 5), finishedAt: Date.UTC(2026, 9, 13, 5), pending: 0, error: "No note waiting" },
   { id: "r1", trigger: "catch-up", status: "success", startedAt: Date.UTC(2026, 9, 12, 5), finishedAt: Date.UTC(2026, 9, 12, 5, 0, 45), commit: "def5678", lint: { errors: 1, warnings: 0 } },
 ];
 
 function view(over: Partial<BrainConsolidationView> = {}): BrainConsolidationView {
   return {
-    config: { enabled: true, schedule: "0 5 * * *", mode: "local", backend: "claude", threshold: 10, agentId: "work-brain-consolidation" },
+    config: { enabled: true, schedule: "0 5 * * *", mode: "local", backend: "claude", effort: "high", threshold: 10, agentId: "work-brain-consolidation" },
     agent: { id: "work-brain-consolidation", name: "Work brain consolidation", backendType: "claude", model: "claude-sonnet-5-5", enabled: true },
     resolvedModel: "claude-sonnet-5-5",
+    resolvedEffort: "high",
+    effortFallback: false,
     running: false,
     nextRunAt: Date.UTC(2026, 9, 15, 5),
     lastSuccessAt: Date.UTC(2026, 9, 12, 5, 0, 45),
@@ -66,7 +68,7 @@ describe("BrainConsolidation (embedded)", () => {
     const items = within(list).getAllByRole("listitem");
     expect(items[0]).toHaveTextContent("Not synced · notes over the threshold");
     // Token counts use the browser's number format (1,500 or 1500 or 1.500).
-    expect(items[0]).toHaveTextContent(/2 min 5 s · 12 waiting · 3 accepted, 1 rejected · commit abc1234 · claude-sonnet-5-5 · \$0\.42 · 1[,.]?500 in \/ 300 out tokens/);
+    expect(items[0]).toHaveTextContent(/2 min 5 s · 12 waiting · 3 accepted, 1 rejected · commit abc1234 · claude-sonnet-5-5 · High effort · \$0\.42 · 1[,.]?500 in \/ 300 out tokens/);
     expect(items[0]).toHaveTextContent("Consolidated but not synced");
     expect(within(items[0]).getByRole("link", { name: "Open the run's session" })).toHaveAttribute("href", "#/session/s3");
     expect(items[1]).toHaveTextContent("Skipped · scheduled");
@@ -133,7 +135,7 @@ describe("BrainConsolidation (embedded)", () => {
     fireEvent.change(within(form).getByLabelText("Run early at (waiting notes)"), { target: { value: "4" } });
     fireEvent.change(model, { target: { value: "claude-opus-5-5" } });
     fireEvent.click(within(form).getByRole("button", { name: "Save consolidation settings" }));
-    await waitFor(() => expect(mockApi.updateBrainConsolidation).toHaveBeenCalledWith("work", { schedule: "30 4 * * *", backend: "claude", model: "claude-opus-5-5", threshold: 4 }));
+    await waitFor(() => expect(mockApi.updateBrainConsolidation).toHaveBeenCalledWith("work", { schedule: "30 4 * * *", backend: "claude", model: "claude-opus-5-5", effort: "high", threshold: 4 }));
     expect(await screen.findByText("Saved.")).toBeInTheDocument();
   });
 
@@ -145,7 +147,66 @@ describe("BrainConsolidation (embedded)", () => {
     expect(await within(model).findByRole("option", { name: "GPT-6-Astra" })).toBeInTheDocument();
     expect(within(model).getByRole("option", { name: "Codex's first model (now: gpt-6-astra)" })).toBeInTheDocument();
     fireEvent.click(within(form).getByRole("button", { name: "Save consolidation settings" }));
-    await waitFor(() => expect(mockApi.updateBrainConsolidation).toHaveBeenCalledWith("work", { schedule: "0 5 * * *", backend: "codex", model: null, threshold: 10 }));
+    await waitFor(() => expect(mockApi.updateBrainConsolidation).toHaveBeenCalledWith("work", { schedule: "0 5 * * *", backend: "codex", model: null, effort: "high", threshold: 10 }));
+  });
+
+  // The effort sits next to backend and model: "high" by default, only the
+  // levels the model of the runs takes, saved in the same patch. When the
+  // model lacks the level ("latest Sonnet" moves with the catalog) the tab
+  // says what the runs really use; without Codex's catalogue the levels are
+  // unknown and the select is disabled with a note (parity rule).
+  it("chooses the effort among the resolved model's levels and saves it with the settings", async () => {
+    render(<BrainConsolidation brain={embeddedBrain()} waiting={0} />);
+    const form = await screen.findByRole("form", { name: "Consolidation settings" });
+    const effort = within(form).getByLabelText("Reasoning effort") as HTMLSelectElement;
+    expect(effort.value).toBe("high");
+    expect(Array.from(effort.options).map((o) => o.textContent)).toEqual(["Low", "Medium", "High", "X-High", "Max"]);
+    fireEvent.change(effort, { target: { value: "max" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save consolidation settings" }));
+    await waitFor(() => expect(mockApi.updateBrainConsolidation).toHaveBeenCalledWith("work", expect.objectContaining({ effort: "max" })));
+  });
+
+  it("says when the model of the runs does not take the chosen level", async () => {
+    mockApi.brainConsolidation.mockResolvedValueOnce(view({ config: { ...view().config, model: "claude-opus-4-6", effort: "xhigh" }, resolvedModel: "claude-opus-4-6", resolvedEffort: "high", effortFallback: true }));
+    render(<BrainConsolidation brain={embeddedBrain()} waiting={0} />);
+    const effort = await screen.findByLabelText("Reasoning effort");
+    expect(effort).toHaveValue("xhigh");
+    expect(effort).toHaveAccessibleDescription("claude-opus-4-6 does not support X-High: runs use its default (High).");
+  });
+
+  it("disables the effort with a note while Codex's levels are unknown, and lists them once known", async () => {
+    mockApi.getBackendModels.mockRejectedValueOnce(new Error("Codex models cache not found"));
+    const { unmount } = render(<BrainConsolidation brain={embeddedBrain()} waiting={0} />);
+    let form = await screen.findByRole("form", { name: "Consolidation settings" });
+    fireEvent.change(within(form).getByLabelText("Backend"), { target: { value: "codex" } });
+    await waitFor(() => expect(mockApi.getBackendModels).toHaveBeenCalled());
+    expect(within(form).getByLabelText("Reasoning effort")).toBeDisabled();
+    expect(within(form).getByLabelText("Reasoning effort")).toHaveAccessibleDescription(/Effort levels unknown until Codex has run once/);
+    unmount();
+
+    mockApi.getBackendModels.mockResolvedValueOnce([{ value: "gpt-6.1-sol", label: "GPT-6.1-Sol", efforts: ["low", "high", "ultra"], defaultEffort: "low" }]);
+    render(<BrainConsolidation brain={embeddedBrain()} waiting={0} />);
+    form = await screen.findByRole("form", { name: "Consolidation settings" });
+    fireEvent.change(within(form).getByLabelText("Backend"), { target: { value: "codex" } });
+    const effort = within(form).getByLabelText("Reasoning effort");
+    await waitFor(() => expect(effort).toBeEnabled());
+    expect(within(effort).getAllByRole("option").map((o) => o.textContent)).toEqual(["Low", "High", "Ultra"]);
+  });
+
+  it("says when a Claude model has no effort setting", async () => {
+    mockApi.brainConsolidation.mockResolvedValueOnce(view({ config: { ...view().config, model: "claude-sonnet-4-6" }, resolvedModel: "claude-sonnet-4-6", resolvedEffort: null, effortFallback: true }));
+    render(<BrainConsolidation brain={embeddedBrain()} waiting={0} />);
+    const effort = await screen.findByLabelText("Reasoning effort");
+    expect(effort).toBeDisabled();
+    expect(effort).toHaveAccessibleDescription("This model has no effort setting: the CLI picks its own.");
+  });
+
+  it("passes axe accessibility scan with an effort fallback note", async () => {
+    const { axe } = await import("vitest-axe");
+    mockApi.brainConsolidation.mockResolvedValueOnce(view({ config: { ...view().config, model: "claude-opus-4-6", effort: "xhigh" }, resolvedModel: "claude-opus-4-6", resolvedEffort: "high", effortFallback: true }));
+    const { container } = render(<BrainConsolidation brain={embeddedBrain()} waiting={0} />);
+    await screen.findByLabelText("Reasoning effort");
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it("shows API errors", async () => {

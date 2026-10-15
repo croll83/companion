@@ -49,6 +49,13 @@ export interface CodexPickerModel {
   value: string;
   label: string;
   description: string;
+  /**
+   * The model's reasoning-effort levels and default, for the pickers that set
+   * an effort before any session exists (the Agents page, brain
+   * consolidation). Absent when the catalogue lists none.
+   */
+  efforts?: EffortLevel[];
+  defaultEffort?: EffortLevel;
 }
 
 /** Every models_cache.json Codex may have refreshed: the host's and each session's. */
@@ -210,7 +217,17 @@ export function pickerModels(cache: CodexModelsCache): CodexPickerModel[] {
       return !f || f.version === newest.get(f.family);
     })
     .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
-    .map((m) => ({ value: m.slug, label: m.display_name || m.slug, description: m.description || "" }));
+    .map((m) => {
+      const efforts = codexEffortLevelsFrom(cache.models, m.slug);
+      const defaultEffort = codexDefaultEffortFrom(cache.models, m.slug);
+      return {
+        value: m.slug,
+        label: m.display_name || m.slug,
+        description: m.description || "",
+        ...(efforts.length ? { efforts } : {}),
+        ...(defaultEffort ? { defaultEffort } : {}),
+      };
+    });
 }
 
 /**

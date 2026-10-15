@@ -32,6 +32,21 @@ describe("codex picker models", () => {
     expect(out).toContain("gpt-5.5");
   });
 
+  // The Agents page and brain consolidation pick an effort before any session
+  // exists, so the list carries each model's levels and default from the same
+  // catalogue; a model listing none gets neither field.
+  it("carries each model's effort levels and default", () => {
+    const out = pickerModels({
+      models: [
+        { ...model("gpt-6.1-sol", 1), default_reasoning_level: "low", supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }, { effort: "bogus" }] },
+        model("gpt-5.5", 2),
+      ],
+    });
+    expect(out[0]).toMatchObject({ value: "gpt-6.1-sol", efforts: ["low", "ultra"], defaultEffort: "low" });
+    expect(out[1]).not.toHaveProperty("efforts");
+    expect(out[1]).not.toHaveProperty("defaultEffort");
+  });
+
   it("keeps priority order and drops hidden models", () => {
     const out = pickerModels({
       models: [model("gpt-6-luna", 3), model("gpt-reserve", 1, "hide"), model("gpt-6-astra", 1)],

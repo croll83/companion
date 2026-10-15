@@ -30,12 +30,15 @@ Sessions can also create and manage agents themselves with the built-in `create_
 5. Configure the **controls row**:
    - **Backend**: Claude Code or Codex
    - **Model**: Which model to use
+   - **Reasoning effort**: How hard the model thinks on each run. The list shows only the levels the selected model supports: Claude models from Companion's own table, Codex models from the catalogue Codex publishes. **Default (…)** shows the level the runs get when you choose none: **High** for Claude (the level a new session starts on), the model's own default for Codex (for example Low on GPT-6.1-Sol). Changing the model keeps the chosen level only when the new model supports it. The select is disabled with a note when the model has no effort setting, or, for Codex, while Codex has not yet run once on this machine (its levels are unknown)
    - **Permissions**: see **Permissions** below
    - **Working directory**: The folder the agent works in. Without one, each run gets a fresh temporary directory
    - **Environment profile** (optional): Apply an [environment profile](#/docs/guides/environments) explicitly. Global and folder-matched profiles apply anyway
    - **Internet access** (Codex only): Toggle network access
 
 6. Click **Create**
+
+The effort is always passed to the CLI explicitly, the default included, so a run's session shows the level it really runs at. The server refuses a level the model does not support (the error lists the levels it does). An agent that keeps a level its model no longer offers (after a Codex catalogue change, for example) runs at the model's default, with a warning in the log.
 
 ## Context
 
@@ -82,6 +85,7 @@ Toggle agents on/off from the agent card menu. Disabled agents don't run on sche
 Each agent card shows:
 - Name, description, and icon
 - Backend type
+- The reasoning effort, when one is set (none shown means the model's default)
 - Trigger badges (Manual, Webhook, Schedule, Linear Agent)
 - **Running** while a run is in progress (links to the Runs page)
 - A schedule problem, if any (a past one-time date, a skipped scheduled run)

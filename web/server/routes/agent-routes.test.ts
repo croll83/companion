@@ -55,6 +55,14 @@ vi.mock("../linear-oauth-connections.js", () => ({
   findOAuthConnectionByClientId: vi.fn(() => null),
 }));
 
+// Codex's models catalogue, fixed: the effort checks read levels from it.
+vi.mock("../codex-models.js", () => ({
+  defaultCodexModel: () => "gpt-6.1-sol",
+  getCodexEffortLevels: (m: string | undefined) =>
+    m === "gpt-6.1-sol" ? ["low", "medium", "high", "xhigh", "max", "ultra"] : m === "gpt-6-luna" ? ["low", "medium", "high", "xhigh", "max"] : [],
+  getCodexDefaultEffort: (m: string | undefined) => (m === "gpt-6.1-sol" ? "low" : m === "gpt-6-luna" ? "medium" : null),
+}));
+
 import { Hono } from "hono";
 import * as agentStore from "../agent-store.js";
 import { getSettings, updateSettings } from "../settings-manager.js";
@@ -1674,5 +1682,85 @@ describe("agent run state", () => {
 
     expect(res.status).toBe(409);
     expect((await res.json()).error).toBe("still in progress");
+  });
+});
+
+// ─── Reasoning effort ───────────────────────────────────────────────────────
+
+/**
+ * An agent's effort is checked against the model it will have once saved
+ * (Claude: effort.ts, Codex: its catalogue), so the CLI never gets a level it
+ * would silently drop. Validates: valid levels are saved for both backends,
+ * invalid ones get a 400 naming what the model supports, changing only the
+ * model of an agent with an effort is caught, null clears it, and an import
+ * goes through the same check.
+ */
+describe("agent effort", () => {
+  const post = (path: string, body: unknown) =>
+    app.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const put = (body: unknown) =>
+    app.request("/api/agents/test-agent", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  it("saves an effort the Claude model takes", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent({ effort: "max" }));
+    const res = await post("/api/agents", { name: "A", prompt: "p", model: "claude-opus-5-5", effort: "max" });
+    expect(res.status).toBe(201);
+    expect(agentStore.createAgent).toHaveBeenCalledWith(expect.objectContaining({ effort: "max" }));
+  });
+
+  it("saves an effort the Codex model takes, Codex's first model included", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent({ backendType: "codex" }));
+    expect((await post("/api/agents", { name: "A", prompt: "p", backendType: "codex", model: "gpt-6.1-sol", effort: "ultra" })).status).toBe(201);
+    expect((await post("/api/agents", { name: "B", prompt: "p", backendType: "codex", effort: "ultra" })).status).toBe(201);
+  });
+
+  it("leaves effort out of a create without one, or with an empty one", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent());
+    await post("/api/agents", { name: "A", prompt: "p", model: "claude-opus-5-5", effort: "" });
+    expect(vi.mocked(agentStore.createAgent).mock.calls[0][0]).not.toHaveProperty("effort");
+  });
+
+  it("refuses a level the model does not take, naming the ones it does", async () => {
+    const res = await post("/api/agents", { name: "A", prompt: "p", model: "claude-opus-4-6", effort: "xhigh" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('claude-opus-4-6 does not support effort "xhigh" (it supports low, medium, high, max)');
+    expect(agentStore.createAgent).not.toHaveBeenCalled();
+
+    const codex = await post("/api/agents", { name: "A", prompt: "p", backendType: "codex", model: "gpt-6-luna", effort: "ultra" });
+    expect(codex.status).toBe(400);
+    expect((await codex.json()).error).toMatch(/gpt-6-luna does not support effort "ultra"/);
+  });
+
+  it("refuses an unknown level and an effort on a model without effort control", async () => {
+    expect((await (await post("/api/agents", { name: "A", prompt: "p", model: "claude-opus-5-5", effort: "turbo" })).json()).error).toMatch(/effort must be one of/);
+    expect((await (await post("/api/agents", { name: "A", prompt: "p", model: "claude-sonnet-4-6", effort: "high" })).json()).error).toMatch(/has no reasoning-effort setting/);
+  });
+
+  it("catches a model change that leaves an unsupported effort behind", async () => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ model: "claude-opus-5-5", effort: "xhigh" }));
+    const res = await put({ model: "claude-opus-4-6" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/does not support effort "xhigh"/);
+    expect(agentStore.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("clears the effort with null (back to the model's default)", async () => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ model: "claude-opus-5-5", effort: "max" }));
+    vi.mocked(agentStore.updateAgent).mockReturnValue(makeAgent({ model: "claude-opus-4-6" }));
+    const res = await put({ model: "claude-opus-4-6", effort: null });
+    expect(res.status).toBe(200);
+    const updates = vi.mocked(agentStore.updateAgent).mock.calls[0][1];
+    expect("effort" in updates && updates.effort === undefined).toBe(true);
+  });
+
+  it("checks an imported agent's effort too, and exports it", async () => {
+    const res = await post("/api/agents/import", { name: "A", prompt: "p", model: "claude-opus-4-6", effort: "xhigh" });
+    expect(res.status).toBe(400);
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent({ enabled: false, effort: "max" }));
+    expect((await post("/api/agents/import", { name: "A", prompt: "p", model: "claude-opus-5-5", effort: "max" })).status).toBe(201);
+    expect(agentStore.createAgent).toHaveBeenCalledWith(expect.objectContaining({ effort: "max", enabled: false }));
+
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ effort: "max" }));
+    expect((await (await app.request("/api/agents/test-agent/export")).json()).effort).toBe("max");
   });
 });

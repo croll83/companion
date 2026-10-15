@@ -5,6 +5,8 @@ import {
   getEffortLevels,
   modelSupportsEffort,
   isValidEffort,
+  getDefaultEffort,
+  settleEffort,
 } from "./effort.js";
 
 // The effort matrix mirrors the Claude Code CLI's per-model gating. These tests
@@ -71,5 +73,51 @@ describe("effort capability matrix", () => {
     expect(isValidEffort("claude-fable-5", "ultra")).toBe(false);
     expect(isValidEffort("claude-fable-5", "")).toBe(false);
     expect(isValidEffort("claude-fable-5", undefined)).toBe(false);
+  });
+});
+
+// Sonnet 5.5 takes --effort (probed on CLI 2.1.293: low/high/xhigh/max are
+// applied as given). Without its row "latest Sonnet" consolidations ran at the
+// CLI's own default (medium) whatever was chosen.
+describe("Sonnet 5.5 effort", () => {
+  it("lists low to max, without ultra", () => {
+    expect(getEffortLevels("claude-sonnet-5-5")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(isValidEffort("claude-sonnet-5-5", "ultra")).toBe(false);
+  });
+});
+
+// The default a Claude model runs at when none was chosen: Companion's (high,
+// what a new session starts on), so it can be passed explicitly and the
+// session shows the level it really runs at.
+describe("getDefaultEffort", () => {
+  it("is high for effort-capable models and null for the others", () => {
+    expect(getDefaultEffort("claude-opus-5-5")).toBe("high");
+    expect(getDefaultEffort("claude-opus-4-6")).toBe("high");
+    expect(getDefaultEffort("claude-sonnet-4-6")).toBeNull();
+    expect(getDefaultEffort(undefined)).toBeNull();
+  });
+});
+
+// settleEffort is the one rule both the server (runs) and the browser (the
+// note next to a picker) apply: keep a supported level, else the model's
+// default, and flag the fallback so the UI can say so.
+describe("settleEffort", () => {
+  it("keeps a level the model takes", () => {
+    expect(settleEffort("max", ["low", "high", "max"], "high")).toEqual({ effort: "max", fallback: false });
+  });
+
+  it("falls back to the model's default for a level it lacks", () => {
+    expect(settleEffort("ultra", ["low", "high", "max"], "low")).toEqual({ effort: "low", fallback: true });
+  });
+
+  it("uses the default without a fallback when nothing was asked", () => {
+    expect(settleEffort(undefined, ["low", "high"], "high")).toEqual({ effort: "high", fallback: false });
+    expect(settleEffort("", ["low", "high"], "high")).toEqual({ effort: "high", fallback: false });
+  });
+
+  it("gives no level when the model has none, or its default is not among its levels", () => {
+    expect(settleEffort("high", [], null)).toEqual({ fallback: true });
+    expect(settleEffort(undefined, [], null)).toEqual({ fallback: false });
+    expect(settleEffort(undefined, ["low"], "high")).toEqual({ fallback: false });
   });
 });

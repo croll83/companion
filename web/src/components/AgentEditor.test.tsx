@@ -23,6 +23,8 @@ const mockApi = {
   listSkills: vi.fn().mockResolvedValue([]),
   listEnvs: vi.fn().mockResolvedValue([]),
   listLinearOAuthConnections: vi.fn().mockResolvedValue({ connections: [] }),
+  // Codex's catalogue, with each model's effort levels (empty = none fetched yet).
+  getBackendModels: vi.fn().mockResolvedValue([]),
 };
 vi.mock("../api.js", () => ({
   api: {
@@ -30,6 +32,7 @@ vi.mock("../api.js", () => ({
     listEnvs: (...args: unknown[]) => mockApi.listEnvs(...args),
     listDomains: () => Promise.resolve({ root: "", skillGroups: [], domains: [{ slug: "global", name: "GLOBAL" }, { slug: "herd", name: "Herd" }] }),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
+    getBackendModels: (...args: unknown[]) => mockApi.getBackendModels(...args),
   },
 }));
 
@@ -563,5 +566,77 @@ describe("AgentEditor — domain", () => {
     renderEditor({ domain: "gone" });
     await screen.findByRole("option", { name: "Herd" });
     expect(screen.getByLabelText("Agent domain")).toHaveValue("gone");
+  });
+});
+
+// Reasoning effort: a select next to the model listing only the levels the
+// selected backend and model take (Claude: the static table; Codex: its
+// catalogue), "Default (<model default>)" first. Validates: the levels per
+// model, the pick reaching the form, a model change dropping a level the new
+// model lacks (and keeping one it has), a backend change resetting it, and the
+// select disabled with a note when the levels are unknown (Codex without
+// catalogue) or the model has none.
+describe("AgentEditor reasoning effort", () => {
+  const select = () => screen.getByLabelText("Reasoning effort");
+  const optionTexts = () => Array.from(select().querySelectorAll("option")).map((o) => o.textContent);
+
+  it("lists the Claude model's levels with Companion's default first", () => {
+    renderEditor({ model: "claude-opus-4-6" });
+    expect(optionTexts()).toEqual(["Default (High)", "Low", "Medium", "High", "Max"]);
+    expect(select()).toHaveValue("");
+  });
+
+  it("puts the chosen level in the form", () => {
+    const { getForm } = renderEditor({ model: "claude-opus-5-5" });
+    fireEvent.change(select(), { target: { value: "xhigh" } });
+    expect(getForm().effort).toBe("xhigh");
+  });
+
+  it("drops a level the new model lacks", () => {
+    const { getForm } = renderEditor({ model: "claude-opus-5-5", effort: "xhigh" });
+    fireEvent.click(screen.getByText("Opus 5.5"));
+    fireEvent.click(screen.getByText("Opus 4.6"));
+    expect(getForm()).toMatchObject({ model: "claude-opus-4-6", effort: "" });
+  });
+
+  it("keeps a level the new model has", () => {
+    const { getForm } = renderEditor({ model: "claude-opus-5-5", effort: "max" });
+    fireEvent.click(screen.getByText("Opus 5.5"));
+    fireEvent.click(screen.getByText("Opus 4.6"));
+    expect(getForm()).toMatchObject({ model: "claude-opus-4-6", effort: "max" });
+  });
+
+  it("resets the effort when the backend changes", () => {
+    const { getForm } = renderEditor({ model: "claude-opus-5-5", effort: "max" });
+    fireEvent.click(screen.getByText("Codex"));
+    expect(getForm()).toMatchObject({ backendType: "codex", effort: "" });
+  });
+
+  it("lists a Codex model's levels and default from its catalogue", async () => {
+    mockApi.getBackendModels.mockResolvedValue([
+      { value: "gpt-6.1-sol", label: "GPT-6.1-Sol", description: "", efforts: ["low", "medium", "high", "ultra"], defaultEffort: "low" },
+    ]);
+    renderEditor({ backendType: "codex", model: "gpt-6.1-sol", effort: "ultra" });
+    await waitFor(() => expect(optionTexts()).toEqual(["Default (Low)", "Low", "Medium", "High", "Ultra"]));
+    expect(select()).toHaveValue("ultra");
+    expect(mockApi.getBackendModels).toHaveBeenCalledWith("codex");
+  });
+
+  it("disables the select with a note while Codex's levels are unknown, or when the model has none", () => {
+    renderEditor({ backendType: "codex", model: "gpt-6.1-sol" });
+    expect(select()).toBeDisabled();
+    expect(select()).toHaveAccessibleDescription("Effort levels unknown until Codex has run once on this machine.");
+  });
+
+  it("says when a Claude model has no effort setting", () => {
+    renderEditor({ model: "claude-sonnet-4-6" });
+    expect(select()).toBeDisabled();
+    expect(select()).toHaveAccessibleDescription("This model has no effort setting.");
+  });
+
+  it("passes axe accessibility checks with the effort select", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = renderEditor({ name: "Effort Agent", prompt: "Run", model: "claude-opus-5-5", effort: "max" });
+    expect(await axe(container, axeRules)).toHaveNoViolations();
   });
 });
