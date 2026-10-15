@@ -231,6 +231,10 @@ export interface BackendModelInfo {
   value: string;
   label: string;
   description: string;
+  /** Codex: the model's reasoning-effort levels, from its catalogue (absent = none listed). */
+  efforts?: string[];
+  /** Codex: the level the model runs at when none is chosen. */
+  defaultEffort?: string;
 }
 
 export interface ClaudeDiscoveredSession {
@@ -984,6 +988,8 @@ export interface AgentInfo {
   icon?: string;
   backendType: "claude" | "codex";
   model: string;
+  /** Reasoning effort of the runs; absent = the model's default. Null in an update clears it. */
+  effort?: string | null;
   permissionMode: string;
   cwd: string;
   envSlug?: string;

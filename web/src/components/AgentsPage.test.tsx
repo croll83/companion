@@ -19,6 +19,7 @@ const mockApi = {
   listEnvs: vi.fn(),
   getLinearOAuthStatus: vi.fn(),
   listLinearOAuthConnections: vi.fn(),
+  getBackendModels: vi.fn(),
 };
 
 vi.mock("../api.js", () => ({
@@ -38,6 +39,7 @@ vi.mock("../api.js", () => ({
     listDomains: () => Promise.resolve({ root: "", skillGroups: [], domains: [{ slug: "global", name: "GLOBAL" }, { slug: "herd", name: "Herd" }] }),
     getLinearOAuthStatus: (...args: unknown[]) => mockApi.getLinearOAuthStatus(...args),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
+    getBackendModels: (...args: unknown[]) => mockApi.getBackendModels(...args),
   },
 }));
 
@@ -98,6 +100,7 @@ beforeEach(() => {
   mockApi.listEnvs.mockResolvedValue([]);
   mockApi.getLinearOAuthStatus.mockResolvedValue({ configured: false, hasClientId: false, hasClientSecret: false, hasWebhookSecret: false, hasAccessToken: false });
   mockApi.listLinearOAuthConnections.mockResolvedValue({ connections: [] });
+  mockApi.getBackendModels.mockResolvedValue([]);
   window.location.hash = "#/agents";
   // Reset publicUrl mock to empty (no public URL configured)
   mockPublicUrl = "";
@@ -938,6 +941,34 @@ describe("AgentsPage", () => {
     // First argument should be the agent id, second the data payload
     expect(mockApi.updateAgent.mock.calls[0][0]).toBe("edit-1");
     expect(mockApi.updateAgent.mock.calls[0][1].name).toBe("Updated Name");
+  });
+
+  // The effort round-trips: the editor opens on the saved level, a chosen one
+  // is sent, and "Default" is sent as null so the server clears a saved level
+  // (an absent key would leave it in place).
+  it("edit mode loads the agent's effort and saves the chosen one, or null for the default", async () => {
+    const agent = makeAgent({ id: "eff-1", name: "Effort Agent", model: "claude-opus-5-5", effort: "max" });
+    mockApi.listAgents.mockResolvedValue([agent]);
+    mockApi.updateAgent.mockResolvedValue(agent);
+    render(<AgentsPage route={defaultRoute} />);
+    await screen.findByText("Effort Agent");
+    fireEvent.click(screen.getByLabelText("More actions"));
+    fireEvent.click(screen.getByText("Edit"));
+    const select = screen.getByLabelText("Reasoning effort");
+    expect(select).toHaveValue("max");
+
+    fireEvent.change(select, { target: { value: "xhigh" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateAgent.mock.calls[0][1].effort).toBe("xhigh");
+
+    await screen.findByText("Effort Agent");
+    fireEvent.click(screen.getByLabelText("More actions"));
+    fireEvent.click(screen.getByText("Edit"));
+    fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(2));
+    expect(mockApi.updateAgent.mock.calls[1][1].effort).toBeNull();
   });
 
   // ── Import Modal ──────────────────────────────────────────────────────────

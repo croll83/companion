@@ -11,8 +11,10 @@ export {
   modelSupportsEffort,
   supportsUltracode,
   isValidEffort,
+  settleEffort,
 } from "../../server/effort.js";
 export type { EffortLevel } from "../../server/effort.js";
+import { EFFORT_LEVELS, getDefaultEffort, getEffortLevels, type EffortLevel } from "../../server/effort.js";
 import { CLAUDE_MODELS as SHARED_CLAUDE_MODELS } from "../../server/claude-models.js";
 export { latestSonnet } from "../../server/claude-models.js";
 
@@ -124,4 +126,50 @@ export function getDefaultMode(backend: BackendType): string {
 
 export function getDefaultAgentMode(backend: BackendType): string {
   return backend === "codex" ? CODEX_AGENT_MODES[0].value : CLAUDE_AGENT_MODES[0].value;
+}
+
+// ─── Reasoning effort ────────────────────────────────────────────────────────
+
+/** Human label for an effort level. */
+const EFFORT_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "X-High",
+  max: "Max",
+  ultra: "Ultra",
+};
+
+export function effortLabel(level: string): string {
+  return EFFORT_LABELS[level] ?? level;
+}
+
+/** The effort levels a model takes and the one it runs at when none is chosen. */
+export interface EffortChoice {
+  levels: EffortLevel[];
+  defaultEffort: EffortLevel | null;
+}
+
+/**
+ * Effort choice for a backend and model before any session exists (the Agents
+ * page, brain consolidation). Claude: the static table in server/effort.ts,
+ * with Companion's default (what a new session starts on). Codex: the levels
+ * and default its catalogue lists for the model (`codexModels`, from
+ * /backends/codex/models; null while unknown); an empty model is Codex's first
+ * model, as the server resolves it. The same rules run on the server
+ * (server/agent-effort.ts), which validates and launches.
+ */
+export function effortChoiceFor(
+  backend: BackendType,
+  model: string | undefined | null,
+  codexModels: BackendModelInfo[] | null,
+): EffortChoice {
+  if (backend !== "codex") {
+    return { levels: getEffortLevels(model), defaultEffort: getDefaultEffort(model) };
+  }
+  const entry = model ? codexModels?.find((m) => m.value === model) : codexModels?.[0];
+  const known = new Set<string>(EFFORT_LEVELS);
+  const levels = (entry?.efforts ?? []).filter((l): l is EffortLevel => known.has(l));
+  const defaultEffort = entry?.defaultEffort && known.has(entry.defaultEffort) ? (entry.defaultEffort as EffortLevel) : null;
+  return { levels, defaultEffort };
 }

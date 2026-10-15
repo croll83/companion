@@ -1,5 +1,7 @@
 // ─── Agent Types ─────────────────────────────────────────────────────────────
 
+import type { EffortLevel } from "./effort.js";
+
 export interface McpServerConfigAgent {
   type: "stdio" | "sse" | "http";
   command?: string;
@@ -25,6 +27,12 @@ export interface AgentConfig {
   backendType: "claude" | "codex";
   /** Model to use (e.g. "claude-sonnet-4-6") */
   model: string;
+  /**
+   * Reasoning effort of the runs, one of the levels the model accepts
+   * (Claude: effort.ts; Codex: its models catalogue). Absent = the model's
+   * default, resolved at every run and passed explicitly (agent-effort.ts).
+   */
+  effort?: EffortLevel;
   /**
    * Claude agents always run with bypassPermissions: an unattended run has
    * nobody to answer approval prompts, so any other mode would just block.

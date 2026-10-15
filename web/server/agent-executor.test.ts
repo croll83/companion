@@ -63,7 +63,22 @@ const MockExecutionStoreClass = vi.hoisted(() => {
   };
 });
 
+// Codex's models catalogue (effort levels and default per model), fixed here:
+// the real one lives under the user's home and changes with Codex releases.
+const mockCodexCatalogue = vi.hoisted(() => ({
+  models: [
+    { slug: "gpt-6.1-sol", levels: ["low", "medium", "high", "xhigh", "max", "ultra"], def: "low" },
+    { slug: "gpt-6-luna", levels: ["low", "medium", "high", "xhigh", "max"], def: "medium" },
+  ] as { slug: string; levels: string[]; def: string }[],
+}));
+
 // ─── vi.mock() calls ────────────────────────────────────────────────────────
+
+vi.mock("./codex-models.js", () => ({
+  defaultCodexModel: () => mockCodexCatalogue.models[0]?.slug,
+  getCodexEffortLevels: (m: string | undefined) => mockCodexCatalogue.models.find((x) => x.slug === m)?.levels ?? [],
+  getCodexDefaultEffort: (m: string | undefined) => mockCodexCatalogue.models.find((x) => x.slug === m)?.def ?? null,
+}));
 
 vi.mock("croner", () => ({
   Cron: MockCronClass,
@@ -1478,6 +1493,53 @@ describe("AgentExecutor", () => {
   });
 
   // =========================================================================
+  // Reasoning effort → launch (both backends)
+  // =========================================================================
+  /**
+   * Every run launches with an explicit effort when its model has one: the
+   * agent's level, or the model's default when none is set. Leaving it to the
+   * CLI made runs go at a level the session did not show (Codex Sol: low).
+   */
+  describe("effort", () => {
+    it("passes a Claude agent's effort to the launch", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ model: "claude-opus-5-5", effort: "max" }));
+      await executor.executeAgent("test-agent");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ model: "claude-opus-5-5", effort: "max" }));
+    });
+
+    it("passes the model's default when the agent has none (Claude: high, Codex: its catalogue's)", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ model: "claude-opus-5-5" }));
+      await executor.executeAgent("test-agent");
+      expect(launcher.launch).toHaveBeenLastCalledWith(expect.objectContaining({ effort: "high" }));
+
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "codex-a", backendType: "codex", model: "gpt-6-luna" }));
+      await executor.executeAgent("codex-a");
+      expect(launcher.launch).toHaveBeenLastCalledWith(expect.objectContaining({ effort: "medium" }));
+    });
+
+    it("passes a Codex agent's effort, for its model or Codex's first one", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ backendType: "codex", model: "", effort: "ultra" }));
+      await executor.executeAgent("test-agent");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ backendType: "codex", effort: "ultra" }));
+    });
+
+    it("falls back to the default, with a warning, for a level the model no longer takes", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ backendType: "codex", model: "gpt-6-luna", effort: "ultra" }));
+      await executor.executeAgent("test-agent");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ effort: "medium" }));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('effort "ultra" is not supported by gpt-6-luna; running at medium'));
+      warn.mockRestore();
+    });
+
+    it("passes no effort to a model without effort control", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ model: "claude-sonnet-4-6" }));
+      await executor.executeAgent("test-agent");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ effort: undefined }));
+    });
+  });
+
+  // =========================================================================
   // Allowed tools → --tools (Claude only)
   // =========================================================================
   describe("allowedTools", () => {
@@ -1953,6 +2015,15 @@ describe("AgentExecutor run hooks", () => {
       model: "claude-sonnet-5-5",
       domain: "herd",
     }));
+  });
+
+  // The consolidation's effort (settled for the model of the run) wins over the agent's.
+  it("launches with the preparation's effort", async () => {
+    const h = hooks({ prepare: vi.fn(async () => ({ model: "claude-opus-5-5", effort: "xhigh" as const })) });
+    executor.setRunHooks(h);
+    mockAgentStore.getAgent.mockReturnValue({ ...consolidator(), effort: "low" });
+    await executor.executeAgent("cons");
+    expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ model: "claude-opus-5-5", effort: "xhigh" }));
   });
 
   it("lets settle turn a successful result into a failure, and keeps the run in progress meanwhile", async () => {

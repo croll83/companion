@@ -184,3 +184,40 @@ describe("static model/mode lists", () => {
     expect(CLAUDE_AGENT_MODES.some((m) => m.value === "acceptEdits")).toBe(true);
   });
 });
+
+// ─── Reasoning effort ────────────────────────────────────────────────────────
+
+import { effortChoiceFor, effortLabel } from "./backends.js";
+
+describe("effortLabel", () => {
+  it("labels known levels and passes unknown ones through", () => {
+    expect(effortLabel("xhigh")).toBe("X-High");
+    expect(effortLabel("ultra")).toBe("Ultra");
+    expect(effortLabel("other")).toBe("other");
+  });
+});
+
+// The Agents page and the Consolidation tab choose an effort before any
+// session exists: Claude levels come from the static table, Codex levels from
+// the catalogue the server lists (with an empty model meaning Codex's first).
+describe("effortChoiceFor", () => {
+  const catalogue = [
+    { value: "gpt-6.1-sol", label: "Sol", description: "", efforts: ["low", "high", "ultra", "bogus"], defaultEffort: "low" },
+    { value: "gpt-5.5", label: "5.5", description: "" },
+  ];
+
+  it("uses the static table and Companion's default for Claude", () => {
+    expect(effortChoiceFor("claude", "claude-opus-4-6", null)).toEqual({ levels: ["low", "medium", "high", "max"], defaultEffort: "high" });
+    expect(effortChoiceFor("claude", "claude-sonnet-4-6", catalogue)).toEqual({ levels: [], defaultEffort: null });
+  });
+
+  it("uses the catalogue for Codex, the first model when none is chosen", () => {
+    expect(effortChoiceFor("codex", "gpt-6.1-sol", catalogue)).toEqual({ levels: ["low", "high", "ultra"], defaultEffort: "low" });
+    expect(effortChoiceFor("codex", "", catalogue)).toEqual({ levels: ["low", "high", "ultra"], defaultEffort: "low" });
+    expect(effortChoiceFor("codex", "gpt-5.5", catalogue)).toEqual({ levels: [], defaultEffort: null });
+  });
+
+  it("knows no Codex levels without the catalogue", () => {
+    expect(effortChoiceFor("codex", "gpt-6.1-sol", null)).toEqual({ levels: [], defaultEffort: null });
+  });
+});

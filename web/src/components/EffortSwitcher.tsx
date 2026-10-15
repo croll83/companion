@@ -1,21 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
-import { getEffortLevels, DEFAULT_EFFORT } from "../utils/backends.js";
+import { getEffortLevels, DEFAULT_EFFORT, effortLabel } from "../utils/backends.js";
 
 interface EffortSwitcherProps {
   sessionId: string;
 }
-
-/** Human label for an effort level. */
-const EFFORT_LABELS: Record<string, string> = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "X-High",
-  max: "Max",
-  ultra: "Ultra",
-};
 
 /**
  * Reasoning-effort selector. Effort is the primary depth control on fable-5 and
@@ -90,7 +80,7 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
     return null;
   }
 
-  const currentLabel = EFFORT_LABELS[currentEffort] ?? currentEffort;
+  const currentLabel = effortLabel(currentEffort);
 
   return (
     <div ref={containerRef} className="relative shrink-0">
@@ -133,7 +123,7 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
               role="option"
               aria-selected={level === currentEffort}
             >
-              <span className="flex-1 text-left">{EFFORT_LABELS[level] ?? level}</span>
+              <span className="flex-1 text-left">{effortLabel(level)}</span>
               {level === currentEffort && (
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary shrink-0">
                   <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />

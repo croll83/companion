@@ -14,6 +14,8 @@ import { nextScheduledRun, scheduleTimeZone, scheduleTimeZoneLabel } from "./age
 import { resolveForkSource } from "./session-fork.js";
 import { isPathWithin } from "./path-scope.js";
 import { GLOBAL_DOMAIN } from "./domain-store.js";
+import { resolveRunEffort } from "./agent-effort.js";
+import type { EffortLevel } from "./effort.js";
 
 /** Max consecutive failures before auto-disabling an agent */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -66,6 +68,8 @@ export interface RunPreparation {
   env?: Record<string, string>;
   /** Model for this run, instead of the agent's. */
   model?: string;
+  /** Reasoning effort for this run, instead of the agent's (already settled for the model). */
+  effort?: EffortLevel;
   /** Domain for this run, instead of the agent's. */
   domain?: string;
 }
@@ -492,8 +496,20 @@ export class AgentExecutor {
           `but agent sessions always run with bypassPermissions`,
         );
       }
+      // The effort is always explicit when the model has one: absent means the
+      // model's default, and leaving it to the CLI would make the session show
+      // a level it does not run at (agent-effort.ts).
+      const model = prep.model ?? agent.model;
+      const settled = resolveRunEffort(agent.backendType, model, prep.effort ?? agent.effort);
+      if (settled.fallback) {
+        console.warn(
+          `[agent-executor] Agent "${agent.name}": effort "${prep.effort ?? agent.effort}" is not supported by ` +
+          `${model || "the default model"}; running at ${settled.effort ?? "the CLI's own level"}`,
+        );
+      }
       const sessionInfo = this.launcher.launch({
-        model: prep.model ?? agent.model,
+        model,
+        effort: settled.effort,
         permissionMode: "bypassPermissions",
         cwd,
         env: envVars,

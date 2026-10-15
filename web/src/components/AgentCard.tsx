@@ -5,6 +5,7 @@ import type { AgentInfo } from "../api.js";
 import { timeAgo } from "../utils/time-ago.js";
 import { sessionHash } from "../utils/routing.js";
 import { useStore } from "../store.js";
+import { effortLabel } from "../utils/backends.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -133,6 +134,14 @@ export function AgentCard({
               <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-cc-hover text-cc-muted font-medium leading-none">
                 {agent.backendType === "codex" ? "Codex" : "Claude"}
               </span>
+              {agent.effort && (
+                <span
+                  className="px-1.5 py-0.5 text-[10px] rounded-full bg-cc-hover text-cc-muted font-medium leading-none"
+                  data-testid="effort-badge"
+                >
+                  {`${effortLabel(agent.effort)} effort`}
+                </span>
+              )}
               {isLinear && (
                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-full bg-violet-500/10 text-violet-400 font-medium leading-none">
                   <LinearLogo className="w-2.5 h-2.5" />

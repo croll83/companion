@@ -36,12 +36,13 @@ In sessions that get these tools, Claude Code's own `ScheduleWakeup`, `CronCreat
   - `webhook: true`
   - `cwd`: defaults to this session's folder; `"temp"` gives each run a throwaway folder
   - `backend` and `model`: default to this session's
+  - `effort`: the reasoning effort of the runs, a level the model supports (refused otherwise); defaults to the model's default
   - `context_mode`: `"brief"` or `"fork"`
   - `enabled`: defaults to true
 
   When the webhook is on, the tool returns its URL. The URL uses this machine's Tailscale address (`tailscale ip -4`), or `localhost` when there is none. It is reachable only from this machine and the tailnet (see [Agents → Webhook](#/docs/guides/agents)).
 - **`list_agents`**, **`get_agent`**: list agents, or show one in full (prompt, triggers, and the webhook URL of agents this session created).
-- **`update_agent`**: changes only the fields given. `clear_schedule` turns the schedule off. `webhook: false` turns the webhook off, and the URL stays the same.
+- **`update_agent`**: changes only the fields given. `clear_schedule` turns the schedule off. `webhook: false` turns the webhook off, and the URL stays the same. `effort: ""` puts the effort back to the model's default.
 - **`delete_agent`**: deletes the agent. Its past runs and their sessions are kept.
 - **`run_agent`**: starts a run now, with an optional `input`, and returns the run's session id.
 

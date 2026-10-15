@@ -279,6 +279,28 @@ describe("agent tools", () => {
     expect((await callTool(mcp, "create_agent", { name: "C" })).text).toBe('"prompt" is required');
   });
 
+  // The effort is passed through as given (the server checks it against the
+  // model and answers 400 with the levels it takes); absent, it is not sent and
+  // the runs use the model's default. update_agent "" clears it (null).
+  it("create_agent and update_agent pass the effort through", async () => {
+    const { mcp, calls } = server({
+      "POST /agents": (call) => ({ status: 201, body: created(call.body as Record<string, unknown>) }),
+      "GET /agents/a": () => ({ body: { id: "a", name: "A", triggers: {} } }),
+      "PUT /agents/a": (call) => ({ body: { id: "a", name: "A", ...(call.body as object) } }),
+    });
+    await callTool(mcp, "create_agent", { name: "E", prompt: "p", effort: "max" });
+    expect(calls[1].body).toMatchObject({ effort: "max" });
+    await callTool(mcp, "create_agent", { name: "F", prompt: "p" });
+    expect(calls[3].body).not.toHaveProperty("effort");
+
+    const set = await callTool(mcp, "update_agent", { agent_id: "a", effort: "low" });
+    expect(calls[5].body).toEqual({ effort: "low" });
+    expect(set.text).toContain('"effort": "low"');
+    const cleared = await callTool(mcp, "update_agent", { agent_id: "a", effort: "" });
+    expect(calls[7].body).toEqual({ effort: null });
+    expect(cleared.text).toContain('"effort": "(model default)"');
+  });
+
   // The webhook host falls back to localhost when there is no tailnet IP.
   it("falls back to localhost for the webhook URL", async () => {
     const { mcp } = server(

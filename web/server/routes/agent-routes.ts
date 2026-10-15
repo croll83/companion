@@ -11,6 +11,7 @@ import { isTrustedRequest, socketAddress } from "../network-trust.js";
 import { accessDenied, agentAccessLevel, mcpCallerOf, sessionAccessLevel } from "../companion-mcp-auth.js";
 import { isPathWithin } from "../path-scope.js";
 import { GLOBAL_DOMAIN, getDomain } from "../domain-store.js";
+import { agentEffortError } from "../agent-effort.js";
 
 /** What the routes need to know about a session (the launcher's record). */
 export type AgentSessionLookup = (sessionId: string) => {
@@ -43,7 +44,7 @@ const RESULT_MAX_CHARS = 20_000;
 /** Fields the user can set when creating/updating an agent */
 const EDITABLE_FIELDS = [
   "name", "description", "icon", "version",
-  "backendType", "model", "permissionMode", "cwd",
+  "backendType", "model", "effort", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
   "prompt", "contextMode", "sourceSessionId", "mcpServers",
   "triggers", "enabled", "domain", "keepRunSessions",
@@ -72,6 +73,12 @@ function validateAgentFields(
     return "sourceSessionId must be a session id";
   }
   const saved = { ...opts.saved, ...fields };
+  // The effort is checked against the model the agent will have once saved,
+  // so changing only the model of an agent with an effort is caught too.
+  if ("effort" in fields || "model" in fields || "backendType" in fields) {
+    const effortError = agentEffortError(saved.backendType ?? "claude", saved.model, saved.effort);
+    if (effortError) return effortError;
+  }
   if (saved.contextMode === "fork") {
     if (!saved.sourceSessionId) return 'contextMode "fork" needs a sourceSessionId (the session to fork)';
     const forkError = opts.forkSourceError?.(saved.sourceSessionId, saved.backendType ?? "claude");
@@ -97,6 +104,9 @@ function pickEditable(body: Record<string, unknown>): Partial<AgentConfig> {
   for (const key of EDITABLE_FIELDS) {
     if (key in body) result[key] = body[key];
   }
+  // null or "" clears the effort (back to the model's default): an undefined
+  // value is dropped when the agent is written.
+  if (result.effort === null || result.effort === "") result.effort = undefined;
   return result as Partial<AgentConfig>;
 }
 
@@ -111,6 +121,8 @@ function buildCreateInput(
     icon: body.icon as string | undefined,
     backendType: (body.backendType as AgentConfig["backendType"] | undefined) || "claude",
     model: (body.model as string | undefined) || "",
+    // Validated by validateAgentFields against the model; empty = its default.
+    ...(body.effort !== undefined && body.effort !== null && body.effort !== "" ? { effort: body.effort as AgentConfig["effort"] } : {}),
     permissionMode: (body.permissionMode as string | undefined) || "bypassPermissions",
     cwd: (body.cwd as string | undefined) || "",
     envSlug: body.envSlug as string | undefined,
