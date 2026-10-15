@@ -7,6 +7,7 @@ import { ensurePrivateDir, writePrivateFile } from "../private-file.js";
 import { isValidSlug, slugify, updateDomainsAtomically } from "../domain-store.js";
 import { childBaseUrl, embeddedProxyUrl } from "./brain-endpoints.js";
 import { cronRunsMoreOftenThan, validateSchedule } from "../agent-schedule.js";
+import { EFFORT_LEVELS, type EffortLevel } from "../effort.js";
 
 /**
  * Brains: a knowledge base (an LLM wiki behind an MCP server) that the
@@ -121,6 +122,13 @@ export interface ConsolidationConfig {
   backend: "claude" | "codex";
   /** Absent: the latest Sonnet of the catalog (Claude) or Codex's first model, resolved at every run. */
   model?: string;
+  /**
+   * Reasoning effort of the runs (default "high": consolidation is careful
+   * work, and left to the CLI it ran at the model's default, "low" on
+   * GPT-6.1-Sol). Settled against the model resolved at every run: a level
+   * the model lacks falls back to the model's default (consolidation-template.ts).
+   */
+  effort: EffortLevel;
   /** Pending notes that start a run before the schedule (at most every 6 hours). */
   threshold: number;
   /** The consolidation agent (Companion's own for embedded brains, linked for remote ones). */
@@ -129,6 +137,11 @@ export interface ConsolidationConfig {
 
 export const DEFAULT_CONSOLIDATION_SCHEDULE = "0 5 * * *";
 export const DEFAULT_CONSOLIDATION_THRESHOLD = 10;
+export const DEFAULT_CONSOLIDATION_EFFORT: EffortLevel = "high";
+
+function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
 const MAX_THRESHOLD = 1000;
 /** The schedule may not run more often than this: each run is a CLI session. */
 const MIN_SCHEDULE_INTERVAL_MINUTES = 15;
@@ -324,6 +337,8 @@ function normalizeConsolidation(raw: unknown): ConsolidationConfig | undefined {
     mode: c.mode === "master" || c.mode === "pr" ? c.mode : "local",
     backend: c.backend === "codex" ? "codex" : "claude",
     ...(typeof c.model === "string" && c.model.trim() ? { model: c.model.trim() } : {}),
+    // Configs saved before the effort existed get the default too.
+    effort: isEffortLevel(c.effort) ? c.effort : DEFAULT_CONSOLIDATION_EFFORT,
     threshold: typeof c.threshold === "number" && Number.isInteger(c.threshold) && c.threshold >= 1 ? Math.min(c.threshold, MAX_THRESHOLD) : DEFAULT_CONSOLIDATION_THRESHOLD,
     ...(typeof c.agentId === "string" && c.agentId ? { agentId: c.agentId } : {}),
   };
@@ -772,6 +787,8 @@ export interface ConsolidationPatch {
   backend?: unknown;
   /** A model id; null or "" = the default (latest Sonnet / Codex's first model). */
   model?: unknown;
+  /** One of EFFORT_LEVELS; null or "" = the default ("high"). */
+  effort?: unknown;
   threshold?: unknown;
   /** Set by the routes (the agent they created or linked); null unlinks. */
   agentId?: unknown;
@@ -807,6 +824,11 @@ export function mergeConsolidation(cur: ConsolidationConfig, patch: Consolidatio
     if (patch.model === null || patch.model === "") delete next.model;
     else if (typeof patch.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/.test(patch.model.trim())) return "Invalid model id";
     else next.model = patch.model.trim();
+  }
+  if (patch.effort !== undefined) {
+    if (patch.effort === null || patch.effort === "") next.effort = DEFAULT_CONSOLIDATION_EFFORT;
+    else if (!isEffortLevel(patch.effort)) return `effort must be one of ${EFFORT_LEVELS.join(", ")}`;
+    else next.effort = patch.effort;
   }
   if (patch.threshold !== undefined) {
     if (typeof patch.threshold !== "number" || !Number.isInteger(patch.threshold) || patch.threshold < 1 || patch.threshold > MAX_THRESHOLD) {

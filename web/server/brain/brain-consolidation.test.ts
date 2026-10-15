@@ -216,6 +216,28 @@ describe("configure: the agent from the template", () => {
     expect(svc.view("work")?.nextRunAt).toBeNull();
   });
 
+  // Consolidation is careful work: "high" by default (left to the CLI it ran at
+  // the model's default, "low" on GPT-6.1-Sol). The level is written into the
+  // agent for the Agents page, settled against the model of now: a model
+  // without the level falls back to its default and the view says so; one
+  // without effort control gets none (and the agent's level is cleared).
+  it("writes the effort into the agent (high by default) and settles it against the model", () => {
+    const { svc, agent } = track(setup());
+    expect(agent.effort).toBe("high");
+    expect(svc.view("work")).toMatchObject({ resolvedEffort: "high", effortFallback: false });
+    expect(getBrain("work")?.consolidation?.effort).toBe("high");
+
+    expect(svc.configure("work", { model: "claude-opus-4-6", effort: "xhigh" }).ok).toBe(true);
+    expect(agentStore.getAgent(agent.id)?.effort).toBe("high");
+    expect(svc.view("work")).toMatchObject({ config: { effort: "xhigh" }, resolvedEffort: "high", effortFallback: true });
+
+    expect(svc.configure("work", { model: "claude-sonnet-4-6" }).ok).toBe(true);
+    expect(agentStore.getAgent(agent.id)?.effort).toBeUndefined();
+    expect(svc.view("work")).toMatchObject({ resolvedEffort: null, effortFallback: true });
+
+    expect(svc.configure("work", { effort: "turbo" })).toMatchObject({ ok: false, status: 400 });
+  });
+
   it("finds its agent by role after a rename, and picks a free name when taken", () => {
     agentStore.createAgent({ version: 1, name: "Work brain consolidation", description: "", backendType: "claude", model: "m", permissionMode: "bypassPermissions", cwd: "", prompt: "mine", enabled: true });
     const { svc, agent } = track(setup());
@@ -336,9 +358,11 @@ describe("prepare and settle (real git)", () => {
     expect(sh(wiki, "log", "-1", "--format=%s")).toBe("sources: 1 added from Companion");
     expect(existsSync(join(curatorDir("work"), "raw", "sources", "2026-10-14-manual.md"))).toBe(true);
     expect(prep.model).toBe(latestSonnet());
+    // The effort is settled with the model of the run, and recorded on it.
+    expect(prep.effort).toBe("high");
     expect(prep.domain).toBe("global");
     expect(prep.env?.BRAIN_API_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/brains\/work\/curator\/[A-Za-z0-9_-]{20,}\/api\/v1$/);
-    expect(readRuns("work")[0]).toMatchObject({ status: "running", pending: 2, trigger: "manual" });
+    expect(readRuns("work")[0]).toMatchObject({ status: "running", pending: 2, trigger: "manual", effort: "high" });
 
     // The pass works through the proxy while the run lasts.
     setChildPort("work", 45999);
@@ -489,6 +513,8 @@ describe("remote brains and removal", () => {
     expect(view.runs.map((r) => r.status)).toEqual(["running", "error", "success"]);
     expect(view.lastSuccessAt).toBe(20);
     expect(view.resolvedModel).toBe("claude-opus-5-5");
+    // A linked agent's own effort is shown, never settled or rewritten.
+    expect(view).toMatchObject({ resolvedEffort: null, effortFallback: false });
 
     expect(svc.linkAgent("jarvis", null)).toMatchObject({ ok: true });
     expect(agentStore.getAgent(linked.id)?.brainRole).toBeUndefined();

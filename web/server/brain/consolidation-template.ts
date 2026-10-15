@@ -3,6 +3,8 @@ import type { AgentConfig, AgentConfigCreateInput } from "../agent-types.js";
 import { GLOBAL_DOMAIN, listDomains } from "../domain-store.js";
 import { latestSonnet } from "../claude-models.js";
 import { defaultCodexModel } from "../codex-models.js";
+import { resolveRunEffort } from "../agent-effort.js";
+import type { EffortLevel } from "../effort.js";
 import { brainDir, type BrainConfig, type ConsolidationConfig } from "./brain-store.js";
 
 /**
@@ -36,6 +38,19 @@ export function resolveConsolidationModel(c: Pick<ConsolidationConfig, "backend"
   if (c.model) return c.model;
   if (c.backend === "codex") return defaultCodexModel();
   return latestSonnet();
+}
+
+/**
+ * The effort of a run on `model` (the one resolved now): the brain's level
+ * when the model takes it, else the model's own default (`fallback`, shown by
+ * the Consolidation tab: "latest Sonnet" may resolve to a model without the
+ * level chosen); none when the model has no effort control.
+ */
+export function resolveConsolidationEffort(
+  c: Pick<ConsolidationConfig, "backend" | "model" | "effort">,
+  model: string | undefined = resolveConsolidationModel(c),
+): { effort?: EffortLevel; fallback: boolean } {
+  return resolveRunEffort(c.backend, model, c.effort);
 }
 
 /** The agent's name for a brain (its id is derived from it once, at creation). */
@@ -95,6 +110,9 @@ export function consolidationAgentFields(brain: BrainConfig, c: ConsolidationCon
     backendType: c.backend,
     // Resolved again at every run (brain-consolidation.ts): this is the model of now, for the Agents page.
     model: resolveConsolidationModel(c) ?? "",
+    // Settled again at every run, like the model. Undefined clears a level
+    // an earlier model had (the agent store drops undefined fields).
+    effort: resolveConsolidationEffort(c).effort,
     // Claude agents always bypass; for Codex this means danger-full-access: the
     // agent commits in its clone (workspace-write keeps .git read-only) and calls
     // the curator API on 127.0.0.1.

@@ -452,14 +452,15 @@ describe("consolidation settings", () => {
   it("is off with the design's defaults until set", () => {
     const b = embedded();
     expect(b.consolidation).toBeUndefined();
-    expect(consolidationOf(b)).toEqual({ enabled: false, schedule: "0 5 * * *", mode: "local", backend: "claude", threshold: 10 });
+    // Effort defaults to "high": consolidation is careful work (Marco, 2026-10-15).
+    expect(consolidationOf(b)).toEqual({ enabled: false, schedule: "0 5 * * *", mode: "local", backend: "claude", effort: "high", threshold: 10 });
   });
 
   it("saves a valid patch and keeps it through other edits", () => {
     embedded();
     const r = updateConsolidation("work", { enabled: true, schedule: "30 4 * * 1-5", threshold: 3, model: "claude-opus-5-5", agentId: "a1" });
     expect(r.ok).toBe(true);
-    expect(getBrain("work")?.consolidation).toEqual({ enabled: true, schedule: "30 4 * * 1-5", mode: "local", backend: "claude", model: "claude-opus-5-5", threshold: 3, agentId: "a1" });
+    expect(getBrain("work")?.consolidation).toEqual({ enabled: true, schedule: "30 4 * * 1-5", mode: "local", backend: "claude", model: "claude-opus-5-5", effort: "high", threshold: 3, agentId: "a1" });
     updateBrain("work", { about: "New about" });
     expect(getBrain("work")?.consolidation?.agentId).toBe("a1");
     // Switching backend drops a model of the other CLI; null/"" go back to the default.
@@ -486,6 +487,8 @@ describe("consolidation settings", () => {
       [{ threshold: 0 }, /from 1 to 1000/],
       [{ threshold: 2.5 }, /from 1 to 1000/],
       [{ agentId: 3 }, /Invalid agent id/],
+      [{ effort: "extreme" }, /effort must be one of/],
+      [{ effort: 3 }, /effort must be one of/],
     ];
     for (const [patch, error] of bad) expect(mergeConsolidation(cur, patch)).toMatch(error);
   });
@@ -496,9 +499,29 @@ describe("consolidation settings", () => {
     const json = JSON.parse(readFileSync(file, "utf8"));
     json.consolidation = { enabled: "yes", mode: "pr", backend: "codex", threshold: 5000, schedule: "  ", model: " m1 " };
     writeFileSync(file, JSON.stringify(json));
-    expect(getBrain("work")?.consolidation).toEqual({ enabled: false, schedule: "0 5 * * *", mode: "pr", backend: "codex", model: "m1", threshold: 1000 });
+    expect(getBrain("work")?.consolidation).toEqual({ enabled: false, schedule: "0 5 * * *", mode: "pr", backend: "codex", model: "m1", effort: "high", threshold: 1000 });
     json.consolidation = { threshold: -1 };
     writeFileSync(file, JSON.stringify(json));
     expect(getBrain("work")?.consolidation?.threshold).toBe(10);
+    // A saved effort is kept; an unknown one goes back to the default.
+    json.consolidation = { effort: "max" };
+    writeFileSync(file, JSON.stringify(json));
+    expect(getBrain("work")?.consolidation?.effort).toBe("max");
+    json.consolidation = { effort: "turbo" };
+    writeFileSync(file, JSON.stringify(json));
+    expect(getBrain("work")?.consolidation?.effort).toBe("high");
+  });
+
+  // The effort is a level name here (any of EFFORT_LEVELS); whether the model
+  // takes it is settled at every run against the model resolved then.
+  it("saves an effort and resets it to the default with null or empty", () => {
+    embedded();
+    expect(updateConsolidation("work", { effort: "xhigh" }).ok).toBe(true);
+    expect(getBrain("work")?.consolidation?.effort).toBe("xhigh");
+    updateConsolidation("work", { effort: null });
+    expect(getBrain("work")?.consolidation?.effort).toBe("high");
+    updateConsolidation("work", { effort: "low" });
+    updateConsolidation("work", { effort: "" });
+    expect(getBrain("work")?.consolidation?.effort).toBe("high");
   });
 });

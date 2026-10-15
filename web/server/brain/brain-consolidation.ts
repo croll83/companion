@@ -27,6 +27,7 @@ import {
   consolidationAgentName,
   consolidationDomain,
   curatorDir,
+  resolveConsolidationEffort,
   resolveConsolidationModel,
 } from "./consolidation-template.js";
 
@@ -49,7 +50,8 @@ import {
  * run that never reached the wiki is synced first (a run never resets it
  * away); the agent gets BRAIN_API_URL, the curator API behind a pass valid
  * for this run only (brain-proxy.ts); its model is resolved now (the latest
- * Sonnet of the catalog by default).
+ * Sonnet of the catalog by default), and its effort with it ("high" by
+ * default, the model's own default when the model lacks the level).
  *
  * AFTER A RUN (AgentRunHooks.settle): the run counts as a success only when
  * the clone is ahead of the wiki, `git pull --ff-only <clone> <branch>` in
@@ -74,6 +76,8 @@ export interface ConsolidationRun {
   sessionId?: string;
   backend?: "claude" | "codex";
   model?: string;
+  /** The reasoning effort the run was launched with. */
+  effort?: string;
   /** Decisions recorded by the brain's consolidation runs during this run. */
   decided?: Record<string, number>;
   /** The agent's commit (short id), when it made one. */
@@ -234,6 +238,10 @@ export interface ConsolidationView {
   agent: { id: string; name: string; backendType: "claude" | "codex"; model: string; enabled: boolean } | null;
   /** The model the next run would use ("latest Sonnet" resolved now); null when the CLI picks. */
   resolvedModel: string | null;
+  /** The effort the next run would use, settled for resolvedModel; null when the model has no effort control. */
+  resolvedEffort: string | null;
+  /** The configured effort is not one resolvedModel takes: runs use resolvedEffort (its default) instead. */
+  effortFallback: boolean;
   running: boolean;
   runningSessionId?: string;
   nextRunAt: number | null;
@@ -354,10 +362,16 @@ export class BrainConsolidation implements AgentRunHooks {
     const sessionId = agent ? this.executor.runSessionOf(agent.id) : undefined;
     const running = this.starting.has(slug) || (agent ? this.executor.isRunInProgress(agent.id) : false);
     const runs = brain.kind === "embedded" ? readRuns(slug) : this.remoteRuns(agent);
+    // A remote brain's linked agent keeps its own settings: its effort is just shown.
+    const effort = brain.kind === "embedded"
+      ? resolveConsolidationEffort(config)
+      : { effort: agent?.effort, fallback: false };
     return {
       config,
       agent: agent ? { id: agent.id, name: agent.name, backendType: agent.backendType, model: agent.model, enabled: agent.enabled } : null,
       resolvedModel: (brain.kind === "embedded" ? resolveConsolidationModel(config) : agent?.model) || null,
+      resolvedEffort: effort.effort ?? null,
+      effortFallback: effort.fallback,
       running,
       ...(sessionId ? { runningSessionId: sessionId } : {}),
       nextRunAt: this.timers.get(slug)?.nextRun()?.getTime() ?? null,
@@ -532,7 +546,11 @@ export class BrainConsolidation implements AgentRunHooks {
     const c = consolidationOf(brain);
     const asked = this.nextTrigger.get(slug);
     this.nextTrigger.delete(slug);
-    const model = agent.backendType === c.backend ? resolveConsolidationModel(c) : agent.model || undefined;
+    // Settings of the brain apply while the agent is on the brain's backend;
+    // an agent switched to the other backend by hand keeps its own.
+    const ours = agent.backendType === c.backend;
+    const model = ours ? resolveConsolidationModel(c) : agent.model || undefined;
+    const effort = ours ? resolveConsolidationEffort(c, model).effort : agent.effort;
     const run: ConsolidationRun = {
       id: randomBytes(6).toString("hex"),
       trigger: asked?.trigger ?? exec.triggerType,
@@ -541,6 +559,7 @@ export class BrainConsolidation implements AgentRunHooks {
       ...(asked ? { pending: asked.pending } : {}),
       backend: agent.backendType,
       ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
     };
     const active: ActiveRun = { slug, run, wikiDir: brain.embedded!.wikiDir };
     this.active.set(exec, active);
@@ -564,7 +583,12 @@ export class BrainConsolidation implements AgentRunHooks {
     await git(["clean", "-q", "-fd"], dir, "Could not clean the curator clone");
     active.pass = issueCuratorPass(slug);
     saveRun(slug, run);
-    return { env: { BRAIN_API_URL: curatorPassUrl(slug, active.pass) }, ...(model ? { model } : {}), domain: consolidationDomain(slug) };
+    return {
+      env: { BRAIN_API_URL: curatorPassUrl(slug, active.pass) },
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+      domain: consolidationDomain(slug),
+    };
   }
 
   async settle(_agent: AgentConfig, exec: AgentExecution, outcome: RunOutcome, result?: CLIResultMessage): Promise<RunOutcome> {
