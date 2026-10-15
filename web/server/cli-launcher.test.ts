@@ -61,9 +61,13 @@ const mockTranscriptExists = vi.hoisted(() => vi.fn(() => true));
 vi.mock("./claude-session-history.js", () => ({ claudeTranscriptExists: mockTranscriptExists }));
 // The Codex catalogue's default model, for sessions launched without one.
 const mockDefaultCodexModel = vi.hoisted(() => vi.fn<() => string | undefined>(() => undefined));
+// Which levels a Codex model takes comes from the user's catalogue: fixed here
+// (none by default, as on a machine where Codex never ran).
+const mockIsValidCodexEffort = vi.hoisted(() => vi.fn<(model?: string | null, effort?: string | null) => boolean>(() => false));
 vi.mock("./codex-models.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./codex-models.js")>()),
   defaultCodexModel: mockDefaultCodexModel,
+  isValidCodexEffort: mockIsValidCodexEffort,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -482,6 +486,33 @@ describe("launch", () => {
     mockDefaultCodexModel.mockReturnValue(undefined);
     mockSpawn.mockReturnValueOnce(createMockCodexProc());
     expect(launcher.launch({ backendType: "codex", cwd: "/tmp/project" }).model).toBeUndefined();
+  });
+
+  // Codex takes effort only at spawn. Validates: a level the model takes is
+  // passed as -c model_reasoning_effort and given to the adapter (which reports
+  // it in session_init, so the session shows it), one it lacks is not, and a
+  // relaunch passes it again: it used to drop it, so a toolbar effort change
+  // relaunched Codex on the model's default while showing the chosen level.
+  it("passes a Codex session's effort at spawn, to its adapter, and again on relaunch", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    mockIsValidCodexEffort.mockImplementation((_m, e) => e === "high");
+    const adapters: unknown[] = [];
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { adapters.push(adapter); });
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const info = launcher.launch({ backendType: "codex", cwd: "/tmp/project", model: "gpt-6.1-sol", effort: "high" });
+    expect(mockSpawn.mock.calls[0][0]).toContain("model_reasoning_effort=high");
+    expect((adapters[0] as { options: { effort?: string } }).options.effort).toBe("high");
+
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(54321));
+    await launcher.relaunch(info.sessionId);
+    expect(mockSpawn.mock.calls[1][0]).toContain("model_reasoning_effort=high");
+    expect((adapters[1] as { options: { effort?: string } }).options.effort).toBe("high");
+
+    // A level the model does not take is neither passed nor reported.
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(777));
+    launcher.launch({ backendType: "codex", cwd: "/tmp/project", model: "gpt-6.1-sol", effort: "ultra" });
+    expect(mockSpawn.mock.calls[2][0].join(" ")).not.toContain("model_reasoning_effort");
+    expect((adapters[2] as { options: { effort?: string } }).options.effort).toBeUndefined();
   });
 
   it("enables Codex web search when codexInternetAccess=true", () => {

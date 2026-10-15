@@ -707,6 +707,35 @@ describe("CodexAdapter", () => {
     expect(init.session.cwd).toBe("/home/user/project");
   });
 
+  // The effort the app-server was spawned with travels in session_init: the
+  // bridge otherwise filled in the model's default, and a run launched at
+  // "high" showed "low". Without one, session_init carries no effort at all.
+  it("reports the spawn effort in session_init", async () => {
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "gpt-6.1-sol", effort: "high" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+    const init = messages.find((m) => m.type === "session_init") as { session: { effort?: string } };
+    expect(init.session.effort).toBe("high");
+  });
+
+  it("leaves effort out of session_init when spawned without one", async () => {
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "gpt-6.1-sol" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+    const init = messages.find((m) => m.type === "session_init") as unknown as { session: Record<string, unknown> };
+    expect(init.session).not.toHaveProperty("effort");
+  });
+
   it("sends turn/start when receiving user_message", async () => {
     const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
 

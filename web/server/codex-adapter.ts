@@ -208,6 +208,13 @@ export interface CodexAdapterOptions {
    * folder (its domain's memory, so a sandboxed session can save notes).
    */
   extraWritableRoots?: string[];
+  /**
+   * The reasoning effort the app-server was spawned with (`-c
+   * model_reasoning_effort`, already checked against the model). Reported in
+   * session_init so the session shows it; without it the bridge filled in the
+   * model's default and a run launched at "high" showed "low".
+   */
+  effort?: string;
 }
 
 // ─── Stdio JSON-RPC Transport ────────────────────────────────────────────────
@@ -1194,6 +1201,7 @@ export class CodexAdapter implements IBackendAdapter {
         git_behind: 0,
         total_lines_added: 0,
         total_lines_removed: 0,
+        ...(this.options.effort ? { effort: this.options.effort } : {}),
       };
 
       this.emit({ type: "session_init", session: state });
