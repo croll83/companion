@@ -19,8 +19,8 @@ import { brainDir } from "./brain-store.js";
  * every token and the curator key at once. A remote brain's `secret` holds
  * its bearer token instead and is never read here.
  *
- * The child verifies tokens with its own copy of this format
- * (core/token.ts): Companion's server never imports the core.
+ * The child verifies tokens with its own copy of this format (token.ts of
+ * the brains core, inside the bundle): the two must stay in step.
  */
 
 const PREFIX = "brn_";

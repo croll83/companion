@@ -5,9 +5,10 @@ import { join } from "node:path";
 
 /**
  * The keys and `brn_` tokens of embedded brains, Companion's side. The child
- * verifies tokens with its own code (core/token.ts), so this test checks the
- * two agree: a token minted here must verify there with the derived key, and
- * a token of another brain or a tampered one must not. Temp COMPANION_HOME.
+ * verifies tokens with its own code (the brains core inside the bundle), so
+ * this test checks the two agree on the real bundle: a token minted here
+ * opens its MCP with the derived key, and a token of another brain does not.
+ * Temp COMPANION_HOME.
  */
 
 const h = vi.hoisted(() => ({ home: "" }));
@@ -19,7 +20,8 @@ vi.mock("../paths.js", () => ({
 
 import { embeddedKeys, ensureEmbeddedSecret, isValidBrainToken, mintBrainToken } from "./brain-token.js";
 import { brainDir, createEmbeddedBrain } from "./brain-store.js";
-import { verifyToken } from "./core/token.js";
+import { BUN, startBundle } from "./__tests__/bundle-brain.js";
+import { makeWiki } from "./__tests__/wiki-fixture.js";
 
 let tmp: string;
 
@@ -53,13 +55,33 @@ describe("brain tokens", () => {
     expect(readFileSync(join(brainDir("work"), "secret"), "utf-8").trim()).toBe(secret);
   });
 
-  it("a minted token verifies in the core with the derived key, and only for its brain", () => {
+  it.skipIf(!BUN)("a minted token opens the bundle's MCP with the derived key, and only for its brain", async () => {
     brain("work");
     brain("home");
     const t = mintBrainToken("work", "dev", "0f9c-session")!;
     expect(t).toMatch(/^brn_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
-    expect(verifyToken(embeddedKeys("work")!.tokenKey, t)).toEqual({ domain: "dev", sessionId: "0f9c-session" });
-    expect(verifyToken(embeddedKeys("home")!.tokenKey, t)).toBeNull();
+    const wiki = makeWiki();
+    const child = await startBundle(wiki, { BRAIN_TOKEN_KEY: embeddedKeys("work")!.tokenKey });
+    try {
+      const initialize = (token: string) =>
+        fetch(`${child.base}/mcp`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
+        });
+      expect((await initialize(t)).status).toBe(200);
+      expect((await initialize(mintBrainToken("home", "dev", "0f9c-session")!)).status).toBe(401);
+    } finally {
+      await child.stop();
+      rmSync(wiki, { recursive: true, force: true });
+    }
+  });
+
+  it("checks tokens on Companion's side the same way", () => {
+    brain("work");
+    brain("home");
+    const t = mintBrainToken("work", "dev", "0f9c-session")!;
+    expect(Buffer.from(t.slice(4).split(".")[0], "base64url").toString()).toBe("dev|0f9c-session");
     expect(isValidBrainToken("work", t)).toBe(true);
     expect(isValidBrainToken("home", t)).toBe(false);
     expect(isValidBrainToken("work", `${t}x`)).toBe(false);

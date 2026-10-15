@@ -18,7 +18,8 @@ import { EFFORT_LEVELS, type EffortLevel } from "../effort.js";
  *  - REMOTE: an URL Companion does not run (jarvis-brain on its LXC, a team
  *    brain);
  *  - EMBEDDED: Companion runs the brain server itself (the bundle
- *    dist/brain/brain.js, brain-supervisor.ts) on a wiki folder of this
+ *    dist/brain/brain.js built by the brains project, brain-bundle/,
+ *    brain-supervisor.ts) on a wiki folder of this
  *    machine; sessions reach it through Companion's port (brain-proxy.ts).
  * Brains are virtual: Companion never writes into domain folders or their
  * mcp.json; domain-runtime.ts adds the brain to each spawn.

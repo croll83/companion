@@ -24,9 +24,7 @@ vi.mock("../paths.js", () => ({
 
 import { DEFAULT_TAGS, ScaffoldError, checkTargetDir, defaultWikiDir, detectLanguage, normalizeTags, scaffoldWiki, wikiTemplate } from "./wiki-scaffold.js";
 import { setGitBinaryForTest } from "./brain-git.js";
-import { loadWiki } from "./core/wiki.js";
-import { lintWiki } from "./core/lint.js";
-import { buildSkill } from "./core/skill.js";
+import { BUN, startBundle } from "./__tests__/bundle-brain.js";
 
 let tmp: string;
 const saved = { HOME: process.env.HOME, global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
@@ -53,24 +51,29 @@ afterEach(() => {
 const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
 
 describe("template", () => {
-  it("lints clean with the brain's own lint, with the seed tags as taxonomy", () => {
+  it.skipIf(!BUN)("lints clean with the brain's own lint, with the seed tags as taxonomy", async () => {
     const dir = join(tmp, "w");
     for (const [rel, text] of Object.entries(wikiTemplate({ name: "Boat", about: "Our boat: engines, electronics, charter.", tags: ["engine", "charter"], date: "2026-10-14" }))) {
       mkdirSync(join(dir, rel, ".."), { recursive: true });
       writeFileSync(join(dir, rel), text);
     }
-    const w = loadWiki(dir);
-    const report = lintWiki(w);
-    expect(report.findings).toEqual([]);
-    expect([...w.taxonomy]).toEqual(["engine", "charter"]);
-    expect(w.log[0]).toMatchObject({ date: "2026-10-14", heading: "[2026-10-14] create | Wiki created" });
-    expect(w.nav.get("SCHEMA.md")).toMatch(/## Domain\n\nOur boat: engines, electronics, charter\./);
-    for (const section of ["## Page Types", "## Tag Taxonomy", "## Conventions", "## Lint"]) expect(w.nav.get("SCHEMA.md")).toContain(section);
-    expect(w.nav.get("index.md")).toMatch(/## Start Here/);
-    // An empty wiki: the skill says what the brain covers from the about text alone.
-    const skill = buildSkill(w, { name: "boat-brain", persona: { title: "Boat brain", owner: "Marco", about: "Our boat" }, topics: "index", redactSecrets: true, version: "t" });
-    expect(skill.description).not.toMatch(/Wiki sections/);
-    expect(skill.description).toContain("Our boat");
+    // The real brain on it (the bundle Companion ships).
+    const brain = await startBundle(dir, { BRAIN_NAME: "boat-brain", BRAIN_TITLE: "Boat brain", BRAIN_OWNER: "Marco", BRAIN_ABOUT: "Our boat" });
+    try {
+      expect((await brain.api<{ findings: unknown[] }>("/lint")).findings).toEqual([]);
+      const schema = await brain.api<{ schema: string; taxonomy: string[] }>("/wiki/schema");
+      expect(schema.taxonomy).toEqual(["engine", "charter"]);
+      expect(schema.schema).toMatch(/## Domain\n\nOur boat: engines, electronics, charter\./);
+      for (const section of ["## Page Types", "## Tag Taxonomy", "## Conventions", "## Lint"]) expect(schema.schema).toContain(section);
+      expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("## [2026-10-14] create | Wiki created");
+      expect(readFileSync(join(dir, "index.md"), "utf8")).toMatch(/## Start Here/);
+      // An empty wiki: the skill says what the brain covers from the about text alone.
+      const skill = (await (await fetch(`${brain.base}/skill`)).json()) as { description: string };
+      expect(skill.description).not.toMatch(/Wiki sections/);
+      expect(skill.description).toContain("Our boat");
+    } finally {
+      await brain.stop();
+    }
   });
 
   it("keeps the user's text from opening new sections, and falls back to default tags", () => {
@@ -122,8 +125,15 @@ describe("scaffoldWiki", () => {
     expect(git(r.dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
     expect(git(r.dir, "log", "--format=%an <%ae>|%s")).toBe("Marco Monaco <marco@example.org>|Create the wiki from Companion's template");
     expect(git(r.dir, "status", "--porcelain")).toBe("");
-    expect(lintWiki(loadWiki(r.dir)).findings).toEqual([]);
-    expect(loadWiki(r.dir).commit).toBe(r.commit);
+    if (BUN) {
+      const brain = await startBundle(r.dir);
+      try {
+        expect((await brain.api<{ findings: unknown[] }>("/lint")).findings).toEqual([]);
+        expect((await brain.api<{ wiki_commit: string }>("/wiki/schema")).wiki_commit).toBe(r.commit);
+      } finally {
+        await brain.stop();
+      }
+    }
   });
 
   it("authors the commit as Companion when git has no identity", async () => {

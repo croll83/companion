@@ -6,19 +6,22 @@ import { execFileSync } from "node:child_process";
 import { Hono } from "hono";
 
 /**
- * Phase 2b routes end to end against a REAL brain core running in-process
- * (the test imports the core; Companion's server only talks to it over its
- * curator API, here through an injected fetch):
+ * Phase 2b routes end to end against a REAL brain: the bundle Companion ships
+ * (brain-bundle/brain.js, built by the brains project), run under Bun by the
+ * real supervisor, as in production. Companion's server only talks to it
+ * over its curator API:
  *  - "New brain": a wiki from the template, an embedded brain on it,
  *    started, on no domain, its skill taken from the brain; git missing is a
  *    clear error with a code for the page; bad input is refused;
  *  - "Adopt existing folder": what blocks it, with fixes, then the guided
  *    lint of the running brain with one-click additive fixes;
  *  - Pages (list, search, read; secrets redacted as sessions see them),
- *    Inbox (list by status, dismiss with a reason), Add source (text, URL);
+ *    Inbox (list by status, dismiss with a reason, include a note waiting for
+ *    a person), Add source (text, URL);
  *  - errors: a stopped brain, a remote brain, bad statuses; and no answer
  *    ever carries the brain's keys.
- * HOME, COMPANION_HOME and the git config are temp folders.
+ * HOME, COMPANION_HOME and the git config are temp folders. Skipped when Bun
+ * is not installed (CI installs it).
  */
 
 const h = vi.hoisted(() => ({ home: "" }));
@@ -30,75 +33,28 @@ vi.mock("../paths.js", () => ({
 
 import { registerBrainRoutes } from "./brain-routes.js";
 import { registerDomainRoutes } from "./domain-routes.js";
-import { brainDataDir, brainServerName, getBrain } from "../brain/brain-store.js";
+import { getBrain } from "../brain/brain-store.js";
 import { embeddedKeys } from "../brain/brain-token.js";
-import { setChildPort } from "../brain/brain-endpoints.js";
+import { childBaseUrl, setChildPort } from "../brain/brain-endpoints.js";
 import { setGitBinaryForTest } from "../brain/brain-git.js";
-import type { BrainRuntimeStatus } from "../brain/brain-supervisor.js";
-import { loadConfig } from "../brain/core/config.js";
-import { Audit } from "../brain/core/audit.js";
-import { Brain } from "../brain/core/brain.js";
-import { createFetchHandler } from "../brain/core/http.js";
-import { FIXTURE_SECRETS, writeFixtureWiki } from "../brain/core/__tests__/fixture.js";
+import { BrainSupervisor } from "../brain/brain-supervisor.js";
+import { FIXTURE_SECRETS, writeFixtureWiki } from "../brain/__tests__/wiki-fixture.js";
+import { BUN, BUNDLE } from "../brain/__tests__/bundle-brain.js";
 
 let tmp: string;
 let app: Hono;
-const running = new Map<number, { brain: Brain; handler: (r: Request) => Promise<Response> }>();
-let nextPort = 46000;
 const saved = { HOME: process.env.HOME, root: process.env.COMPANION_DOMAINS_ROOT, claude: process.env.CLAUDE_CONFIG_DIR, global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
 
 const send = (method: string, body?: unknown) => ({ method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
-/** A supervisor that runs the brain core in-process instead of a child process. */
-function coreSupervisor() {
-  const states = new Map<string, { state: BrainRuntimeStatus["state"]; port?: number }>();
-  const start = (slug: string) => {
-    const b = getBrain(slug)!;
-    const keys = embeddedKeys(slug)!;
-    const port = nextPort++;
-    const cfg = loadConfig({
-      BRAIN_WIKI_DIR: b.embedded!.wikiDir,
-      BRAIN_DATA_DIR: brainDataDir(slug),
-      BRAIN_NAME: brainServerName(slug),
-      BRAIN_TITLE: `${b.name} brain`,
-      BRAIN_OWNER: "Marco Monaco",
-      BRAIN_ABOUT: b.about,
-      BRAIN_LANGUAGE: b.embedded!.language,
-      BRAIN_REDACT_SECRETS: String(b.embedded!.redactSecrets),
-      BRAIN_TOKEN_KEY: keys.tokenKey,
-      BRAIN_CURATOR_KEY: keys.curatorKey,
-      BRAIN_REFRESH_SECONDS: "0",
-    });
-    const brain = new Brain(cfg, new Audit(() => undefined, undefined, cfg.name));
-    running.set(port, { brain, handler: createFetchHandler(brain) });
-    states.set(slug, { state: "running", port });
-    setChildPort(slug, port);
-  };
-  return {
-    start: vi.fn(start),
-    stop: vi.fn(async (slug: string) => {
-      const port = states.get(slug)?.port;
-      if (port) running.get(port)?.brain.inbox.close();
-      if (port) running.delete(port);
-      states.set(slug, { state: "stopped" });
-      setChildPort(slug, null);
-    }),
-    restart: vi.fn(async (slug: string) => start(slug)),
-    status: vi.fn((slug: string): BrainRuntimeStatus => ({ state: states.get(slug)?.state ?? "stopped", crashes: 0 })),
-    waitRunning: vi.fn(async (slug: string) => states.get(slug)?.state === "running"),
-    logTail: vi.fn(() => []),
-  };
+/** The real supervisor on the shipped bundle, its start spied on. */
+function bundleSupervisor() {
+  const sup = new BrainSupervisor({ bundlePath: BUNDLE, execPath: BUN, healthIntervalMs: 60_000, readyTimeoutMs: 20_000 });
+  vi.spyOn(sup, "start");
+  return sup;
 }
 
-/** Requests to 127.0.0.1:<port> go to the core brain on that port (in-process). */
-async function childFetch(url: string, init?: RequestInit): Promise<Response> {
-  const port = Number(new URL(url).port);
-  const child = running.get(port);
-  if (!child) throw new Error(`connect ECONNREFUSED 127.0.0.1:${port}`);
-  return child.handler(new Request(url, init));
-}
-
-let sup: ReturnType<typeof coreSupervisor>;
+let sup: BrainSupervisor;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "brain-content-"));
@@ -110,15 +66,14 @@ beforeEach(() => {
   process.env.GIT_CONFIG_GLOBAL = join(tmp, "gitconfig");
   process.env.GIT_CONFIG_NOSYSTEM = "1";
   writeFileSync(process.env.GIT_CONFIG_GLOBAL, "[user]\n\tname = Marco Monaco\n\temail = marco@example.org\n");
-  sup = coreSupervisor();
+  sup = bundleSupervisor();
   app = new Hono();
-  registerBrainRoutes(app, { fetch: childFetch, curatorFetch: childFetch, supervisor: sup, readyWaitMs: 50 });
+  registerBrainRoutes(app, { supervisor: sup, readyWaitMs: 20_000 });
   registerDomainRoutes(app, { listSessions: () => [] }, { refreshAccountMcp: async () => ({ servers: [], at: Date.now() }) });
 });
 
-afterEach(() => {
-  for (const { brain } of running.values()) brain.inbox.close();
-  running.clear();
+afterEach(async () => {
+  for (const s of ["boat", "notes", "work"]) await sup.stop(s);
   for (const s of ["boat", "notes", "work"]) setChildPort(s, null);
   setGitBinaryForTest("git");
   for (const [k, v] of [["HOME", saved.HOME], ["COMPANION_DOMAINS_ROOT", saved.root], ["CLAUDE_CONFIG_DIR", saved.claude], ["GIT_CONFIG_GLOBAL", saved.global], ["GIT_CONFIG_NOSYSTEM", saved.nosystem]] as const) {
@@ -139,7 +94,7 @@ async function newBoat(extra: Record<string, unknown> = {}) {
   return r.body;
 }
 
-describe("New brain", () => {
+describe.skipIf(!BUN)("New brain", () => {
   it("creates the wiki and an embedded brain on it, started, on no domain, with the brain's skill", async () => {
     expect((await json("/brains/git")).body).toMatchObject({ available: true });
     const r = await newBoat();
@@ -201,7 +156,7 @@ describe("New brain", () => {
   });
 });
 
-describe("Add source, Inbox, Pages", () => {
+describe.skipIf(!BUN)("Add source, Inbox, Pages", () => {
   it("adds a pasted source, shows its note in the inbox, dismisses it with a reason", async () => {
     await newBoat();
     let r = await json("/brains/boat/sources", send("POST", { name: "Engine manual.md", text: "# Engine\n\nOil every 250 hours.", note: "From the shipyard" }));
@@ -234,6 +189,28 @@ describe("Add source, Inbox, Pages", () => {
     expect((await json("/brains/boat/sources", send("POST", { name: "bad", text: "a\u0000b" }))).status).toBe(400);
   });
 
+  it("lists a note the consolidation left to a person and includes it with a comment", async () => {
+    await newBoat();
+    const added = await json("/brains/boat/sources", send("POST", { url: "https://example.org/fuel-prices", note: "Fuel prices for the season" }));
+    const id = added.body.note_id as string;
+    // A run that leaves the note to a person, through the brain's own curator API.
+    const base = childBaseUrl("boat")!;
+    const curatorCall = (path: string, body: unknown) =>
+      fetch(`${base}/api/v1${path}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Brain-Key": embeddedKeys("boat")!.curatorKey }, body: JSON.stringify(body) });
+    expect((await curatorCall("/consolidation/runs", { run_id: "held-1" })).status).toBe(200);
+    expect((await curatorCall(`/consolidation/runs/held-1/notes/${id}/triage`, { decision: "human", reason: "is this ours?" })).status).toBe(200);
+    expect((await curatorCall("/consolidation/runs/held-1/finalize", {})).status).toBe(200);
+
+    let inbox = (await json("/brains/boat/inbox?status=needs_human")).body;
+    expect(inbox.counts.needs_human).toBe(1);
+    expect(inbox.notes[0]).toMatchObject({ note_id: id, status: "needs_human" });
+    const r = await json(`/brains/boat/inbox/${id}/include`, send("POST", { comment: "Yes: add it to the fuel page." }));
+    expect(r.body).toMatchObject({ note_id: id, status: "pending" });
+    expect((await json(`/brains/boat/inbox/${id}/include`, send("POST", {}))).status).toBe(409);
+    inbox = (await json("/brains/boat/inbox")).body;
+    expect(inbox.notes.find((n: { note_id: string }) => n.note_id === id)).toMatchObject({ release: { by: "companion (user)", comment: "Yes: add it to the fuel page." }, deferrals: 0 });
+  });
+
   it("lists, searches and reads pages, secrets redacted as sessions see them", async () => {
     const wiki = join(tmp, "team-wiki");
     writeFixtureWiki(wiki);
@@ -262,7 +239,7 @@ describe("Add source, Inbox, Pages", () => {
   });
 });
 
-describe("Adopt existing folder and guided lint", () => {
+describe.skipIf(!BUN)("Adopt existing folder and guided lint", () => {
   it("offers to create SCHEMA.md and index.md, then lints the running brain and fixes it in clicks", async () => {
     const dir = join(tmp, "notes");
     mkdirSync(join(dir, "concepts"), { recursive: true });
@@ -298,7 +275,7 @@ describe("Adopt existing folder and guided lint", () => {
   });
 });
 
-describe("secrets", () => {
+describe.skipIf(!BUN)("secrets", () => {
   it("never returns the brain's keys from the new routes", async () => {
     const created = await newBoat();
     const bodies = [JSON.stringify(created)];

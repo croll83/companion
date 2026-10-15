@@ -1,25 +1,24 @@
 // Guards of the dependency rule behind the embedded brain:
 //
-// 1. Companion's server never imports the brain core (server/brain/core/).
-//    The core runs only inside the bundle dist/brain/brain.js, a separate
-//    process; importing it would pull its packages into Companion's server.
-// 2. No server file outside the core imports a package that is missing from
-//    `dependencies`. The in-app updater and the deploy copy do not install
-//    dependencies: a server import of a devDependency (the MCP SDK, yaml,
-//    zod are devDependencies, bundled into the core) would make Companion
-//    fail to start for everyone who updates from the app.
+// 1. The brain core is not part of Companion: it lives in the brains project,
+//    which builds the bundle Companion ships (brain-bundle/brain.js, copied to
+//    dist/brain/brain.js) and runs as a separate process. Companion's server
+//    talks to it only over HTTP.
+// 2. No server file imports a package that is missing from `dependencies`.
+//    The in-app updater and the deploy copy do not install dependencies: a
+//    server import of a devDependency would make Companion fail to start for
+//    everyone who updates from the app.
 //
 // The test walks the import statements of every non-test .ts file under
 // server/ (type-only imports are erased at runtime and are skipped).
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const WEB = resolve(__dirname, "../..");
 const SERVER = join(WEB, "server");
-const CORE = join(SERVER, "brain", "core");
 const pkg = JSON.parse(readFileSync(join(WEB, "package.json"), "utf-8")) as { dependencies: Record<string, string>; files: string[]; scripts: Record<string, string> };
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -62,7 +61,6 @@ function isRuntimeProvided(spec: string): boolean {
 }
 
 const files = walk(SERVER);
-const outside = files.filter((f) => !f.startsWith(CORE + sep));
 
 describe("import graph of web/server", () => {
   it("parses the import forms it must see", () => {
@@ -79,25 +77,19 @@ describe("import graph of web/server", () => {
     ].join("\n");
     expect(runtimeImports(src)).toEqual(["pkg-a", "@scope/pkg-b/sub", "./local.js", "side-effect", "pkg-dyn"]);
     expect(files.length).toBeGreaterThan(100);
-    expect(files.some((f) => f.startsWith(CORE + sep))).toBe(true);
   });
 
-  it("no file outside server/brain/core imports the core", () => {
-    const offenders: string[] = [];
-    for (const f of outside) {
-      for (const spec of runtimeImports(readFileSync(f, "utf-8"))) {
-        if (!spec.startsWith(".")) continue;
-        const target = resolve(dirname(f), spec);
-        if (target === CORE || target.startsWith(CORE + sep)) offenders.push(`${relative(WEB, f)} → ${spec}`);
-      }
-    }
-    expect(offenders).toEqual([]);
+  it("the brain core is not in Companion: it comes bundled from brains", () => {
+    expect(existsSync(join(SERVER, "brain", "core"))).toBe(false);
+    const meta = JSON.parse(readFileSync(join(WEB, "brain-bundle", "bundle.json"), "utf-8")) as { brains_commit: string; protocol: number };
+    expect(meta.brains_commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(existsSync(join(WEB, "brain-bundle", "brain.js"))).toBe(true);
   });
 
-  it("every package a server file imports is in dependencies (the core is bundled, so it is exempt)", () => {
+  it("every package a server file imports is in dependencies", () => {
     const deps = new Set(Object.keys(pkg.dependencies));
     const missing: string[] = [];
-    for (const f of outside) {
+    for (const f of files) {
       for (const spec of runtimeImports(readFileSync(f, "utf-8"))) {
         if (spec.startsWith(".") || spec.startsWith("/") || isRuntimeProvided(spec)) continue;
         if (!deps.has(packageName(spec))) missing.push(`${relative(WEB, f)} → ${spec}`);
@@ -109,7 +101,8 @@ describe("import graph of web/server", () => {
   it("the bundle is built after Vite and shipped in the package", () => {
     // Vite empties dist/ when it builds: the brain bundle must come after it, inside dist/ (in "files").
     expect(pkg.scripts.build).toMatch(/^vite build && bun run build:brain$/);
-    expect(pkg.scripts["build:brain"]).toContain("--outfile dist/brain/brain.js");
+    expect(pkg.scripts["build:brain"]).toContain("cp brain-bundle/brain.js");
+    expect(pkg.scripts["build:brain"]).toContain("dist/brain/");
     expect(pkg.files).toContain("dist/");
   });
 });

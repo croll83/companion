@@ -20,8 +20,7 @@ vi.mock("../paths.js", () => ({
 import { createDomain, ensureGlobalDomain, getDomain, updateDomain, type DomainInfo } from "../domain-store.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createEmbeddedBrain, createRemoteBrain } from "./brain-store.js";
-import { embeddedKeys } from "./brain-token.js";
-import { verifyToken } from "./core/token.js";
+import { isValidBrainToken } from "./brain-token.js";
 import { setCompanionPort, getCompanionPort } from "./brain-endpoints.js";
 import {
   adoptPluginAsBrain,
@@ -232,7 +231,9 @@ describe("embedded brains", () => {
     try {
       const b = brainForDomain(ctx("herd"), "sess-42")!;
       expect(b.mcpUrl).toBe("http://127.0.0.1:3456/brains/work/mcp");
-      expect(verifyToken(embeddedKeys("work")!.tokenKey, b.token)).toEqual({ domain: "herd", sessionId: "sess-42" });
+      // The token names the session (brain-token.test.ts checks the bundle accepts it).
+      expect(isValidBrainToken("work", b.token)).toBe(true);
+      expect(Buffer.from(b.token!.slice(4).split(".")[0], "base64url").toString()).toBe("herd|sess-42");
       expect(claudeBrainServer(b)).toEqual({ type: "http", url: b.mcpUrl, headers: { Authorization: `Bearer ${b.token}` } });
       // Codex: an env var reference in config.toml (never the literal), the token on the process env.
       expect(codexBrainServer(b).headers).toEqual({ Authorization: "Bearer ${COMPANION_BRAIN_WORK_TOKEN}" });

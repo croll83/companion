@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 /**
  * Guided lint for adopted wikis. The findings come from the brain's REAL
- * lint (the core is imported here, in a test only): the sentences must
+ * lint (the bundle Companion ships, run under Bun): the sentences must
  * match what the core reports, so a change of its wording breaks this test
  * rather than silently losing a fix. Validates that the one-click fixes make
  * the problems go away, and that they are ADDITIVE only: every byte of the
@@ -21,8 +21,7 @@ vi.mock("../paths.js", () => ({
 }));
 
 import { applyLintFix, checkAdoptFolder, explainLint, isLintFix, unknownTags, unlistedPages, type LintReport } from "./wiki-lint-guide.js";
-import { loadWiki } from "./core/wiki.js";
-import { lintWiki } from "./core/lint.js";
+import { BUN, startBundle, type BundleBrain } from "./__tests__/bundle-brain.js";
 
 let dir: string;
 
@@ -31,7 +30,13 @@ beforeEach(() => {
   h.home = join(dir, "companion");
 });
 
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+let child: BundleBrain | null = null;
+
+afterEach(async () => {
+  await child?.stop();
+  child = null;
+  rmSync(dir, { recursive: true, force: true });
+});
 
 function page(rel: string, tags: string[], links: string[]): void {
   mkdirSync(join(dir, rel, ".."), { recursive: true });
@@ -48,13 +53,20 @@ function messyWiki(): void {
   page("concepts/gamma.md", ["engines"], ["alpha", "beta"]);
 }
 
-const lint = (): LintReport => lintWiki(loadWiki(dir));
-const pages = () => [...loadWiki(dir).pages.values()].map((p) => ({ slug: p.slug, title: p.title, tags: p.tags }));
+/** The brain on the wiki as it is on disk now (started on first use). */
+async function brain(): Promise<BundleBrain> {
+  child ??= await startBundle(dir);
+  await child.refresh();
+  return child;
+}
+const lint = async (): Promise<LintReport> => (await brain()).api<LintReport>("/lint");
+const pages = async () =>
+  (await (await brain()).api<{ pages: { slug: string; title: string; tags: string[] }[] }>("/wiki/pages")).pages.map((p) => ({ slug: p.slug, title: p.title, tags: p.tags }));
 
 describe("explainLint", () => {
-  it("turns the core's findings into grouped sentences with fixes, errors first", () => {
+  it.skipIf(!BUN)("turns the core's findings into grouped sentences with fixes, errors first", async () => {
     messyWiki();
-    const view = explainLint(lint());
+    const view = explainLint(await lint());
     expect(view.ok).toBe(false);
     const byId = Object.fromEntries(view.advice.map((a) => [a.id, a]));
     expect(byId["taxonomy-missing"]).toMatchObject({ level: "error", fix: { id: "add-taxonomy", label: "Add the tag taxonomy section" } });
@@ -88,38 +100,38 @@ describe("explainLint", () => {
 });
 
 describe("applyLintFix", () => {
-  it("fixes a messy wiki to clean, only adding to the user's files", () => {
+  it.skipIf(!BUN)("fixes a messy wiki to clean, only adding to the user's files", async () => {
     messyWiki();
     const schemaBefore = readFileSync(join(dir, "SCHEMA.md"), "utf8");
     const indexBefore = readFileSync(join(dir, "index.md"), "utf8");
     const now = new Date("2026-10-14T09:00:00Z");
 
-    expect(applyLintFix(dir, "add-taxonomy", { pages: pages(), now })).toBe("Tag taxonomy added to SCHEMA.md (2 tags)");
-    expect(applyLintFix(dir, "add-taxonomy", { pages: pages() })).toMatch(/already has a tag taxonomy/);
-    expect(applyLintFix(dir, "index-pages", { pages: pages(), findings: lint().findings })).toBe('Listed 2 pages in index.md (under "Other pages")');
+    expect(applyLintFix(dir, "add-taxonomy", { pages: await pages(), now })).toBe("Tag taxonomy added to SCHEMA.md (2 tags)");
+    expect(applyLintFix(dir, "add-taxonomy", { pages: await pages() })).toMatch(/already has a tag taxonomy/);
+    expect(applyLintFix(dir, "index-pages", { pages: await pages(), findings: (await lint()).findings })).toBe('Listed 2 pages in index.md (under "Other pages")');
     expect(applyLintFix(dir, "create-log", { now })).toBe("log.md created");
     expect(applyLintFix(dir, "create-log", { now })).toMatch(/already exists/);
 
-    expect(lint().findings).toEqual([]);
+    expect((await lint()).findings).toEqual([]);
     expect(readFileSync(join(dir, "SCHEMA.md"), "utf8").startsWith(schemaBefore)).toBe(true);
     expect(readFileSync(join(dir, "index.md"), "utf8").startsWith(indexBefore)).toBe(true);
     expect(readFileSync(join(dir, "index.md"), "utf8")).toMatch(/## Other pages\n\n- \[\[beta\]\]\n- \[\[gamma\]\]\n$/);
-    expect(applyLintFix(dir, "index-pages", { findings: lint().findings })).toBe("Every page is already in index.md");
+    expect(applyLintFix(dir, "index-pages", { findings: (await lint()).findings })).toBe("Every page is already in index.md");
   });
 
-  it("adds unknown tags inside the existing taxonomy section", () => {
+  it.skipIf(!BUN)("adds unknown tags inside the existing taxonomy section", async () => {
     messyWiki();
     writeFileSync(join(dir, "SCHEMA.md"), "# Schema\n\n## Tag Taxonomy\n- boats\n\n## Conventions\nRules.\n");
     const before = readFileSync(join(dir, "SCHEMA.md"), "utf8");
-    expect(applyLintFix(dir, "add-tags", { findings: lint().findings })).toBe("Added 1 tag to the taxonomy: engines");
+    expect(applyLintFix(dir, "add-tags", { findings: (await lint()).findings })).toBe("Added 1 tag to the taxonomy: engines");
     const after = readFileSync(join(dir, "SCHEMA.md"), "utf8");
     expect(after).toBe("# Schema\n\n## Tag Taxonomy\n- boats\n- engines\n\n## Conventions\nRules.\n");
     for (const line of before.split("\n")) expect(after.split("\n")).toContain(line);
-    expect(lint().findings.filter((f) => f.rule === "L3")).toEqual([]);
+    expect((await lint()).findings.filter((f) => f.rule === "L3")).toEqual([]);
     expect(applyLintFix(dir, "add-tags", { findings: [] })).toBe("No tags to add");
     // No taxonomy section yet: the section is added instead.
     writeFileSync(join(dir, "SCHEMA.md"), "# Schema\n");
-    expect(applyLintFix(dir, "add-tags", { pages: pages(), findings: [{ rule: "L3", level: "error", path: "a", message: "tags not in the SCHEMA.md taxonomy: x" }] })).toMatch(/Tag taxonomy added/);
+    expect(applyLintFix(dir, "add-tags", { pages: await pages(), findings: [{ rule: "L3", level: "error", path: "a", message: "tags not in the SCHEMA.md taxonomy: x" }] })).toMatch(/Tag taxonomy added/);
   });
 
   it("creates SCHEMA.md and index.md for adoption, never over an existing file", () => {

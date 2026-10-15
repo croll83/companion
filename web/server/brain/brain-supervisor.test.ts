@@ -25,7 +25,6 @@ vi.mock("../paths.js", () => ({
 import { BrainSupervisor, BRAIN_PROTOCOL_EXPECTED, explainFailure, type BrainRunState } from "./brain-supervisor.js";
 import { brainDataDir, brainDir, brainLogPath, createEmbeddedBrain, getBrain } from "./brain-store.js";
 import { childBaseUrl } from "./brain-endpoints.js";
-import { BRAIN_PROTOCOL } from "./core/version.js";
 import { brainOwner } from "./brain-git.js";
 
 const FAKE = join(__dirname, "__tests__", "fake-brain-child.mjs");
@@ -78,8 +77,8 @@ afterEach(async () => {
 
 describe("BrainSupervisor", () => {
   it("speaks the protocol of the bundle it was built with", () => {
-    // Companion and the core must agree, or every child would exit with code 2.
-    expect(BRAIN_PROTOCOL_EXPECTED).toBe(BRAIN_PROTOCOL);
+    // Companion and the bundle (built by brains, brain-bundle/bundle.json) must agree, or every child would exit with code 2.
+    expect(BRAIN_PROTOCOL_EXPECTED).toBe(JSON.parse(readFileSync(join(__dirname, "../../brain-bundle/bundle.json"), "utf-8")).protocol);
   });
 
   it("starts the child, reads its port, drains its output into the log, and stops it", async () => {

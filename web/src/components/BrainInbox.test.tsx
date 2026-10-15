@@ -3,15 +3,16 @@
  * The Inbox tab of an embedded brain. Validates the notes of each status
  * (statement, kind, author, sources, date; the reason of a decision), the
  * filter buttons with their counts, Dismiss with an optional reason (sent to
- * the API, then the list reloads and the page is told), Add source opening
- * its form, and errors.
+ * the API, then the list reloads and the page is told), Include with a
+ * comment for a note waiting for a person, Add source opening its form, and
+ * errors.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import type { BrainNote } from "../api.js";
 
-const mockApi = vi.hoisted(() => ({ brainInbox: vi.fn(), dismissBrainNote: vi.fn(), addBrainSource: vi.fn() }));
+const mockApi = vi.hoisted(() => ({ brainInbox: vi.fn(), dismissBrainNote: vi.fn(), includeBrainNote: vi.fn(), addBrainSource: vi.fn() }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
 import { BrainInbox } from "./BrainInbox.js";
@@ -28,16 +29,44 @@ const waiting: BrainNote = {
 };
 const dismissed: BrainNote = { ...waiting, note_id: "N2", kind: "new_fact", statement: "", sources: [], pages: ["engine"], status: "discarded", status_reason: "Not needed", status_by: "user", status_changed_at: "2026-10-14T10:00:00.000Z" };
 
+const held: BrainNote = { ...waiting, note_id: "N3", kind: "new_fact", statement: "The launch plan is dated 18 August 2026.", status: "needs_human", status_reason: "not decided in 2 runs, last 2026-10-15: source not available", status_by: "consolidation", status_changed_at: "2026-10-15T10:00:00.000Z", deferrals: 2 };
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockApi.brainInbox.mockImplementation(async (_slug: string, status: string) => ({
-    counts: { pending: 1, discarded: 1 },
-    notes: status === "pending" ? [waiting] : status === "discarded" ? [dismissed] : [],
+    counts: { pending: 1, discarded: 1, needs_human: 1 },
+    notes: status === "pending" ? [waiting] : status === "discarded" ? [dismissed] : status === "needs_human" ? [held] : [],
   }));
   mockApi.dismissBrainNote.mockResolvedValue({ note_id: "N1", status: "discarded" });
+  mockApi.includeBrainNote.mockResolvedValue({ ok: true, note_id: "N3", status: "pending" });
 });
 
 describe("BrainInbox", () => {
+  it("shows the notes waiting for a person and includes one with a comment", async () => {
+    const onChanged = vi.fn();
+    render(<BrainInbox slug="work" onChanged={onChanged} />);
+    await screen.findByText(/New source added/);
+    fireEvent.click(screen.getByRole("button", { name: "Needs you (1)" }));
+    const item = (await screen.findByText(/launch plan/)).closest("li")!;
+    expect(item).toHaveTextContent("Waiting for you by consolidation");
+    expect(within(item).getByRole("button", { name: "Dismiss…" })).toBeInTheDocument();
+    fireEvent.click(within(item).getByRole("button", { name: "Include…" }));
+    const form = screen.getByRole("form", { name: "Include note" });
+    fireEvent.change(within(form).getByLabelText(/Comment for the consolidation/), { target: { value: "I confirm it" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Include note" }));
+    await waitFor(() => expect(mockApi.includeBrainNote).toHaveBeenCalledWith("work", "N3", "I confirm it"));
+    expect(onChanged).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Include note" })).toBeNull());
+  });
+
+  it("offers no Include for a waiting note, and tells how many runs left it undecided", async () => {
+    mockApi.brainInbox.mockResolvedValueOnce({ counts: { pending: 1 }, notes: [{ ...waiting, deferrals: 1 }] });
+    render(<BrainInbox slug="work" />);
+    const item = (await screen.findByText(/New source added/)).closest("li")!;
+    expect(item).toHaveTextContent("Left undecided by 1 consolidation run.");
+    expect(within(item).queryByRole("button", { name: "Include…" })).toBeNull();
+  });
+
   it("renders the waiting notes with kind, author, target and sources", async () => {
     render(<BrainInbox slug="work" />);
     const item = (await screen.findByText(/New source added from Companion/)).closest("li")!;

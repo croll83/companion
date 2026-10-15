@@ -47,7 +47,9 @@ import type { Context } from "hono";
  *
  * Contents of an embedded brain, through its curator API (brain-curator.ts):
  * GET /brains/:slug/pages?q= and /pages/:page (secrets redacted as sessions
- * see them), GET /brains/:slug/inbox?status= and POST .../inbox/:note/dismiss,
+ * see them), GET /brains/:slug/inbox?status=, POST .../inbox/:note/dismiss and
+ * POST .../inbox/:note/include {comment?} (a note waiting for a person goes
+ * back to the next consolidation, which may only accept or reject it),
  * POST /brains/:slug/sources (a text or an URL), GET /brains/:slug/lint and
  * POST /brains/:slug/lint/fix (guided lint, wiki-lint-guide.ts).
  *
@@ -147,13 +149,13 @@ export interface BrainRouteDeps {
 }
 
 /** Statuses of the Inbox tab ("discarded" is shown as Dismissed). */
-const INBOX_STATUSES = ["pending", "deferred", "accepted", "rejected", "discarded", "withdrawn"] as const;
+const INBOX_STATUSES = ["pending", "needs_human", "deferred", "accepted", "rejected", "discarded", "withdrawn"] as const;
 /** Largest source text accepted from the browser (the brain checks 1 MB of UTF-8 too). */
 const MAX_SOURCE_CHARS = 1_000_000;
 
 /** A note as the Inbox tab shows it (no session ids or client internals). */
 function inboxNote(n: Record<string, unknown>) {
-  const pick = ["note_id", "kind", "statement", "pages", "new_page_hint", "sources", "evidence", "author", "received_at", "status", "status_reason", "status_changed_at", "status_by", "client_name"];
+  const pick = ["note_id", "kind", "statement", "pages", "new_page_hint", "sources", "evidence", "author", "received_at", "status", "status_reason", "status_changed_at", "status_by", "client_name", "deferrals", "release"];
   return Object.fromEntries(pick.filter((k) => n[k] !== undefined).map((k) => [k, n[k]]));
 }
 
@@ -374,6 +376,17 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
     return curator(brain.slug, `/inbox/notes/${encodeURIComponent(c.req.param("note") ?? "")}/dismiss`, {
       method: "POST",
       body: { by: "user", ...(reason ? { reason } : {}) },
+    });
+  }));
+
+  // "Include": a note the consolidation left to a person belongs in the wiki. It
+  // goes back to the next run as pertinent, with the comment for the curator.
+  api.post("/brains/:slug/inbox/:note/include", curated(async (brain, c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { comment?: unknown };
+    const comment = typeof body.comment === "string" && body.comment.trim() ? body.comment.trim().slice(0, 1000) : undefined;
+    return curator(brain.slug, `/inbox/notes/${encodeURIComponent(c.req.param("note") ?? "")}/release`, {
+      method: "POST",
+      body: { by: "user", ...(comment ? { comment } : {}) },
     });
   }));
 

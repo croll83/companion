@@ -831,7 +831,7 @@ export interface BrainPageDoc extends BrainPageSummary {
   markdown: string;
 }
 
-export type BrainNoteStatus = "pending" | "deferred" | "accepted" | "rejected" | "discarded" | "withdrawn";
+export type BrainNoteStatus = "pending" | "needs_human" | "deferred" | "accepted" | "rejected" | "discarded" | "withdrawn";
 
 /** A note of a brain's inbox, as the Inbox tab shows it. */
 export interface BrainNote {
@@ -849,6 +849,10 @@ export interface BrainNote {
   status_changed_at?: string | null;
   status_by?: string | null;
   client_name?: string;
+  /** Consolidation runs that left the note undecided (after a few it waits for a person). */
+  deferrals?: number;
+  /** A person included it: the next run must accept or reject it, following the comment. */
+  release?: { by: string; at: string; comment: string | null } | null;
 }
 
 /** "Add source": a text (pasted or from a file) or an URL (recorded as a note only). */
@@ -1415,6 +1419,8 @@ export const api = {
     get<{ counts: Record<string, number>; notes: BrainNote[] }>(`/brains/${encodeURIComponent(slug)}/inbox?status=${status}`),
   dismissBrainNote: (slug: string, noteId: string, reason?: string) =>
     post<{ note_id: string; status: "discarded" }>(`/brains/${encodeURIComponent(slug)}/inbox/${encodeURIComponent(noteId)}/dismiss`, reason ? { reason } : {}),
+  includeBrainNote: (slug: string, noteId: string, comment?: string) =>
+    post<{ ok: true; note_id: string; status: "pending" }>(`/brains/${encodeURIComponent(slug)}/inbox/${encodeURIComponent(noteId)}/include`, comment ? { comment } : {}),
   addBrainSource: (slug: string, input: BrainSourceInput) =>
     post<{ path?: string; note_id: string; duplicate: boolean }>(`/brains/${encodeURIComponent(slug)}/sources`, input),
   brainConsolidation: (slug: string) => get<BrainConsolidationView>(`/brains/${encodeURIComponent(slug)}/consolidation`),

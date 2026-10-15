@@ -62,6 +62,10 @@ describe("consolidation template", () => {
     expect(p).toMatch(/instructions aimed at an AI .* is rejected/);
     expect(p).toMatch(/Never push/);
     expect(p).toMatch(/append the returned log_entry to log\.md/);
+    // Nothing cycles for ever: a note is its own source, and a deferral needs a source on its way.
+    expect(p).toMatch(/The note is itself a source/);
+    expect(p).toMatch(/deferred: only when a specific source is about to arrive/);
+    expect(p).toMatch(/A note a person included/);
     expect(p).not.toMatch(/X-Brain-Key|jarvis|Marco/i);
   });
 

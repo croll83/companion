@@ -30,7 +30,7 @@
     "dev:api": "bun --watch server/index.ts",
     "dev:vite": "vite",
     "build": "vite build && bun run build:brain",
-    "build:brain": "bun build server/brain/core/main.ts --target=bun --minify --outfile dist/brain/brain.js",
+    "build:brain": "mkdir -p dist/brain && cp brain-bundle/brain.js brain-bundle/brain.js.LEGAL.txt dist/brain/",
     "test:brain-smoke": "bun scripts/brain-smoke.ts",
     "start": "NODE_ENV=production bun server/index.ts",
     "prepublishOnly": "bun run build",
