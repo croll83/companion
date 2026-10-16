@@ -8,8 +8,11 @@ import {
   type GitRepoInfo,
   type GitBranchInfo,
   type BackendInfo,
+  type DomainLinearView,
   type LinearIssue,
 } from "../api.js";
+import { takeLinearHandoff } from "../utils/linear-board.js";
+import { resolveLinearBranch } from "../utils/linear-branch.js";
 import { connectSession, createClientMessageId, waitForConnection, sendToSession } from "../ws.js";
 import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
@@ -124,6 +127,10 @@ export function HomePage() {
   const [linearConfigured, setLinearConfigured] = useState(false);
   const [selectedLinearIssue, setSelectedLinearIssue] = useState<LinearIssue | null>(null);
   const [selectedLinearConnectionId, setSelectedLinearConnectionId] = useState<string | null>(null);
+  // The domain's Linear link (default scope of the issue picker) and the
+  // connection of an issue handed over by a domain board's "Take it".
+  const [domainLinear, setDomainLinear] = useState<DomainLinearView | null>(null);
+  const [handoffConnectionId, setHandoffConnectionId] = useState<string | undefined>(undefined);
   const [showOnboardingTip, setShowOnboardingTip] = useState(
     () => localStorage.getItem("cc-onboarding-dismissed") !== "true",
   );
@@ -212,6 +219,32 @@ export function HomePage() {
       setLinearConfigured(s.linearApiKeyConfigured);
     }).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // "Take it" on a domain board: start the session in that domain, linked to
+  // the issue, on the issue's branch (read once: a reload does not repeat it).
+  useEffect(() => {
+    const handoff = takeLinearHandoff();
+    if (!handoff) return;
+    setDomain(handoff.domain);
+    localStorage.setItem("cc-domain", handoff.domain);
+    setSelectedLinearIssue(handoff.issue);
+    setSelectedLinearConnectionId(handoff.connectionId);
+    setHandoffConnectionId(handoff.connectionId);
+    setSelectedBranch(resolveLinearBranch(handoff.issue));
+    setIsNewBranch(true);
+    setText((t) => t || `Work on ${handoff.issue.identifier}: ${handoff.issue.title}`);
+  }, []);
+
+  // The Linear link of the chosen domain (any backend: it only scopes the picker).
+  useEffect(() => {
+    setDomainLinear(null);
+    if (!linearConfigured) return;
+    let active = true;
+    api.getDomainLinear(domain)
+      .then((res) => { if (active) setDomainLinear(res.link); })
+      .catch(() => { /* no link: the picker works workspace-wide as before */ });
+    return () => { active = false; };
+  }, [domain, linearConfigured]);
 
   // When backend changes, reset model and mode to defaults
   function switchBackend(newBackend: BackendType) {
@@ -672,7 +705,11 @@ export function HomePage() {
           .then(() => useStore.getState().setLinkedLinearIssue(sessionId, selectedLinearIssue))
           .catch(() => { /* fire-and-forget: linking is best-effort */ });
         // Fire-and-forget: transition Linear issue to configured status
-        api.transitionLinearIssue(selectedLinearIssue.id, selectedLinearConnectionId || undefined).catch(() => {
+        // The session domain's start rule applies to an issue of its team, else the connection's.
+        api.transitionLinearIssue(selectedLinearIssue.id, selectedLinearConnectionId || undefined, {
+          domain,
+          teamId: selectedLinearIssue.teamId || undefined,
+        }).catch(() => {
           /* fire-and-forget: status transition is best-effort */
         });
       }
@@ -1391,6 +1428,8 @@ export function HomePage() {
               onIssueSelect={handleIssueSelect}
               onBranchFromIssue={handleBranchFromIssue}
               onConnectionSelect={setSelectedLinearConnectionId}
+              domainLink={domainLinear}
+              preferredConnectionId={handoffConnectionId}
             />
           </div>
 
