@@ -26,6 +26,7 @@ import {
   type FolderMemory,
 } from "./session-folder.js";
 import { domainMemoryDir, getDomain, GLOBAL_DOMAIN } from "./domain-store.js";
+import { resolveTransitionRule } from "./domain-linear.js";
 import { copyMemoryNotes, invalidNoteFiles, listMemoryNotes, type CopyNotesResult, type MemoryNote } from "./legacy-memory.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { applyChromePreference } from "./chrome-browser.js";
@@ -840,18 +841,21 @@ export class SessionOrchestrator {
         const resolved = resolveApiKey(linkedIssue.connectionId);
         if (resolved) {
           const { apiKey: linearApiKey, connectionId: resolvedConnId } = resolved;
-          const settings = getSettings();
-          const conn = resolvedConnId !== "legacy" ? getConnection(resolvedConnId) : null;
           let targetStateId = "";
 
           if (linearTransition === "backlog" && linkedIssue.teamId) {
-            const teams = await fetchLinearTeamStates(linearApiKey);
+            const teams = await fetchLinearTeamStates(linearApiKey, resolvedConnId);
             const team = teams.find((t) => t.id === linkedIssue.teamId);
             const backlogState = team?.states.find((s) => s.type === "backlog");
             if (backlogState) targetStateId = backlogState.id;
           } else if (linearTransition === "configured") {
-            const archiveStateId = conn ? conn.archiveTransitionStateId : settings.linearArchiveTransitionStateId;
-            targetStateId = archiveStateId.trim();
+            // The session's domain rule, else the connection's, else global settings.
+            const sessionDomain = this.launcher.getSession(sessionId)?.domain;
+            targetStateId = resolveTransitionRule("archive", {
+              link: sessionDomain ? getDomain(sessionDomain)?.linear : undefined,
+              connectionId: resolvedConnId,
+              teamId: linkedIssue.teamId || undefined,
+            }).stateId;
           }
 
           if (targetStateId) {

@@ -7,6 +7,7 @@ import {
   deleteConnection,
 } from "../linear-connections.js";
 import { linearCache } from "../linear-cache.js";
+import { clearLinearConnectionFromDomains } from "../domain-store.js";
 
 /** Mask an API key, showing only the last 4 characters. */
 function maskApiKey(key: string): string {
@@ -200,7 +201,10 @@ export function registerLinearConnectionRoutes(api: Hono): void {
     if (!deleted) return c.json({ error: "Connection not found" }, 404);
     // Invalidate caches for this connection
     linearCache.invalidate(`${id}:`);
-    return c.json({ ok: true });
+    // Domains linked to it lose their link (board, picker scope, rules), so
+    // none of them is left pointing at a key that is gone.
+    const unlinkedDomains = clearLinearConnectionFromDomains(id);
+    return c.json({ ok: true, unlinkedDomains });
   });
 
   // ─── Re-verify a connection ────────────────────────────────────────

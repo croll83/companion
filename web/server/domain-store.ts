@@ -63,6 +63,38 @@ export interface DomainInfo {
    * choice; absent = none. See effectiveBrainSlug.
    */
   brain?: string | null;
+  /**
+   * The Linear team (and optionally project) this domain works on: its board
+   * (#/domains/<slug>/board), the default scope of the Home page issue picker
+   * and the per-domain transition rules. Only ids and display names are kept
+   * here: the API key stays in linear-connections.json. Not inherited from
+   * GLOBAL (a board is per domain); GLOBAL can have its own.
+   */
+  linear?: DomainLinearLink;
+}
+
+/**
+ * A per-domain transition rule (on session start / on archive). Absent on the
+ * link = the connection's own setting applies (how it worked before domains
+ * had rules), so existing setups keep their behaviour until a domain chooses.
+ */
+export interface DomainLinearRule {
+  enabled: boolean;
+  /** A workflow state of the linked team ("" when disabled). */
+  stateId: string;
+  stateName: string;
+}
+
+export interface DomainLinearLink {
+  connectionId: string;
+  teamId: string;
+  teamKey?: string;
+  teamName?: string;
+  /** Absent = the whole team. */
+  projectId?: string;
+  projectName?: string;
+  autoTransition?: DomainLinearRule;
+  archiveTransition?: DomainLinearRule;
 }
 
 export interface McpServerDef {
@@ -130,7 +162,38 @@ function normalize(raw: Partial<DomainInfo> & { slug: string }): DomainInfo {
     ...(raw.skillGroups && typeof raw.skillGroups === "object" ? { skillGroups: sanitizePlugins(raw.skillGroups) } : {}),
     ...(raw.skillChoices && typeof raw.skillChoices === "object" ? { skillChoices: sanitizePlugins(raw.skillChoices) } : {}),
     ...readBrainChoice(raw),
+    ...readLinearLink(raw.linear),
   };
+}
+
+const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+
+function readLinearRule(raw: unknown): DomainLinearRule | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Partial<DomainLinearRule>;
+  if (typeof r.enabled !== "boolean") return undefined;
+  const stateId = r.enabled ? str(r.stateId) : "";
+  if (r.enabled && !stateId) return undefined;
+  return { enabled: r.enabled, stateId, stateName: r.enabled ? str(r.stateName) : "" };
+}
+
+/** The `linear` field as stored: needs a connection and a team, everything else optional. */
+export function readLinearLink(raw: unknown): Pick<DomainInfo, "linear"> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  const connectionId = str(r.connectionId);
+  const teamId = str(r.teamId);
+  if (!connectionId || !teamId) return {};
+  const link: DomainLinearLink = { connectionId, teamId };
+  for (const key of ["teamKey", "teamName", "projectId", "projectName"] as const) {
+    if (str(r[key])) link[key] = str(r[key]);
+  }
+  if (!link.projectId) delete link.projectName;
+  for (const key of ["autoTransition", "archiveTransition"] as const) {
+    const rule = readLinearRule(r[key]);
+    if (rule) link[key] = rule;
+  }
+  return { linear: link };
 }
 
 /** The `brain` field as stored: a valid slug, or null ("none") except on GLOBAL, where absent already means none. */
@@ -422,6 +485,40 @@ function applyBrainChoice(domain: DomainInfo, value: unknown): string | null {
     return "brain must be a brain slug, null or \"inherit\"";
   }
   return null;
+}
+
+/**
+ * Link a domain to a Linear team/project, or unlink it (null). The caller
+ * validates the ids against Linear first (domain-linear-routes.ts).
+ */
+export function setDomainLinear(slug: string, link: DomainLinearLink | null): DomainResult {
+  const domains = readRegistry();
+  const idx = domains.findIndex((d) => d.slug === slug);
+  if (idx < 0) return { ok: false, status: 404, error: "Domain not found" };
+  const next: DomainInfo = { ...domains[idx] };
+  delete next.linear;
+  if (link) {
+    const read = readLinearLink(link);
+    if (!read.linear) return { ok: false, status: 400, error: "A Linear link needs a connectionId and a teamId" };
+    next.linear = read.linear;
+  }
+  domains[idx] = next;
+  writeRegistry(domains);
+  return { ok: true, domain: next };
+}
+
+/** Unlink every domain linked to a Linear connection (it was deleted). Returns their slugs. */
+export function clearLinearConnectionFromDomains(connectionId: string): string[] {
+  const cleared: string[] = [];
+  const domains = readRegistry();
+  for (const d of domains) {
+    if (d.linear?.connectionId === connectionId) {
+      delete d.linear;
+      cleared.push(d.slug);
+    }
+  }
+  if (cleared.length > 0) writeRegistry(domains);
+  return cleared;
 }
 
 /** Remove a domain from the registry. Its folder and files stay on disk. */

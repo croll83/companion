@@ -43,6 +43,14 @@ vi.mock("../linear-cache.js", () => ({
   },
 }));
 
+// ─── Mock domain-store ──────────────────────────────────────────────────────
+// Deleting a connection unlinks the domains linked to it; mocked so these
+// tests never read or write the real domains.json.
+const mockClearLinearConnectionFromDomains = vi.fn((_id: string): string[] => []);
+vi.mock("../domain-store.js", () => ({
+  clearLinearConnectionFromDomains: (id: string) => mockClearLinearConnectionFromDomains(id),
+}));
+
 // ─── Imports (after mocks are declared) ─────────────────────────────────────
 import { Hono } from "hono";
 import { linearCache } from "../linear-cache.js";
@@ -739,6 +747,26 @@ describe("DELETE /api/linear/connections/:id", () => {
 
     // Cache should be invalidated for this connection's prefix
     expect(vi.mocked(linearCache.invalidate)).toHaveBeenCalledWith("conn-1:");
+  });
+
+  it("unlinks the domains linked to the deleted connection and reports them", async () => {
+    // A domain must never keep pointing at a connection (and key) that is gone:
+    // the route clears those links and returns which domains lost theirs.
+    mockDeleteConnection.mockReturnValue(true);
+    mockClearLinearConnectionFromDomains.mockReturnValueOnce(["herd", "jarvis"]);
+
+    const res = await app.request("/api/linear/connections/conn-1", { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, unlinkedDomains: ["herd", "jarvis"] });
+    expect(mockClearLinearConnectionFromDomains).toHaveBeenCalledWith("conn-1");
+  });
+
+  it("does not touch domains when the connection does not exist", async () => {
+    // 404 path: nothing was deleted, so no domain link may be cleared.
+    mockDeleteConnection.mockReturnValue(false);
+    mockClearLinearConnectionFromDomains.mockClear();
+    await app.request("/api/linear/connections/missing", { method: "DELETE" });
+    expect(mockClearLinearConnectionFromDomains).not.toHaveBeenCalled();
   });
 });
 

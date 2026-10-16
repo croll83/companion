@@ -59,6 +59,14 @@ vi.mock("../linear-connections.js", () => ({
   getConnection: (...args: unknown[]) => mockGetConnection(),
 }));
 
+// ─── Mock domain-store ──────────────────────────────────────────────────────
+// The start transition reads the session domain's Linear link; mocked so no
+// test reads the real domains.json.
+const mockGetDomain = vi.fn((_slug: string): unknown => undefined);
+vi.mock("../domain-store.js", () => ({
+  getDomain: (slug: string) => mockGetDomain(slug),
+}));
+
 // ─── Imports (after mocks are declared) ─────────────────────────────────────
 import { Hono } from "hono";
 import { getSettings } from "../settings-manager.js";
@@ -151,6 +159,24 @@ function makeIssueNode(overrides: Record<string, unknown> = {}) {
 // =============================================================================
 
 describe("GET /api/linear/issues", () => {
+  // Home page in a linked domain: the search is limited to the domain's
+  // project (or team), and the scope is part of the cache key.
+  it("scopes the search to a project or team when asked", async () => {
+    const fetchFn = mockFetch().mockResolvedValue(linearOk({ searchIssues: { nodes: [] } }));
+    await app.request("/api/linear/issues?query=soak&projectId=p-bskts&teamId=team-bsk");
+    let body = JSON.parse(fetchFn.mock.calls[0][1].body);
+    expect(body.query).toContain("filter: $filter");
+    expect(body.variables.filter).toEqual({ project: { id: { eq: "p-bskts" } } });
+    await app.request("/api/linear/issues?query=soak&teamId=team-bsk");
+    body = JSON.parse(fetchFn.mock.calls[1][1].body);
+    expect(body.variables.filter).toEqual({ team: { id: { eq: "team-bsk" } } });
+    // Unscoped searches are unchanged.
+    await app.request("/api/linear/issues?query=soak");
+    body = JSON.parse(fetchFn.mock.calls[2][1].body);
+    expect(body.variables.filter).toBeUndefined();
+    expect(body.query).not.toContain("$filter");
+  });
+
   it("returns empty array when no query is provided (covers line 22)", async () => {
     // When no query param is provided, the route returns { issues: [] } early
     const res = await app.request("/api/linear/issues");
@@ -950,6 +976,23 @@ describe("GET /api/linear/project-issues", () => {
     expect(json.issues[0].updatedAt).toBe("");
   });
 
+  // A domain linked to a whole team (no project) lists that team's open issues.
+  it("lists a team's open issues when given teamId instead of projectId", async () => {
+    const fetchFn = mockFetch().mockResolvedValue(linearOk({ issues: { nodes: [{
+      id: "i-9", identifier: "BSK-9", title: "t", url: "u", branchName: "marco/bsk-9",
+      state: { name: "Todo", type: "unstarted" }, team: { id: "team-bsk", key: "BSK", name: "Bskts" },
+    }] } }));
+    const res = await app.request("/api/linear/project-issues?teamId=team-bsk");
+    const json = await res.json();
+    expect(json.issues[0]).toMatchObject({ identifier: "BSK-9", branchName: "marco/bsk-9", teamId: "team-bsk" });
+    const { variables } = JSON.parse(fetchFn.mock.calls[0][1].body);
+    expect(variables.filter).toEqual({
+      team: { id: { eq: "team-bsk" } },
+      state: { type: { nin: ["completed", "canceled", "cancelled"] } },
+    });
+    expect(linearCache.getOrFetch).toHaveBeenCalledWith("test-conn:project-issues:team:team-bsk:15", expect.any(Number), expect.any(Function));
+  });
+
   it("returns 502 when Linear API returns errors (covers lines 603-605)", async () => {
     mockFetch().mockResolvedValue(
       linearError("Auth error"),
@@ -1188,6 +1231,34 @@ describe("POST /api/linear/issues/:id/transition", () => {
 
     // Cache should be invalidated with connection prefix
     expect(linearCache.invalidate).toHaveBeenCalledWith("test-conn:issue:issue-1");
+  });
+
+  // Per-domain rules: the session's domain moves the issue to its own
+  // start state, even when the connection/settings rule is off.
+  it("uses the domain's own start rule for an issue of its team", async () => {
+    mockGetDomain.mockReturnValueOnce({
+      slug: "herd",
+      linear: { connectionId: "test-conn", teamId: "team-bsk", autoTransition: { enabled: true, stateId: "st-progress", stateName: "In Progress" } },
+    });
+    const fetchFn = mockFetch().mockResolvedValue(linearOk({
+      issueUpdate: { success: true, issue: { id: "issue-1", identifier: "BSK-1", state: { name: "In Progress", type: "started" } } },
+    }));
+
+    const res = await app.request("/api/linear/issues/issue-1/transition?domain=herd&teamId=team-bsk", { method: "POST" });
+
+    expect((await res.json()).skipped).toBe(false);
+    expect(mockGetDomain).toHaveBeenCalledWith("herd");
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body).variables).toEqual({ issueId: "issue-1", stateId: "st-progress" });
+  });
+
+  // An issue of another team keeps the connection/settings rule (here: off).
+  it("ignores the domain rule for an issue of another team", async () => {
+    mockGetDomain.mockReturnValueOnce({
+      slug: "herd",
+      linear: { connectionId: "test-conn", teamId: "team-bsk", autoTransition: { enabled: true, stateId: "st-progress", stateName: "In Progress" } },
+    });
+    const res = await app.request("/api/linear/issues/issue-1/transition?domain=herd&teamId=team-cro", { method: "POST" });
+    expect(await res.json()).toMatchObject({ skipped: true, reason: "auto_transition_disabled" });
   });
 
   it("returns 502 when Linear returns GraphQL errors", async () => {

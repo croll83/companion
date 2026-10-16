@@ -16,6 +16,7 @@ import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
 import { registerDomainRoutes } from "./routes/domain-routes.js";
+import { registerDomainLinearRoutes } from "./routes/domain-linear-routes.js";
 import { registerBrainRoutes } from "./routes/brain-routes.js";
 import { getBrainConsolidation } from "./brain/brain-consolidation.js";
 import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
@@ -31,9 +32,10 @@ import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
 import { registerHubRoutes } from "./recording-hub/hub-routes.js";
 import { registerLinearRoutes, fetchLinearTeamStates } from "./routes/linear-routes.js";
 import { registerLinearConnectionRoutes } from "./routes/linear-connection-routes.js";
-import { getConnection, resolveApiKey } from "./linear-connections.js";
+import { resolveApiKey } from "./linear-connections.js";
+import { isConfigured as isTransitionConfigured, resolveTransitionRule } from "./domain-linear.js";
+import { getDomain } from "./domain-store.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
-import { getSettings } from "./settings-manager.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
@@ -797,22 +799,22 @@ export function createRoutes(
     const resolved = resolveApiKey(linkedIssue.connectionId);
     let hasBacklogState = false;
     if (resolved && linkedIssue.teamId) {
-      const teams = await fetchLinearTeamStates(resolved.apiKey);
+      const teams = await fetchLinearTeamStates(resolved.apiKey, resolved.connectionId);
       const team = teams.find((t) => t.id === linkedIssue.teamId);
       if (team) {
         hasBacklogState = team.states.some((s) => s.type === "backlog");
       }
     }
 
-    // Use connection-level archive settings if available, fall back to global settings
-    const settings = getSettings();
-    const conn = resolved && resolved.connectionId !== "legacy" ? getConnection(resolved.connectionId) : null;
-    const archiveTransitionConfigured = conn
-      ? conn.archiveTransition && !!conn.archiveTransitionStateId.trim()
-      : settings.linearArchiveTransition && !!settings.linearArchiveTransitionStateId.trim();
-    const archiveTransitionStateName = conn
-      ? conn.archiveTransitionStateName || undefined
-      : settings.linearArchiveTransitionStateName || undefined;
+    // The session's domain rule, else the connection's, else global settings (domain-linear.ts).
+    const sessionDomain = launcher.getSession(id)?.domain;
+    const rule = resolveTransitionRule("archive", {
+      link: sessionDomain ? getDomain(sessionDomain)?.linear : undefined,
+      connectionId: resolved?.connectionId ?? linkedIssue.connectionId ?? "legacy",
+      teamId: linkedIssue.teamId || undefined,
+    });
+    const archiveTransitionConfigured = isTransitionConfigured(rule);
+    const archiveTransitionStateName = rule.stateName || undefined;
 
     return c.json({
       hasLinkedIssue: true,
@@ -908,6 +910,7 @@ export function createRoutes(
   registerFsRoutes(api, { getSessionCwd: (id) => launcher.getSession(id)?.cwd });
   registerEnvRoutes(api);
   registerDomainRoutes(api, launcher);
+  registerDomainLinearRoutes(api, launcher);
   registerBrainRoutes(api);
 
   registerPromptRoutes(api);

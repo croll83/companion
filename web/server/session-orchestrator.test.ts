@@ -104,12 +104,12 @@ import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
 import * as settingsManager from "./settings-manager.js";
-import { resolveApiKey } from "./linear-connections.js";
+import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { transitionLinearIssue, fetchLinearTeamStates } from "./routes/linear-routes.js";
 import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { resolveSessionEnv } from "./session-env.js";
-import { createDomain, domainDir, ensureGlobalDomain } from "./domain-store.js";
+import { createDomain, domainDir, ensureGlobalDomain, setDomainLinear } from "./domain-store.js";
 
 // ── Mock factories ──────────────────────────────────────────────────────────
 
@@ -1004,10 +1004,59 @@ describe("SessionOrchestrator", () => {
       const result = await orchestrator.archiveSession("s1", { linearTransition: "backlog" });
 
       expect(result.ok).toBe(true);
-      expect(fetchLinearTeamStates).toHaveBeenCalledWith("lin_api_123");
+      // The states are cached per connection (two workspaces have different teams).
+      expect(fetchLinearTeamStates).toHaveBeenCalledWith("lin_api_123", "conn-1");
       expect(transitionLinearIssue).toHaveBeenCalledWith("issue-1", "state-backlog", "lin_api_123", "conn-1");
       // Session should still be archived even with transition
       expect(deps.launcher.setArchived).toHaveBeenCalledWith("s1", true);
+    });
+
+    // Per-domain rules: "configured" moves the issue to the session domain's
+    // own archive state when the domain has one for that team...
+    it("uses the session domain's archive rule when linearTransition=configured", async () => {
+      const folders = mkdtempSync(join(tmpdir(), "orch-linear-"));
+      const savedRoot = process.env.COMPANION_DOMAINS_ROOT;
+      process.env.COMPANION_DOMAINS_ROOT = folders;
+      try {
+        createDomain({ name: "Herd" });
+        setDomainLinear("herd", {
+          connectionId: "conn-1",
+          teamId: "team-1",
+          archiveTransition: { enabled: true, stateId: "state-review", stateName: "In Review" },
+        });
+        deps.launcher.getSession.mockReturnValue({ sessionId: "s1", domain: "herd" } as any);
+        vi.mocked(sessionLinearIssues.getLinearIssue).mockReturnValue({
+          id: "issue-1", identifier: "ENG-42", teamId: "team-1", connectionId: "conn-1",
+        } as any);
+        vi.mocked(resolveApiKey).mockReturnValue({ apiKey: "lin_api_123", connectionId: "conn-1" });
+        vi.mocked(transitionLinearIssue).mockResolvedValue({ ok: true } as any);
+
+        await orchestrator.archiveSession("s1", { linearTransition: "configured" });
+
+        expect(transitionLinearIssue).toHaveBeenCalledWith("issue-1", "state-review", "lin_api_123", "conn-1");
+      } finally {
+        setDomainLinear("herd", null);
+        if (savedRoot === undefined) delete process.env.COMPANION_DOMAINS_ROOT;
+        else process.env.COMPANION_DOMAINS_ROOT = savedRoot;
+        rmSync(folders, { recursive: true, force: true });
+      }
+    });
+
+    // ...and otherwise falls back to the connection's setting (today's behaviour).
+    it("falls back to the connection's archive state when the domain has no rule", async () => {
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s1", domain: "global" } as any);
+      vi.mocked(sessionLinearIssues.getLinearIssue).mockReturnValue({
+        id: "issue-1", identifier: "ENG-42", teamId: "team-1", connectionId: "conn-1",
+      } as any);
+      vi.mocked(resolveApiKey).mockReturnValue({ apiKey: "lin_api_123", connectionId: "conn-1" });
+      vi.mocked(getConnection).mockReturnValueOnce({
+        id: "conn-1", archiveTransition: true, archiveTransitionStateId: "state-conn", archiveTransitionStateName: "Done",
+      } as any);
+      vi.mocked(transitionLinearIssue).mockResolvedValue({ ok: true } as any);
+
+      await orchestrator.archiveSession("s1", { linearTransition: "configured" });
+
+      expect(transitionLinearIssue).toHaveBeenCalledWith("issue-1", "state-conn", "lin_api_123", "conn-1");
     });
 
     it("archives even when Linear transition fails", async () => {
