@@ -72,6 +72,19 @@ The built-in `companion` MCP server of each session uses its own token (`cmcp_â€
 | `POST` | `/api/sessions/:id/wakeups` | Schedule a wake-up: `{"message": "...", "at": "2026-10-06T09:00"}` or `{"message": "...", "cron": "0 9 * * 1-5"}`, optional `"createdBy": "session:<id>"` |
 | `DELETE` | `/api/sessions/:id/wakeups/:wakeupId` | Cancel (or dismiss) a wake-up |
 
+### Domains and Linear
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `PATCH` | `/api/domains/:slug` | Change a domain; `{"name": "Baskets"}` renames its display name only (the slug never changes) |
+| `GET` | `/api/domains/:slug/linear` | The domain's Linear link (`{link: null}` when none) and the transition rules that apply (`rules.start`, `rules.archive`, each with its `source`: `domain`, `connection` or `settings`). Never returns an API key |
+| `PUT` | `/api/domains/:slug/linear` | Link the domain: `{"connectionId": "...", "teamId": "...", "projectId": "..."}` (`projectId` optional = whole team), optional `autoTransition` / `archiveTransition`: `null` (connection default), `{"enabled": false}` or `{"enabled": true, "stateId": "..."}`. Team, project and states are checked with Linear |
+| `DELETE` | `/api/domains/:slug/linear` | Unlink the domain |
+| `GET` | `/api/linear/teams/:teamId/projects?connectionId=` | Projects of a team (for the link picker) |
+| `GET` | `/api/domains/:slug/linear/board` | The board: `states` (ordered, `hidden` for canceled/duplicate), `issues`, `viewer`, `sessions` (issue id â†’ linked sessions). `?refresh=1` skips the 30 s cache. `404` with `reason: "not_linked"`, `409` with `connection_missing` or `team_missing` |
+| `POST` | `/api/domains/:slug/linear/issues/:issueId/state` | Move an issue: `{"stateId": "..."}` (a state of the linked team) |
+| `POST` | `/api/domains/:slug/linear/issues/:issueId/take` | Assign the issue to the connection's user and, if not started, move it to the team's first started state. Returns the issue, `moved` and `connectionId` |
+
 ### Prompts
 
 | Method | Endpoint | Description |
