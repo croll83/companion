@@ -2916,11 +2916,15 @@ describe("GET /api/linear/project-issues", () => {
         title: "Implement dark mode",
         description: "Add theme support",
         url: "https://linear.app/acme/issue/ENG-42",
+        // Linear's recommended branch and the team id are returned too (the
+        // Home page uses them for the branch and the domain's start rule).
+        branchName: "",
         priorityLabel: "Medium",
         stateName: "In Progress",
         stateType: "started",
         teamName: "Engineering",
         teamKey: "ENG",
+        teamId: "",
         assigneeName: "Ada",
         updatedAt: "2026-02-19T10:00:00Z",
       }],

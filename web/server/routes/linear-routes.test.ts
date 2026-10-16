@@ -985,11 +985,9 @@ describe("GET /api/linear/project-issues", () => {
     const res = await app.request("/api/linear/project-issues?teamId=team-bsk");
     const json = await res.json();
     expect(json.issues[0]).toMatchObject({ identifier: "BSK-9", branchName: "marco/bsk-9", teamId: "team-bsk" });
-    const { variables } = JSON.parse(fetchFn.mock.calls[0][1].body);
-    expect(variables.filter).toEqual({
-      team: { id: { eq: "team-bsk" } },
-      state: { type: { nin: ["completed", "canceled", "cancelled"] } },
-    });
+    const { query, variables } = JSON.parse(fetchFn.mock.calls[0][1].body);
+    expect(variables).toEqual({ teamId: "team-bsk", first: 15 });
+    expect(query).toContain("team: { id: { eq: $teamId } }");
     expect(linearCache.getOrFetch).toHaveBeenCalledWith("test-conn:project-issues:team:team-bsk:15", expect.any(Number), expect.any(Function));
   });
 

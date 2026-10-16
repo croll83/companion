@@ -796,8 +796,7 @@ export function registerLinearRoutes(api: Hono): void {
     const limitRaw = Number(c.req.query("limit") || "15");
     const limit = Math.min(50, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 15));
     // A project, or (for a domain linked to a whole team) a team.
-    const scope = issueScopeFilter(teamId, projectId);
-    if (!scope) return c.json({ error: "projectId is required (or teamId, for a whole team)" }, 400);
+    if (!projectId && !teamId) return c.json({ error: "projectId is required" }, 400);
 
     const connectionId = c.req.query("connectionId") || undefined;
     const resolved = resolveApiKey(connectionId);
@@ -817,9 +816,12 @@ export function registerLinearRoutes(api: Hono): void {
           },
           body: JSON.stringify({
             query: `
-              query CompanionProjectIssues($filter: IssueFilter!, $first: Int!) {
+              query CompanionProjectIssues(${projectId ? "$projectId: ID!" : "$teamId: ID!"}, $first: Int!) {
                 issues(
-                  filter: $filter
+                  filter: {
+                    ${projectId ? "project: { id: { eq: $projectId } }" : "team: { id: { eq: $teamId } }"}
+                    state: { type: { nin: ["completed", "canceled", "cancelled"] } }
+                  }
                   orderBy: updatedAt
                   first: $first
                 ) {
@@ -839,10 +841,7 @@ export function registerLinearRoutes(api: Hono): void {
                 }
               }
             `,
-            variables: {
-              filter: { ...scope, state: { type: { nin: ["completed", "canceled", "cancelled"] } } },
-              first: limit,
-            },
+            variables: projectId ? { projectId, first: limit } : { teamId, first: limit },
           }),
         }).catch((e: unknown) => {
           throw new Error(`Failed to connect to Linear: ${e instanceof Error ? e.message : String(e)}`);
