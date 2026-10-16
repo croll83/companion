@@ -131,6 +131,11 @@ Send `"cron": "0 9 * * 1-5"` instead of `at` for a repeating wake-up. A wake-up 
 
 `POST /api/sessions/:id/message` with `{"content": "..."}` sends a user message into a session. It works for sessions whose CLI is not running: the message is queued and the session is relaunched on its saved conversation, like a wake-up. The response says `"delivery": "sent"` or `"queued"`. Archived sessions answer `409`.
 
+### Domain name, Linear board
+
+- **Rename**: in **Domains** → the domain → **⋯** → **Rename…**, change the name shown in Companion (sidebar, Home page, Domains page). Only the display name changes: the slug (in URLs such as `#/domains/herd`), the folder `~/companion_domain_<slug>/`, its memory and the sessions in it stay as they are. GLOBAL cannot be renamed. The heading of the domain's `CLAUDE.md` is not rewritten: edit it yourself if you want it to match.
+- **Linear**: a domain can be linked to a Linear team or project. It then gets a **Board** tab with the team's issues, a **Take it** action that starts a session in the domain on an issue, and its own status rules for session start and archive. See [Linear Integration](#/docs/guides/linear-integration).
+
 ### Migrating a legacy session into a domain
 
 Sessions started before domains show a yellow **legacy memory** badge in the session panel. They keep spawning as before (their own memory, no domain skills, MCP servers or instructions) until you migrate them, one at a time, with **Migrate to domain** → pick a domain (GLOBAL included) → **Migrate and restart**. The CLI restarts on the same conversation and folder, from then on with the domain's memory, skills, MCP servers and instructions.

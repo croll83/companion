@@ -1182,3 +1182,104 @@ describe("LinearSection", () => {
     });
   });
 });
+
+// ─── Domain scope ───────────────────────────────────────────────────────────
+// A session's domain linked to a Linear team/project: its connection is
+// preselected and, without a repo mapping, its project (or whole team) is the
+// default scope for listing, searching and creating issues.
+describe("LinearSection in a domain linked to Linear", () => {
+  const conn = (id: string, name: string) => ({
+    id, name, apiKeyLast4: "1234", workspaceName: name, workspaceId: `ws-${id}`, viewerName: "U", viewerEmail: "",
+    connected: true, autoTransition: false, autoTransitionStateId: "", autoTransitionStateName: "",
+    archiveTransition: false, archiveTransitionStateId: "", archiveTransitionStateName: "",
+  });
+  const projectLink = {
+    connectionId: "conn-2", teamId: "team-bsk", teamKey: "BSK", projectId: "p-bskts", projectName: "Bskts",
+    connectionName: "Bskts", workspaceName: "bskts",
+  };
+
+  beforeEach(() => {
+    mockListLinearConnections.mockResolvedValue({ connections: [conn("conn-1", "croll83"), conn("conn-2", "bskts")] });
+  });
+
+  function renderSection(props: Partial<Parameters<typeof LinearSection>[0]> = {}) {
+    const onConnectionSelect = vi.fn();
+    const onIssueSelect = vi.fn();
+    render(
+      <LinearSection cwd="" gitRepoInfo={null} linearConfigured selectedLinearIssue={null}
+        onIssueSelect={onIssueSelect} onBranchFromIssue={vi.fn()} onConnectionSelect={onConnectionSelect} {...props} />,
+    );
+    return { onConnectionSelect, onIssueSelect };
+  }
+
+  it("preselects the domain's connection and lists its project's issues", async () => {
+    mockGetLinearProjectIssues.mockResolvedValue({ issues: [sampleIssue] });
+    const { onConnectionSelect } = renderSection({ domainLink: projectLink });
+    await waitFor(() => expect(onConnectionSelect).toHaveBeenCalledWith("conn-2"));
+    expect(await screen.findByText("Bskts")).toBeInTheDocument();
+    expect(screen.getByText("domain")).toBeInTheDocument();
+    expect(mockGetLinearProjectIssues).toHaveBeenCalledWith("p-bskts", 10, "conn-2", undefined);
+    expect(await screen.findByText("Fix bug")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Search Bskts...")).toBeInTheDocument();
+    // No repo here: no "Attach project", and the plain Linear button is replaced.
+    expect(screen.queryByText("Attach project")).toBeNull();
+  });
+
+  it("uses the whole team when the domain has no project", async () => {
+    renderSection({ domainLink: { ...projectLink, projectId: undefined, projectName: undefined } });
+    expect(await screen.findByText("BSK (whole team)")).toBeInTheDocument();
+    await waitFor(() => expect(mockGetLinearProjectIssues).toHaveBeenCalledWith("", 10, "conn-2", "team-bsk"));
+  });
+
+  // 2+ characters search Linear inside the scope, not only the recent list.
+  it("searches inside the domain's scope, and everywhere with 'Search all projects'", async () => {
+    renderSection({ domainLink: projectLink });
+    const input = await screen.findByPlaceholderText("Search Bskts...");
+    fireEvent.change(input, { target: { value: "soak" } });
+    await waitFor(() => expect(mockSearchLinearIssues).toHaveBeenCalledWith("soak", 10, "conn-2", { teamId: "team-bsk", projectId: "p-bskts" }));
+    fireEvent.click(screen.getByLabelText("Search all projects"));
+    await waitFor(() => expect(mockSearchLinearIssues).toHaveBeenCalledWith("soak", 10, "conn-2"));
+  });
+
+  it("shows an error loading the domain's issues", async () => {
+    mockGetLinearProjectIssues.mockRejectedValue(new Error("Unauthorized"));
+    renderSection({ domainLink: projectLink });
+    expect(await screen.findByText("Unauthorized")).toBeInTheDocument();
+  });
+
+  // The repo's own project mapping is more specific than the domain's link.
+  it("lets a repo mapping override the domain scope", async () => {
+    mockGetLinearProjectMapping.mockResolvedValue({ mapping: sampleMapping });
+    renderSection({ domainLink: projectLink, gitRepoInfo: defaultGitRepoInfo, cwd: "/repo" });
+    expect(await screen.findByText("My Project")).toBeInTheDocument();
+    expect(screen.queryByText("domain")).toBeNull();
+  });
+
+  it("ignores a broken link and the domain scope in another workspace", async () => {
+    const { onConnectionSelect } = renderSection({ domainLink: { ...projectLink, broken: "connection_missing" } });
+    await waitFor(() => expect(onConnectionSelect).toHaveBeenCalledWith("conn-1"));
+    expect(screen.queryByText("domain")).toBeNull();
+    fireEvent.change(screen.getByTitle("Select Linear workspace"), { target: { value: "conn-1" } });
+    expect(mockGetLinearProjectIssues).not.toHaveBeenCalled();
+  });
+
+  // Handed over from a domain board: its connection wins; an issue picked
+  // in another workspace is dropped when the connection changes under it.
+  it("preselects a preferred connection and drops an issue of another workspace", async () => {
+    const { onConnectionSelect, onIssueSelect } = renderSection({
+      preferredConnectionId: "conn-2",
+      selectedLinearIssue: { ...sampleIssue, connectionId: "conn-1" },
+    });
+    await waitFor(() => expect(onConnectionSelect).toHaveBeenCalledWith("conn-2"));
+    expect(onIssueSelect).toHaveBeenCalledWith(null);
+  });
+
+  it("refreshes the domain's issues after creating one", async () => {
+    renderSection({ domainLink: projectLink });
+    await screen.findByText("domain");
+    await waitFor(() => expect(mockGetLinearProjectIssues).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByText("Create issue"));
+    fireEvent.click(screen.getByText("mock-create"));
+    await waitFor(() => expect(mockGetLinearProjectIssues).toHaveBeenCalledTimes(2));
+  });
+});

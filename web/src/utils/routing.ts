@@ -9,7 +9,7 @@ export type Route =
   | { page: "integration-linear-oauth" }
   | { page: "prompts" }
   | { page: "environments" }
-  /** The Domains page; with a slug, that domain; with a tab, its MCP / skills / plugins view. */
+  /** The Domains page; with a slug, that domain; with a tab, its MCP / skills / plugins / board / Linear view. */
   | { page: "domains"; slug?: string; tab?: DomainTab }
   /** The Brains page; with a slug, that brain. */
   | { page: "brains"; slug?: string }
@@ -30,11 +30,11 @@ function ensureClipboardFallbackInstalled(): void {
   clipboardFallbackInitialized = true;
 }
 
-/** The views of one domain on the Domains page. */
-export type DomainTab = "mcp" | "skills" | "plugins";
+/** The views of one domain on the Domains page (board = its Linear board, linear = its Linear link). */
+export type DomainTab = "mcp" | "skills" | "plugins" | "board" | "linear";
 
 export function isDomainTab(value: unknown): value is DomainTab {
-  return value === "mcp" || value === "skills" || value === "plugins";
+  return value === "mcp" || value === "skills" || value === "plugins" || value === "board" || value === "linear";
 }
 
 /** Hash of the Domains page, of one domain, or of one of its views. */

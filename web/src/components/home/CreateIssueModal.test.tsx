@@ -168,6 +168,19 @@ describe("CreateIssueModal", () => {
     expect(onCreated).toHaveBeenCalledWith(sampleCreatedIssue.issue);
   });
 
+  // In a domain linked to a team, new issues go to that team by default
+  // (with its backlog state), not to the workspace's first team.
+  it("preselects the domain's team when defaultTeamId is given", async () => {
+    render(<CreateIssueModal onCreated={vi.fn()} onClose={vi.fn()} defaultTeamId="team-2" />);
+    await waitFor(() => expect(screen.getByLabelText("Title *")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Title *"), { target: { value: "Design task" } });
+    fireEvent.click(screen.getByText("Create Issue"));
+    await waitFor(() => expect(mockCreateLinearIssue).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: "team-2",
+      stateId: "state-backlog-2",
+    })));
+  });
+
   it("threads connectionId through all API calls when provided", async () => {
     // Verifies that when a connectionId is passed, it's forwarded to getLinearStates,
     // getLinearConnection, and createLinearIssue so the correct Linear workspace is used.

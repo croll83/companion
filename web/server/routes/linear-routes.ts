@@ -1,9 +1,10 @@
 import type { Hono } from "hono";
-import { getSettings } from "../settings-manager.js";
 import { linearCache } from "../linear-cache.js";
 import * as sessionLinearIssues from "../session-linear-issues.js";
 import * as linearProjectManager from "../linear-project-manager.js";
-import { resolveApiKey, getConnection } from "../linear-connections.js";
+import { resolveApiKey } from "../linear-connections.js";
+import { getDomain } from "../domain-store.js";
+import { resolveTransitionRule } from "../domain-linear.js";
 
 function linearIssueStateCategory(issue: { stateType?: string; stateName?: string }): 0 | 1 | 2 {
   const stateType = (issue.stateType || "").trim().toLowerCase();
@@ -13,6 +14,15 @@ function linearIssueStateCategory(issue: { stateType?: string; stateName?: strin
   if (isDone) return 2;
   if (stateType === "started") return 1;
   return 0;
+}
+
+/** An IssueFilter for a project, else a team; null when neither is given. */
+function issueScopeFilter(teamId?: string, projectId?: string): Record<string, unknown> | null {
+  const project = (projectId || "").trim();
+  const team = (teamId || "").trim();
+  if (project) return { project: { id: { eq: project } } };
+  if (team) return { team: { id: { eq: team } } };
+  return null;
 }
 
 /**
@@ -97,6 +107,8 @@ export interface LinearTeamState {
   id: string;
   name: string;
   type: string;
+  /** Order of the state inside its type, as in Linear's own board. */
+  position?: number;
 }
 
 export interface LinearTeam {
@@ -133,6 +145,7 @@ export async function fetchLinearTeamStates(linearApiKey: string, cachePrefix?: 
                       id
                       name
                       type
+                      position
                     }
                   }
                 }
@@ -154,6 +167,7 @@ export async function fetchLinearTeamStates(linearApiKey: string, cachePrefix?: 
                   id?: string;
                   name?: string | null;
                   type?: string | null;
+                  position?: number | null;
                 }>;
               };
             }>;
@@ -175,6 +189,7 @@ export async function fetchLinearTeamStates(linearApiKey: string, cachePrefix?: 
           id: state.id || "",
           name: state.name || "",
           type: state.type || "",
+          ...(typeof state.position === "number" ? { position: state.position } : {}),
         })),
       }));
     });
@@ -196,9 +211,11 @@ export function registerLinearRoutes(api: Hono): void {
       return c.json({ error: "No Linear connection configured" }, 400);
     }
     const { apiKey: linearApiKey, connectionId: resolvedId } = resolved;
+    // Optional scope (a linked domain's team/project on the Home page).
+    const filter = issueScopeFilter(c.req.query("teamId"), c.req.query("projectId"));
 
     try {
-      const cacheKey = `${resolvedId}:search:${query}:${limit}`;
+      const cacheKey = `${resolvedId}:search:${query}:${limit}${filter ? `:${JSON.stringify(filter)}` : ""}`;
       const issues = await linearCache.getOrFetch(cacheKey, 30_000, async () => {
         const response = await fetch("https://api.linear.app/graphql", {
           method: "POST",
@@ -208,8 +225,8 @@ export function registerLinearRoutes(api: Hono): void {
           },
           body: JSON.stringify({
             query: `
-              query CompanionIssueSearch($term: String!, $first: Int!) {
-                searchIssues(term: $term, first: $first) {
+              query CompanionIssueSearch($term: String!, $first: Int!${filter ? ", $filter: IssueFilter" : ""}) {
+                searchIssues(term: $term, first: $first${filter ? ", filter: $filter" : ""}) {
                   nodes {
                     id
                     identifier
@@ -224,7 +241,7 @@ export function registerLinearRoutes(api: Hono): void {
                 }
               }
             `,
-            variables: { term: query, first: limit },
+            variables: { term: query, first: limit, ...(filter ? { filter } : {}) },
           }),
         }).catch((e: unknown) => {
           throw new Error(`Failed to connect to Linear: ${e instanceof Error ? e.message : String(e)}`);
@@ -775,9 +792,11 @@ export function registerLinearRoutes(api: Hono): void {
 
   api.get("/linear/project-issues", async (c) => {
     const projectId = (c.req.query("projectId") || "").trim();
+    const teamId = (c.req.query("teamId") || "").trim();
     const limitRaw = Number(c.req.query("limit") || "15");
     const limit = Math.min(50, Math.max(1, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 15));
-    if (!projectId) return c.json({ error: "projectId is required" }, 400);
+    // A project, or (for a domain linked to a whole team) a team.
+    if (!projectId && !teamId) return c.json({ error: "projectId is required" }, 400);
 
     const connectionId = c.req.query("connectionId") || undefined;
     const resolved = resolveApiKey(connectionId);
@@ -787,7 +806,7 @@ export function registerLinearRoutes(api: Hono): void {
     const { apiKey: linearApiKey, connectionId: resolvedId } = resolved;
 
     try {
-      const cacheKey = `${resolvedId}:project-issues:${projectId}:${limit}`;
+      const cacheKey = `${resolvedId}:project-issues:${projectId || `team:${teamId}`}:${limit}`;
       const issues = await linearCache.getOrFetch(cacheKey, 60_000, async () => {
         const response = await fetch("https://api.linear.app/graphql", {
           method: "POST",
@@ -797,11 +816,11 @@ export function registerLinearRoutes(api: Hono): void {
           },
           body: JSON.stringify({
             query: `
-              query CompanionProjectIssues($projectId: ID!, $first: Int!) {
+              query CompanionProjectIssues(${projectId ? "$projectId: ID!" : "$teamId: ID!"}, $first: Int!) {
                 issues(
                   filter: {
-                    project: { id: { eq: $projectId } }
-                    state: { type: { nin: ["completed", "cancelled"] } }
+                    ${projectId ? "project: { id: { eq: $projectId } }" : "team: { id: { eq: $teamId } }"}
+                    state: { type: { nin: ["completed", "canceled", "cancelled"] } }
                   }
                   orderBy: updatedAt
                   first: $first
@@ -812,16 +831,17 @@ export function registerLinearRoutes(api: Hono): void {
                     title
                     description
                     url
+                    branchName
                     priorityLabel
                     state { name type }
-                    team { key name }
+                    team { id key name }
                     assignee { name }
                     updatedAt
                   }
                 }
               }
             `,
-            variables: { projectId, first: limit },
+            variables: projectId ? { projectId, first: limit } : { teamId, first: limit },
           }),
         }).catch((e: unknown) => {
           throw new Error(`Failed to connect to Linear: ${e instanceof Error ? e.message : String(e)}`);
@@ -836,9 +856,10 @@ export function registerLinearRoutes(api: Hono): void {
                 title: string;
                 description?: string | null;
                 url: string;
+                branchName?: string | null;
                 priorityLabel?: string | null;
                 state?: { name?: string | null; type?: string | null } | null;
-                team?: { key?: string | null; name?: string | null } | null;
+                team?: { id?: string | null; key?: string | null; name?: string | null } | null;
                 assignee?: { name?: string | null } | null;
                 updatedAt?: string | null;
               }>;
@@ -858,11 +879,13 @@ export function registerLinearRoutes(api: Hono): void {
           title: issue.title,
           description: issue.description || "",
           url: issue.url,
+          branchName: issue.branchName || "",
           priorityLabel: issue.priorityLabel || "",
           stateName: issue.state?.name || "",
           stateType: issue.state?.type || "",
           teamName: issue.team?.name || "",
           teamKey: issue.team?.key || "",
+          teamId: issue.team?.id || "",
           assigneeName: issue.assignee?.name || "",
           updatedAt: issue.updatedAt || "",
         }))
@@ -924,16 +947,20 @@ export function registerLinearRoutes(api: Hono): void {
     }
     const { apiKey: linearApiKey, connectionId: resolvedConnId } = resolved;
 
-    // Check auto-transition setting: prefer connection-level, fall back to global settings
-    const conn = resolvedConnId !== "legacy" ? getConnection(resolvedConnId) : null;
-    const autoTransitionEnabled = conn ? conn.autoTransition : getSettings().linearAutoTransition;
-    const autoTransitionStateId = conn ? conn.autoTransitionStateId : getSettings().linearAutoTransitionStateId;
+    // The session's domain rule when it has one for this team, else the
+    // connection's setting, else the legacy global settings (domain-linear.ts).
+    const domainSlug = c.req.query("domain") || "";
+    const rule = resolveTransitionRule("start", {
+      link: domainSlug ? getDomain(domainSlug)?.linear : undefined,
+      connectionId: resolvedConnId,
+      teamId: c.req.query("teamId") || undefined,
+    });
 
-    if (!autoTransitionEnabled) {
+    if (!rule.enabled) {
       return c.json({ ok: true, skipped: true, reason: "auto_transition_disabled" });
     }
 
-    const stateId = autoTransitionStateId.trim();
+    const stateId = rule.stateId;
     if (!stateId) {
       return c.json({ ok: true, skipped: true, reason: "no_target_state_configured" });
     }

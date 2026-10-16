@@ -507,6 +507,12 @@ export function LinearSettingsPage({ embedded = false }: LinearSettingsPageProps
                   {/* Expanded edit panel for per-connection settings */}
                   {editState?.connectionId === conn.id && (
                     <div className="border-t border-cc-border p-4 space-y-5 bg-cc-bg/50">
+                      {/* Since rules are per domain, these are the connection's defaults */}
+                      <p className="text-xs text-cc-muted">
+                        Defaults for the domains linked to this workspace that have no rule of their own (and for sessions in
+                        unlinked domains). A domain can choose its own target states in{" "}
+                        <a href="#/domains" className="text-cc-primary hover:underline">Domains</a> → Linear.
+                      </p>
                       {/* Auto-transition settings */}
                       <div className="space-y-3">
                         <h3 className="text-sm font-semibold text-cc-fg">Auto-transition</h3>
@@ -518,6 +524,7 @@ export function LinearSettingsPage({ embedded = false }: LinearSettingsPageProps
                           <button
                             type="button"
                             role="switch"
+                            aria-label="Auto-transition on session start"
                             aria-checked={editState.autoTransition}
                             onClick={() =>
                               setEditState((prev) => prev ? { ...prev, autoTransition: !prev.autoTransition } : prev)
@@ -616,6 +623,7 @@ export function LinearSettingsPage({ embedded = false }: LinearSettingsPageProps
                           <button
                             type="button"
                             role="switch"
+                            aria-label="Transition on session archive"
                             aria-checked={editState.archiveTransition}
                             onClick={() =>
                               setEditState((prev) => prev ? { ...prev, archiveTransition: !prev.archiveTransition } : prev)

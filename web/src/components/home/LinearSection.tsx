@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, type LinearIssue, type LinearProject, type LinearProjectMapping, type GitRepoInfo, type LinearConnectionSummary } from "../../api.js";
+import { api, type DomainLinearView, type LinearIssue, type LinearProject, type LinearProjectMapping, type GitRepoInfo, type LinearConnectionSummary } from "../../api.js";
 import { resolveLinearBranch } from "../../utils/linear-branch.js";
 import { LinearLogo } from "../LinearLogo.js";
 import { CreateIssueModal } from "./CreateIssueModal.js";
@@ -14,6 +14,14 @@ interface LinearSectionProps {
   onBranchFromIssue: (branch: string, isNew: boolean) => void;
   /** Called when a Linear connection is selected (or auto-selected) */
   onConnectionSelect: (connectionId: string | null) => void;
+  /**
+   * The Linear link of the domain the session will run in: its connection
+   * is preselected, and without a repo ↔ project mapping its project (or
+   * team) is the default scope for listing, searching and creating issues.
+   */
+  domainLink?: DomainLinearView | null;
+  /** Connection to preselect (an issue handed over from a domain board). */
+  preferredConnectionId?: string;
 }
 
 export function LinearSection({
@@ -24,6 +32,8 @@ export function LinearSection({
   onIssueSelect,
   onBranchFromIssue,
   onConnectionSelect,
+  domainLink,
+  preferredConnectionId,
 }: LinearSectionProps) {
   // Linear connection selector state
   const [connections, setConnections] = useState<LinearConnectionSummary[]>([]);
@@ -52,6 +62,17 @@ export function LinearSection({
   const [globalSearching, setGlobalSearching] = useState(false);
   const [showCreateIssueModal, setShowCreateIssueModal] = useState(false);
 
+  // Domain scope (the session's domain is linked to a team/project). Kept
+  // apart from the repo mapping's state so their async loads never mix.
+  const [domainIssues, setDomainIssues] = useState<LinearIssue[]>([]);
+  const [domainIssuesLoading, setDomainIssuesLoading] = useState(false);
+  const [domainIssuesError, setDomainIssuesError] = useState("");
+  const [domainReload, setDomainReload] = useState(0);
+  // Connection an issue was picked with (search results carry none).
+  const issueConnectionRef = useRef<string | null>(null);
+  const selectedIssueRef = useRef(selectedLinearIssue);
+  selectedIssueRef.current = selectedLinearIssue;
+
   const linearDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close dropdowns on outside click
@@ -65,6 +86,12 @@ export function LinearSection({
     document.addEventListener("pointerdown", handleClick);
     return () => document.removeEventListener("pointerdown", handleClick);
   }, []);
+
+  const domainUsable = domainLink && !domainLink.broken ? domainLink : null;
+  const preferred = domainUsable?.connectionId || preferredConnectionId || "";
+  // The domain's scope applies in its own workspace, when no repo mapping overrides it.
+  const domainScope = !linearMapping && domainUsable && selectedConnectionId === domainUsable.connectionId ? domainUsable : null;
+  const domainScopeKey = domainScope ? `${domainScope.connectionId}|${domainScope.teamId}|${domainScope.projectId ?? ""}` : "";
 
   // Fetch Linear connections on mount (when configured)
   useEffect(() => {
@@ -83,9 +110,14 @@ export function LinearSection({
         setConnections(conns);
         setConnectionsLoaded(true);
         if (conns.length > 0) {
-          // Auto-select first connection
-          setSelectedConnectionId(conns[0].id);
-          onConnectionSelect(conns[0].id);
+          // The domain's (or handed-over issue's) connection, else the first.
+          const chosen = conns.find((c) => c.id === preferred) ?? conns[0];
+          setSelectedConnectionId(chosen.id);
+          onConnectionSelect(chosen.id);
+          // An issue picked in another workspace cannot stay selected.
+          const issue = selectedIssueRef.current;
+          const issueConn = issue ? issue.connectionId ?? issueConnectionRef.current : null;
+          if (issueConn && issueConn !== chosen.id) onIssueSelect(null);
         } else {
           setSelectedConnectionId(null);
           onConnectionSelect(null);
@@ -98,7 +130,7 @@ export function LinearSection({
 
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linearConfigured]);
+  }, [linearConfigured, preferred]);
 
   // Handle connection change: clear state and re-fetch
   const handleConnectionChange = useCallback((connectionId: string) => {
@@ -167,6 +199,24 @@ export function LinearSection({
     return () => { active = false; };
   }, [gitRepoInfo, linearConfigured, selectedConnectionId]);
 
+  // Recent open issues of the domain's project (or whole team).
+  useEffect(() => {
+    if (!linearConfigured || !domainScope) {
+      setDomainIssues([]);
+      setDomainIssuesError("");
+      return;
+    }
+    let active = true;
+    setDomainIssuesLoading(true);
+    setDomainIssuesError("");
+    api.getLinearProjectIssues(domainScope.projectId ?? "", 10, domainScope.connectionId, domainScope.projectId ? undefined : domainScope.teamId)
+      .then(({ issues }) => { if (active) setDomainIssues(issues); })
+      .catch((e: unknown) => { if (active) setDomainIssuesError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (active) setDomainIssuesLoading(false); });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linearConfigured, domainScopeKey, domainReload]);
+
   // Linear issue search effect
   useEffect(() => {
     if (!linearConfigured) return;
@@ -201,9 +251,14 @@ export function LinearSection({
     };
   }, [linearConfigured, linearQuery, selectedConnectionId]);
 
-  // Global search effect — triggers when "Search all projects" is enabled and projectSearchQuery has 2+ chars
+  // Searching inside the domain's scope (2+ chars, "Search all projects" off).
+  const scopedSearch = !!domainScope && !searchAllProjects;
+  const scopedSearchKey = scopedSearch ? domainScopeKey : "";
+
+  // Global search effect — triggers when "Search all projects" is enabled (or
+  // inside a domain's scope) and projectSearchQuery has 2+ chars
   useEffect(() => {
-    if (!linearConfigured || !searchAllProjects) {
+    if (!linearConfigured || (!searchAllProjects && !scopedSearch)) {
       setGlobalSearchResults([]);
       setGlobalSearching(false);
       return;
@@ -218,7 +273,10 @@ export function LinearSection({
     let active = true;
     setGlobalSearching(true);
     const timer = setTimeout(() => {
-      api.searchLinearIssues(query, 10, selectedConnectionId ?? undefined).then((res) => {
+      const search = scopedSearch && domainScope
+        ? api.searchLinearIssues(query, 10, selectedConnectionId ?? undefined, { teamId: domainScope.teamId, projectId: domainScope.projectId })
+        : api.searchLinearIssues(query, 10, selectedConnectionId ?? undefined);
+      search.then((res) => {
         if (!active) return;
         setGlobalSearchResults(res.issues);
       }).catch(() => {
@@ -234,9 +292,11 @@ export function LinearSection({
       active = false;
       clearTimeout(timer);
     };
-  }, [linearConfigured, searchAllProjects, projectSearchQuery, selectedConnectionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linearConfigured, searchAllProjects, projectSearchQuery, selectedConnectionId, scopedSearchKey]);
 
   function handleSelectLinearIssue(issue: LinearIssue, closeDropdown = false) {
+    issueConnectionRef.current = selectedConnectionId;
     onIssueSelect(issue);
     setLinearQuery(`${issue.identifier} - ${issue.title}`);
     const branch = resolveLinearBranch(issue);
@@ -305,6 +365,7 @@ export function LinearSection({
   function handleIssueCreated(issue: LinearIssue) {
     setShowCreateIssueModal(false);
     handleSelectLinearIssue(issue);
+    if (domainScope) setDomainReload((n) => n + 1);
     // Refresh the recent issues list if a project is attached
     if (linearMapping) {
       setRecentIssuesLoading(true);
@@ -342,8 +403,26 @@ export function LinearSection({
             </select>
           )}
 
-          {/* When a project is attached, show project badge */}
-          {linearMapping ? (
+          {/* When a project is attached (to the repo, or through the domain), show its badge */}
+          {domainScope ? (
+            <>
+              <div
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-cc-primary/35 bg-cc-primary/10 text-cc-primary"
+                title="Linked to the session's domain (Domains → Linear)"
+              >
+                <LinearLogo className="w-3.5 h-3.5" />
+                <span>{domainScope.projectName ?? `${domainScope.teamKey ?? "Team"} (whole team)`}</span>
+                <span className="text-[10px] text-cc-muted">domain</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreateIssueModal(true)}
+                className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] border border-dashed border-cc-border text-cc-muted hover:text-cc-fg hover:border-cc-primary/40 transition-colors cursor-pointer"
+              >
+                <span>Create issue</span>
+              </button>
+            </>
+          ) : linearMapping ? (
             <>
               <div className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-cc-primary/35 bg-cc-primary/10 text-cc-primary">
                 <LinearLogo className="w-3.5 h-3.5" />
@@ -432,15 +511,20 @@ export function LinearSection({
           )}
         </div>
 
-        {/* Issue browser with inline search (when project is attached) */}
-        {linearMapping && (() => {
+        {/* Issue browser with inline search (when a project is attached, or the domain is linked) */}
+        {(linearMapping || domainScope) && (() => {
           const query = projectSearchQuery.trim().toLowerCase();
-          const filteredIssues = !searchAllProjects && query
-            ? recentIssues.filter((i) =>
+          const recent = linearMapping ? recentIssues : domainIssues;
+          const issuesLoading = linearMapping ? recentIssuesLoading : domainIssuesLoading;
+          const issuesError = linearMapping ? recentIssuesError : domainIssuesError;
+          // In a domain's scope, 2+ characters search Linear (not just the recent list).
+          const scopedSearching = scopedSearch && query.length >= 2;
+          const filteredIssues = !searchAllProjects && query && !scopedSearching
+            ? recent.filter((i) =>
                 i.identifier.toLowerCase().includes(query) ||
                 i.title.toLowerCase().includes(query))
-            : searchAllProjects ? [] : recentIssues;
-          const displayIssues = searchAllProjects ? globalSearchResults : filteredIssues;
+            : searchAllProjects ? [] : recent;
+          const displayIssues = searchAllProjects || scopedSearching ? globalSearchResults : filteredIssues;
 
           return (
             <div className="mt-2">
@@ -468,15 +552,15 @@ export function LinearSection({
                 type="text"
                 value={projectSearchQuery}
                 onChange={(e) => setProjectSearchQuery(e.target.value)}
-                placeholder={searchAllProjects ? "Search all projects..." : "Filter issues..."}
+                placeholder={searchAllProjects ? "Search all projects..." : domainScope ? `Search ${domainScope.projectName ?? domainScope.teamKey ?? "the team"}...` : "Filter issues..."}
                 className="w-full px-2 py-1.5 text-xs bg-cc-input-bg border border-cc-border rounded-md text-cc-fg placeholder:text-cc-muted focus:outline-none focus:border-cc-primary/60"
               />
 
               {/* Issue list */}
-              {recentIssuesLoading ? (
+              {issuesLoading ? (
                 <div className="px-1 py-1.5 text-xs text-cc-muted">Loading recent issues...</div>
-              ) : recentIssuesError ? (
-                <div className="px-1 py-1.5 text-xs text-cc-error">{recentIssuesError}</div>
+              ) : issuesError ? (
+                <div className="px-1 py-1.5 text-xs text-cc-error">{issuesError}</div>
               ) : globalSearching ? (
                 <div className="px-1 py-1.5 text-xs text-cc-muted">Searching...</div>
               ) : searchAllProjects && query.length < 2 ? (
@@ -674,7 +758,8 @@ export function LinearSection({
 
       {showCreateIssueModal && (
         <CreateIssueModal
-          defaultProjectId={linearMapping?.projectId}
+          defaultProjectId={linearMapping?.projectId ?? domainScope?.projectId}
+          defaultTeamId={linearMapping ? undefined : domainScope?.teamId}
           connectionId={selectedConnectionId ?? undefined}
           onCreated={handleIssueCreated}
           onClose={() => setShowCreateIssueModal(false)}

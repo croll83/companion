@@ -77,6 +77,7 @@ export function DomainsPage({ slug, tab }: { slug?: string; tab?: DomainTab } = 
     }),
     onEdit: (s, file) => setEditing({ slug: s, file, name: data?.domains.find((d) => d.slug === s)?.name ?? s }),
     onRefreshAccount: refreshAccount,
+    onReload: reload,
   };
 
   // Desktop always shows a domain (GLOBAL when none is chosen); phones show the list until one is.

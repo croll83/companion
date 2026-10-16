@@ -19,7 +19,7 @@ vi.mock("../paths.js", () => ({
 
 import { registerDomainRoutes } from "./domain-routes.js";
 import type { AccountMcpList } from "../account-mcp.js";
-import { domainDir, getDomain } from "../domain-store.js";
+import { domainDir, getDomain, setDomainLinear } from "../domain-store.js";
 
 let tmp: string;
 let sessions: { domain?: string; archived?: boolean }[];
@@ -116,6 +116,27 @@ describe("POST/PATCH/DELETE /domains", () => {
     expect(one.skillStates["design:adapt"]).toEqual({ on: false, own: false });
     expect((await app.request("/domains/herd", patch({ chrome: "yes" }))).status).toBe(400);
     expect((await app.request("/domains/nope", patch({}))).status).toBe(404);
+  });
+
+  // Rename = display name only: the slug (and so the folder, memory and URL) never changes.
+  it("renames a domain's display name, keeping its slug and folder", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    const res = await app.request("/domains/herd", patch({ name: "  Baskets " }));
+    expect(await res.json()).toMatchObject({ slug: "herd", name: "Baskets", path: domainDir("herd") });
+    expect((await app.request("/domains/herd", patch({ name: " " }))).status).toBe(400);
+    expect(getDomain("herd")?.name).toBe("Baskets");
+  });
+
+  // The Linear link is listed with ids and names only (the key stays in
+  // linear-connections.json), and PATCH cannot set it without validation.
+  it("lists a domain's Linear link without any key, and ignores it in PATCH", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    setDomainLinear("herd", { connectionId: "conn-bskts", teamId: "team-bsk", teamKey: "BSK", projectId: "p1", projectName: "Bskts" });
+    await app.request("/domains/herd", patch({ linear: { connectionId: "evil", teamId: "x" } }));
+    const text = await (await app.request("/domains")).text();
+    expect(text).not.toMatch(/apiKey|lin_api_/);
+    const herd = JSON.parse(text).domains.find((d: { slug: string }) => d.slug === "herd");
+    expect(herd.linear).toEqual({ connectionId: "conn-bskts", teamId: "team-bsk", teamKey: "BSK", projectId: "p1", projectName: "Bskts" });
   });
 
   // Never deletes files; refused while any session (archived too) uses it.

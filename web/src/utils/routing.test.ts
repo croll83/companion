@@ -172,6 +172,10 @@ describe("domain routes", () => {
     expect(domainsHash("herd")).toBe("#/domains/herd");
     expect(domainsHash("my d", "plugins")).toBe("#/domains/my%20d/plugins");
     expect(isDomainTab("mcp")).toBe(true);
+    // The Linear board and link of a domain are tabs too (#/domains/<slug>/board).
+    expect(isDomainTab("board")).toBe(true);
+    expect(isDomainTab("linear")).toBe(true);
+    expect(parseHash("#/domains/herd/board")).toEqual({ page: "domains", slug: "herd", tab: "board" });
     expect(isDomainTab("files")).toBe(false);
   });
 });

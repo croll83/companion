@@ -28,6 +28,7 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     listLinearConnections: vi.fn(),
     listDomains: vi.fn(),
     createDomain: vi.fn(),
+    getDomainLinear: vi.fn(),
   },
   createSessionStreamMock: vi.fn(),
   mockStoreState: {
@@ -167,6 +168,7 @@ describe("HomePage", () => {
     mockApi.gitFetch.mockResolvedValue({ ok: true });
     mockApi.listPrompts.mockResolvedValue([]);
     mockApi.listLinearConnections.mockResolvedValue({ connections: [] });
+    mockApi.getDomainLinear.mockResolvedValue({ link: null });
   });
 
   it("auto-sets branch from selected mapped Linear issue", async () => {
@@ -1565,5 +1567,89 @@ describe("HomePage domains", () => {
         expect.any(Function),
       );
     });
+  });
+});
+
+// "Take it" on a domain board hands the issue to the Home page, which starts
+// the session through its usual flow: in the board's domain, linked to the
+// issue, its start transition following the domain's rule. Same for Claude
+// Code and Codex (nothing here depends on the backend).
+describe("HomePage with a Linear-linked domain", () => {
+  const issue = {
+    id: "i1", identifier: "BSK-1", title: "Soak the release", description: "Steps", url: "https://linear.app/bskts/issue/BSK-1",
+    branchName: "marco/bsk-1-soak", priorityLabel: "High", stateName: "In Progress", stateType: "started",
+    teamName: "Bskts", teamKey: "BSK", teamId: "team-bsk", connectionId: "conn-bskts",
+  };
+  const conn = (id: string) => ({ id, name: id, apiKeyLast4: "1234", workspaceName: id, workspaceId: id, viewerName: "", viewerEmail: "", connected: true });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    sessionStorage.clear();
+    mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
+    mockApi.listEnvs.mockResolvedValue([]);
+    mockApi.getBackends.mockResolvedValue([{ id: "claude", name: "Claude", available: true }]);
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true });
+    mockApi.listSessions.mockResolvedValue([]);
+    mockApi.discoverClaudeSessions.mockResolvedValue({ sessions: [] });
+    mockApi.listPrompts.mockResolvedValue([]);
+    mockApi.getLinearProjectIssues.mockResolvedValue({ issues: [] });
+    mockApi.searchLinearIssues.mockResolvedValue({ issues: [] });
+    mockApi.listLinearConnections.mockResolvedValue({ connections: [conn("conn-croll83"), conn("conn-bskts")] });
+    mockApi.getDomainLinear.mockImplementation(async (slug: string) => ({
+      link: slug === "herd"
+        ? { connectionId: "conn-bskts", teamId: "team-bsk", teamKey: "BSK", projectId: "p-bskts", projectName: "Bskts", connectionName: "Bskts", workspaceName: "bskts" }
+        : null,
+    }));
+    mockApi.linkLinearIssue.mockResolvedValue({ ok: true });
+    mockApi.transitionLinearIssue.mockResolvedValue({ ok: true, skipped: false });
+    mockApi.listDomains.mockResolvedValue({
+      root: "/home/ubuntu",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/ubuntu/companion_domain_global" },
+        { slug: "herd", name: "Baskets", path: "/home/ubuntu/companion_domain_herd" },
+      ],
+    });
+    createSessionStreamMock.mockResolvedValue({ sessionId: "taken-session", state: "starting", cwd: "/home/ubuntu/companion_domain_herd/x" });
+  });
+
+  it("starts a session in the board's domain, linked to the taken issue", async () => {
+    sessionStorage.setItem("cc-linear-handoff", JSON.stringify({ domain: "herd", connectionId: "conn-bskts", issue }));
+    render(<HomePage />);
+    const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    expect(textarea).toHaveValue("Work on BSK-1: Soak the release");
+    expect(window.localStorage.getItem("cc-domain")).toBe("herd");
+    await waitFor(() => expect(mockApi.getDomainLinear).toHaveBeenCalledWith("herd"));
+    // Read once: a reload does not start a second session for the same issue.
+    expect(sessionStorage.getItem("cc-linear-handoff")).toBeNull();
+    // The domain's project is the picker's scope.
+    expect(await screen.findByText("domain")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        domain: "herd",
+        linearConnectionId: "conn-bskts",
+        linearIssue: expect.objectContaining({ identifier: "BSK-1" }),
+      }),
+      expect.any(Function),
+    ));
+    await waitFor(() => expect(mockApi.linkLinearIssue).toHaveBeenCalledWith("taken-session", issue, "conn-bskts"));
+    expect(mockApi.transitionLinearIssue).toHaveBeenCalledWith("i1", "conn-bskts", { domain: "herd", teamId: "team-bsk" });
+  });
+
+  it("asks for the chosen domain's Linear link, and none without Linear", async () => {
+    window.localStorage.setItem("cc-domain", "global");
+    const { unmount } = render(<HomePage />);
+    await waitFor(() => expect(mockApi.getDomainLinear).toHaveBeenCalledWith("global"));
+    expect(screen.queryByText("domain")).toBeNull();
+    unmount();
+    vi.clearAllMocks();
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: false });
+    render(<HomePage />);
+    await screen.findByRole("radio", { name: "New folder in this domain" });
+    expect(mockApi.getDomainLinear).not.toHaveBeenCalled();
   });
 });

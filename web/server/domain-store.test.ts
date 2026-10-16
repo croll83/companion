@@ -40,6 +40,9 @@ import {
   updateDomain,
   effectiveBrainSlug,
   updateDomainsAtomically,
+  setDomainLinear,
+  clearLinearConnectionFromDomains,
+  readLinearLink,
 } from "./domain-store.js";
 
 let tmp: string;
@@ -457,5 +460,79 @@ describe("brain choice", () => {
     expect(written.map((d) => d.brain)).toEqual([undefined, "jarvis"]);
     expect(getDomain("herd")?.brain).toBe("jarvis");
     expect(getDomain(GLOBAL_DOMAIN)).not.toHaveProperty("brain");
+  });
+});
+
+describe("Linear link", () => {
+  // The link keeps ids and display names only, and survives the registry's
+  // normalization (every read re-normalizes the file).
+  it("sets, reads back and clears a domain's link (GLOBAL too)", () => {
+    ensureGlobalDomain();
+    createDomain({ name: "Herd" });
+    const res = setDomainLinear("herd", {
+      connectionId: "conn-bskts",
+      teamId: "team-bsk",
+      teamKey: "BSK",
+      projectId: "p1",
+      projectName: "Bskts",
+      autoTransition: { enabled: true, stateId: "st-progress", stateName: "In Progress" },
+    });
+    expect(res.ok).toBe(true);
+    expect(getDomain("herd")?.linear).toEqual({
+      connectionId: "conn-bskts",
+      teamId: "team-bsk",
+      teamKey: "BSK",
+      projectId: "p1",
+      projectName: "Bskts",
+      autoTransition: { enabled: true, stateId: "st-progress", stateName: "In Progress" },
+    });
+    expect(setDomainLinear(GLOBAL_DOMAIN, { connectionId: "c", teamId: "t" }).ok).toBe(true);
+    expect(getDomain(GLOBAL_DOMAIN)?.linear).toEqual({ connectionId: "c", teamId: "t" });
+    expect(setDomainLinear("herd", null).ok).toBe(true);
+    expect(getDomain("herd")?.linear).toBeUndefined();
+  });
+
+  it("refuses unknown domains and links without connection or team", () => {
+    expect(setDomainLinear("nope", { connectionId: "c", teamId: "t" })).toMatchObject({ ok: false, status: 404 });
+    createDomain({ name: "Herd" });
+    expect(setDomainLinear("herd", { connectionId: "c", teamId: " " })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  // A hand-edited registry must not produce a half link or a rule without state.
+  it("drops malformed links and rules when reading", () => {
+    expect(readLinearLink(undefined)).toEqual({});
+    expect(readLinearLink({ connectionId: "c" })).toEqual({});
+    expect(readLinearLink({
+      connectionId: " c ",
+      teamId: "t",
+      projectName: "orphan name",
+      autoTransition: { enabled: true, stateId: "" },
+      archiveTransition: { enabled: false, stateId: "ignored", stateName: "x" },
+    })).toEqual({ linear: { connectionId: "c", teamId: "t", archiveTransition: { enabled: false, stateId: "", stateName: "" } } });
+    expect(readLinearLink({ connectionId: "c", teamId: "t", autoTransition: "yes" })).toEqual({ linear: { connectionId: "c", teamId: "t" } });
+  });
+
+  // Deleting a connection unlinks exactly the domains that used it.
+  it("clears the link of every domain on a deleted connection", () => {
+    ensureGlobalDomain();
+    createDomain({ name: "Herd" });
+    createDomain({ name: "Jarvis" });
+    setDomainLinear("herd", { connectionId: "conn-bskts", teamId: "team-bsk" });
+    setDomainLinear(GLOBAL_DOMAIN, { connectionId: "conn-bskts", teamId: "team-bsk" });
+    setDomainLinear("jarvis", { connectionId: "conn-croll83", teamId: "team-cro" });
+    expect(clearLinearConnectionFromDomains("conn-bskts").sort()).toEqual(["global", "herd"]);
+    expect(getDomain("herd")?.linear).toBeUndefined();
+    expect(getDomain("jarvis")?.linear?.teamId).toBe("team-cro");
+    expect(clearLinearConnectionFromDomains("conn-bskts")).toEqual([]);
+  });
+
+  // Renaming changes the display name only: slug, folder and link stay.
+  it("renames a domain without touching its slug, folder or link", () => {
+    createDomain({ name: "Herd" });
+    setDomainLinear("herd", { connectionId: "conn-bskts", teamId: "team-bsk" });
+    const res = updateDomain("herd", { name: "Baskets" });
+    expect(res.ok && res.domain).toMatchObject({ slug: "herd", name: "Baskets", linear: { teamId: "team-bsk" } });
+    expect(existsSync(domainDir("herd"))).toBe(true);
+    expect(getDomain("herd")?.name).toBe("Baskets");
   });
 });

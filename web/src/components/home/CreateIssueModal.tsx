@@ -5,6 +5,8 @@ import { api, type LinearIssue, type LinearTeamStates } from "../../api.js";
 interface CreateIssueModalProps {
   /** Pre-selected project ID from the linearMapping, if available */
   defaultProjectId?: string;
+  /** Team to preselect (the session domain's linked team), else the first one */
+  defaultTeamId?: string;
   /** Which Linear connection to use (for multi-connection support) */
   connectionId?: string;
   /** Called on successful creation with the new issue */
@@ -13,7 +15,7 @@ interface CreateIssueModalProps {
   onClose: () => void;
 }
 
-export function CreateIssueModal({ defaultProjectId, connectionId, onCreated, onClose }: CreateIssueModalProps) {
+export function CreateIssueModal({ defaultProjectId, defaultTeamId, connectionId, onCreated, onClose }: CreateIssueModalProps) {
   // Form fields
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -41,7 +43,7 @@ export function CreateIssueModal({ defaultProjectId, connectionId, onCreated, on
       if (!active) return;
       setTeams(statesRes.teams);
       setViewerId(connRes.viewerId);
-      const initialTeamId = statesRes.teams[0]?.id || "";
+      const initialTeamId = statesRes.teams.find((t) => t.id === defaultTeamId)?.id || statesRes.teams[0]?.id || "";
       setSelectedTeamId(initialTeamId);
     }).catch((e: unknown) => {
       if (!active) return;
@@ -50,6 +52,7 @@ export function CreateIssueModal({ defaultProjectId, connectionId, onCreated, on
       if (active) setLoading(false);
     });
     return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionId]);
 
   // Derive backlog state ID when team changes

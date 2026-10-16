@@ -171,6 +171,14 @@ vi.mock("./linear-connections.js", () => ({
   _resetForTest: vi.fn(),
 }));
 
+// Domain links (Linear rules per domain): the real store, except getDomain,
+// which archive-info tests stub so nothing reads the real domains.json.
+const mockGetDomain = vi.hoisted(() => vi.fn((_slug: string): unknown => undefined));
+vi.mock("./domain-store.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./domain-store.js")>()),
+  getDomain: (slug: string) => mockGetDomain(slug),
+}));
+
 vi.mock("./codex-auth-check.js", () => ({
   hasCodexAuth: vi.fn(() => false),
 }));
@@ -1087,6 +1095,31 @@ describe("GET /api/sessions/:id/archive-info", () => {
     expect(json.archiveTransitionConfigured).toBe(true);
     expect(json.archiveTransitionStateName).toBe("Review");
     expect(json.issue.identifier).toBe("ENG-42");
+  });
+});
+
+describe("GET /api/sessions/:id/archive-info with a domain rule", () => {
+  // The archive modal offers the session domain's own archive state when the
+  // domain has a rule for the issue's team (it wins over the connection's).
+  it("reports the domain's archive state", async () => {
+    mockGetLinearIssue.mockReturnValue({
+      id: "issue-1", identifier: "BSK-7", title: "t", description: "", url: "", branchName: "", priorityLabel: "",
+      stateName: "In Progress", stateType: "started", teamName: "Bskts", teamKey: "BSK", teamId: "team-bsk", connectionId: "test-conn",
+    });
+    launcher.getSession.mockReturnValue({ sessionId: "s1", domain: "herd" });
+    mockGetDomain.mockReturnValue({
+      slug: "herd",
+      linear: { connectionId: "test-conn", teamId: "team-bsk", archiveTransition: { enabled: true, stateId: "st-review", stateName: "In Review" } },
+    });
+    try {
+      const json = await (await app.request("/api/sessions/s1/archive-info")).json();
+      expect(mockGetDomain).toHaveBeenCalledWith("herd");
+      expect(json.archiveTransitionConfigured).toBe(true);
+      expect(json.archiveTransitionStateName).toBe("In Review");
+    } finally {
+      mockGetDomain.mockReset();
+      mockGetDomain.mockReturnValue(undefined);
+    }
   });
 });
 
@@ -2883,11 +2916,15 @@ describe("GET /api/linear/project-issues", () => {
         title: "Implement dark mode",
         description: "Add theme support",
         url: "https://linear.app/acme/issue/ENG-42",
+        // Linear's recommended branch and the team id are returned too (the
+        // Home page uses them for the branch and the domain's start rule).
+        branchName: "",
         priorityLabel: "Medium",
         stateName: "In Progress",
         stateType: "started",
         teamName: "Engineering",
         teamKey: "ENG",
+        teamId: "",
         assigneeName: "Ada",
         updatedAt: "2026-02-19T10:00:00Z",
       }],
