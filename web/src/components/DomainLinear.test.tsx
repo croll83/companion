@@ -23,7 +23,11 @@ vi.mock("../api.js", () => ({ api: mockApi }));
 import { DomainLinear } from "./DomainLinear.js";
 
 const connections = [
-  { id: "conn-bskts", name: "Bskts", workspaceName: "bskts", apiKeyLast4: "****abcd" },
+  {
+    id: "conn-bskts", name: "Bskts", workspaceName: "bskts", apiKeyLast4: "****abcd",
+    autoTransition: true, autoTransitionStateId: "st-todo", autoTransitionStateName: "Todo",
+    archiveTransition: false, archiveTransitionStateId: "", archiveTransitionStateName: "",
+  },
   { id: "conn-croll83", name: "croll83", workspaceName: "", apiKeyLast4: "****efgh" },
 ];
 const teamsByConn: Record<string, unknown[]> = {
@@ -110,6 +114,8 @@ describe("DomainLinear", () => {
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("p-bskts"));
     expect(screen.getByLabelText("When a session starts")).toHaveValue("__inherit__");
     expect(screen.getByRole("option", { name: "Connection default (Todo)" })).toBeInTheDocument();
+    // The archive rule is the domain's own; its "Connection default" still says what the connection does.
+    expect(screen.getByRole("option", { name: "Connection default (off)" })).toBeInTheDocument();
     expect(screen.getByLabelText("When a session is archived")).toHaveValue("st-review");
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));

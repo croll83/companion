@@ -3,7 +3,6 @@ import {
   api,
   type DomainLinearInfo,
   type DomainLinearInput,
-  type EffectiveLinearRule,
   type LinearConnectionSummary,
   type LinearProject,
   type LinearTeamStates,
@@ -27,10 +26,12 @@ function ruleInput(choice: RuleChoice): DomainLinearInput["autoTransition"] {
   return { enabled: true, stateId: choice };
 }
 
-/** "the connection's setting (In Progress)" / "(off)" for the inherit option. */
-function inheritedLabel(rule: EffectiveLinearRule | undefined): string {
-  if (!rule || rule.source === "domain") return "Connection default";
-  return `Connection default (${rule.enabled && rule.stateId ? rule.stateName || "a state" : "off"})`;
+/** "Connection default (In Progress)" / "(off)": what the connection's own setting does. */
+function inheritedLabel(conn: LinearConnectionSummary | undefined, kind: "start" | "archive"): string {
+  if (!conn) return "Connection default";
+  const on = kind === "start" ? conn.autoTransition && !!conn.autoTransitionStateId : conn.archiveTransition && !!conn.archiveTransitionStateId;
+  const name = kind === "start" ? conn.autoTransitionStateName : conn.archiveTransitionStateName;
+  return `Connection default (${on ? name || "a state" : "off"})`;
 }
 
 const selectClass =
@@ -101,8 +102,7 @@ export function DomainLinear({ slug, onChanged }: { slug: string; onChanged: () 
 
   const link = info?.link ?? null;
   const team = teams.find((t) => t.id === teamId);
-  // Rules name states of the saved team: changing the team resets them.
-  const sameTeam = !!link && link.connectionId === connectionId && link.teamId === teamId;
+  // Rules name states of one team: changing the workspace or team resets them.
   const resetRules = () => { setStart(INHERIT); setArchive(INHERIT); };
 
   async function save() {
@@ -157,11 +157,12 @@ export function DomainLinear({ slug, onChanged }: { slug: string; onChanged: () 
     );
   }
 
-  const ruleSelect = (id: string, label: string, value: RuleChoice, onChange: (v: RuleChoice) => void, effective?: EffectiveLinearRule) => (
+  const selectedConn = connections.find((c) => c.id === connectionId);
+  const ruleSelect = (id: string, label: string, value: RuleChoice, onChange: (v: RuleChoice) => void, kind: "start" | "archive") => (
     <div className="flex flex-wrap items-center gap-2">
       <label htmlFor={id} className="text-[12px] w-40 shrink-0">{label}</label>
       <select id={id} value={value} disabled={saving || !team} onChange={(e) => onChange(e.target.value)} className={selectClass}>
-        <option value={INHERIT}>{sameTeam ? inheritedLabel(effective) : "Connection default"}</option>
+        <option value={INHERIT}>{inheritedLabel(selectedConn, kind)}</option>
         <option value={OFF}>Off</option>
         {team?.states.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
       </select>
@@ -220,8 +221,8 @@ export function DomainLinear({ slug, onChanged }: { slug: string; onChanged: () 
 
       <fieldset className="space-y-2 rounded-lg border border-cc-border p-2.5">
         <legend className="px-1 text-[11px] font-semibold uppercase tracking-wider text-cc-muted">Rules for this domain</legend>
-        {ruleSelect(ids.start, "When a session starts", start, setStart, info.rules?.start)}
-        {ruleSelect(ids.archive, "When a session is archived", archive, setArchive, info.rules?.archive)}
+        {ruleSelect(ids.start, "When a session starts", start, setStart, "start")}
+        {ruleSelect(ids.archive, "When a session is archived", archive, setArchive, "archive")}
         <p className="text-[10px] text-cc-muted leading-snug">
           Moves the issue linked to a session (Claude Code or Codex) to that state. "Connection default" keeps the setting of the
           connection in <a href="#/integrations/linear" className="text-cc-primary hover:underline">Linear settings</a>.
