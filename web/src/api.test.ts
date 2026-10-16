@@ -785,6 +785,53 @@ describe("Linear project API", () => {
     expect(url).toBe("/api/linear/project-issues?projectId=proj-1&limit=15");
   });
 
+  // A domain linked to a whole team lists the team's issues instead of a project's.
+  it("getLinearProjectIssues scopes to a team when no project is given", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ issues: [] }));
+    await api.getLinearProjectIssues("", 10, "conn-1", "team-bsk");
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/linear/project-issues?teamId=team-bsk&limit=10&connectionId=conn-1");
+  });
+
+  it("searchLinearIssues passes a project (or team) scope", async () => {
+    mockFetch.mockResolvedValue(mockResponse({ issues: [] }));
+    await api.searchLinearIssues("soak", 8, "c", { teamId: "t", projectId: "p" });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/linear/issues?query=soak&limit=8&connectionId=c&projectId=p");
+    await api.searchLinearIssues("soak", 8, undefined, { teamId: "t" });
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/linear/issues?query=soak&limit=8&teamId=t");
+  });
+
+  // The session's domain and the issue's team pick the domain's start rule.
+  it("transitionLinearIssue sends the domain and team", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, skipped: false }));
+    await api.transitionLinearIssue("i1", "conn-1", { domain: "herd", teamId: "team-bsk" });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/linear/issues/i1/transition?connectionId=conn-1&domain=herd&teamId=team-bsk");
+  });
+
+  it("calls the domain Linear link and board endpoints", async () => {
+    mockFetch.mockResolvedValue(mockResponse({ ok: true }));
+    await api.getDomainLinear("herd");
+    await api.setDomainLinear("herd", { connectionId: "c", teamId: "t", autoTransition: null });
+    await api.clearDomainLinear("herd");
+    await api.listLinearTeamProjects("t", "c");
+    await api.getDomainBoard("herd");
+    await api.getDomainBoard("herd", true);
+    await api.moveDomainIssue("herd", "i1", "st-2");
+    await api.takeDomainIssue("herd", "i1");
+    const calls = mockFetch.mock.calls.map(([url, opts]) => `${opts?.method ?? "GET"} ${url}`);
+    expect(calls).toEqual([
+      "GET /api/domains/herd/linear",
+      "PUT /api/domains/herd/linear",
+      "DELETE /api/domains/herd/linear",
+      "GET /api/linear/teams/t/projects?connectionId=c",
+      "GET /api/domains/herd/linear/board",
+      "GET /api/domains/herd/linear/board?refresh=1",
+      "POST /api/domains/herd/linear/issues/i1/state",
+      "POST /api/domains/herd/linear/issues/i1/take",
+    ]);
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ connectionId: "c", teamId: "t", autoTransition: null });
+    expect(JSON.parse(mockFetch.mock.calls[6][1].body)).toEqual({ stateId: "st-2" });
+  });
+
   it("getLinearProjectMapping sends GET with repoRoot", async () => {
     const data = { mapping: { repoRoot: "/repo", projectId: "p1", projectName: "Q1", createdAt: 1, updatedAt: 1 } };
     mockFetch.mockResolvedValueOnce(mockResponse(data));

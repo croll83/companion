@@ -9,7 +9,12 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
-const mockApi = vi.hoisted(() => ({ listChromeBrowsers: vi.fn() }));
+const mockApi = vi.hoisted(() => ({
+  listChromeBrowsers: vi.fn(),
+  getDomainLinear: vi.fn(),
+  listLinearConnections: vi.fn(),
+  getDomainBoard: vi.fn(),
+}));
 vi.mock("../api.js", () => ({ api: mockApi }));
 vi.mock("../ws.js", () => ({ sendMcpAuthenticate: vi.fn(), sendMcpOAuthCallback: vi.fn() }));
 
@@ -28,6 +33,7 @@ function actions(): DomainActions {
     onDelete: vi.fn(async () => true),
     onEdit: vi.fn(),
     onRefreshAccount: vi.fn(),
+    onReload: vi.fn(),
   };
 }
 
@@ -43,6 +49,8 @@ function setup(opts: { domain?: DomainSummary; tab?: DomainTab; desktop?: boolea
 beforeEach(() => {
   vi.clearAllMocks();
   mockApi.listChromeBrowsers.mockResolvedValue({ browsers: [] });
+  mockApi.getDomainLinear.mockResolvedValue({ link: null });
+  mockApi.listLinearConnections.mockResolvedValue({ connections: [] });
   window.location.hash = "";
 });
 afterEach(() => vi.useRealTimers());
@@ -143,6 +151,63 @@ describe("DomainDetail", () => {
     expect(a.onPatch).toHaveBeenCalledWith("herd", { brain: "team" });
   });
 
+  // The Linear board and link are tabs like the others, summarized by the link.
+  it("shows Board and Linear tabs summarizing the domain's Linear link", () => {
+    const { unmount } = render(
+      <DomainDetail domain={herdDomain()} data={domainsResponse()} desktop busy={false} refreshingAccount={false} actions={actions()} />,
+    );
+    expect(screen.getByRole("tab", { name: /Board/ })).toHaveAttribute("href", "#/domains/herd/board");
+    expect(screen.getByRole("tab", { name: /Board/ })).toHaveTextContent("Not linked");
+    expect(screen.getByRole("tab", { name: /Linear/ })).toHaveTextContent("Link a team or project");
+    unmount();
+    setup({ desktop: true, domain: herdDomain({ linear: { connectionId: "c", teamId: "t", teamKey: "BSK", projectId: "p", projectName: "Bskts" } }) });
+    expect(screen.getByRole("tab", { name: /Linear/ })).toHaveTextContent("BSK · Bskts");
+    expect(screen.getByRole("tab", { name: /Board/ })).toHaveTextContent("Issues, take one, start a session");
+  });
+
+  it("opens the board tab (explaining how to link when not linked) and the Linear tab", async () => {
+    const { unmount } = render(
+      <DomainDetail domain={herdDomain()} data={domainsResponse()} tab="board" desktop busy={false} refreshingAccount={false} actions={actions()} />,
+    );
+    expect(screen.getByText("Herd is not linked to Linear yet.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Linear tab" })).toHaveAttribute("href", "#/domains/herd/linear");
+    expect(mockApi.getDomainBoard).not.toHaveBeenCalled();
+    unmount();
+    setup({ desktop: true, tab: "linear" });
+    expect(await screen.findByText("No Linear connection yet.")).toBeInTheDocument();
+    expect(mockApi.getDomainLinear).toHaveBeenCalledWith("herd");
+  });
+
+  // Rename changes the display name only (the slug stays, the form says so).
+  it("renames the display name from the actions menu", () => {
+    const a = setup();
+    fireEvent.click(screen.getByRole("button", { name: "Domain actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename…" }));
+    const input = screen.getByLabelText("Display name");
+    expect(input).toHaveValue("Herd");
+    expect(screen.getByText(/the slug "herd", its folder and memory stay/)).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "  Baskets " } });
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    expect(a.onPatch).toHaveBeenCalledWith("herd", { name: "Baskets" });
+    expect(screen.getByRole("heading", { name: "Herd" })).toBeInTheDocument();
+  });
+
+  it("cancels a rename with Escape or Cancel, and does not patch an unchanged name", () => {
+    const a = setup();
+    fireEvent.click(screen.getByRole("button", { name: "Domain actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename…" }));
+    fireEvent.keyDown(screen.getByLabelText("Display name"), { key: "Escape" });
+    expect(screen.queryByLabelText("Display name")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Domain actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    expect(a.onPatch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Domain actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Display name")).toBeNull();
+  });
+
   it("for GLOBAL: applies to every session, nothing on by name, no removal", () => {
     setup({ domain: globalDomain({ mcpServers: [] }) });
     expect(screen.getByText(/applies to every session/)).toBeInTheDocument();
@@ -150,5 +215,6 @@ describe("DomainDetail", () => {
     expect(screen.getByRole("link", { name: /Plugins/ })).toHaveTextContent("0 on");
     fireEvent.click(screen.getByRole("button", { name: "Domain actions" }));
     expect(screen.queryByRole("menuitem", { name: "Remove domain…" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Rename…" })).toBeNull();
   });
 });

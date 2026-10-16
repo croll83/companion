@@ -2,7 +2,9 @@ import { useState } from "react";
 import type { DomainPatch, DomainSummary, DomainsResponse } from "../api.js";
 import { domainsHash, type DomainTab } from "../utils/routing.js";
 import { DomainBrain } from "./DomainBrain.js";
+import { DomainBoard } from "./DomainBoard.js";
 import { DomainChrome } from "./DomainChrome.js";
+import { DomainLinear } from "./DomainLinear.js";
 import { domainCounts } from "./DomainList.js";
 import { DomainMcpServers, type NewMcpServer } from "./DomainMcpServers.js";
 import { DomainPlugins } from "./DomainPlugins.js";
@@ -13,6 +15,8 @@ const TABS: { id: DomainTab; label: string }[] = [
   { id: "mcp", label: "MCP servers" },
   { id: "skills", label: "Skills" },
   { id: "plugins", label: "Plugins" },
+  { id: "board", label: "Board" },
+  { id: "linear", label: "Linear" },
 ];
 
 function names(list: string[], max = 3): string {
@@ -29,14 +33,17 @@ export interface DomainActions {
   onDelete: (slug: string) => Promise<boolean>;
   onEdit: (slug: string, file: "CLAUDE.md" | "mcp.json") => void;
   onRefreshAccount: () => void;
+  /** Re-read the domains (after a change made by a tab itself, e.g. the Linear link). */
+  onReload: () => void;
 }
 
 /**
- * One domain: what it has on, by name (MCP servers, skills, plugins), Claude
- * in Chrome, and its files. MCP / Skills / Plugins open their view: tabs
- * under the summary on desktop, a sheet on phones (#/domains/<slug>/<tab>,
- * so the phone's Back closes it). Changes apply when a session starts or
- * reloads.
+ * One domain: what it has on, by name (MCP servers, skills, plugins), its
+ * Linear board and link, Claude in Chrome, and its files. Each view opens as
+ * a tab under the summary on desktop, a sheet on phones
+ * (#/domains/<slug>/<tab>, so the phone's Back closes it). Changes apply
+ * when a session starts or reloads. The display name can be renamed; the
+ * slug (folder, memory, URLs) never changes.
  */
 export function DomainDetail({
   domain,
@@ -57,6 +64,7 @@ export function DomainDetail({
 }) {
   const [menu, setMenu] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const isGlobal = domain.slug === "global";
   const plugins = data.plugins ?? [];
   const c = domainCounts(domain, data.skillGroups, plugins);
@@ -79,6 +87,12 @@ export function DomainDetail({
           onRemove={actions.onRemoveServer}
         />
       );
+    }
+    if (t === "board") {
+      return <DomainBoard slug={domain.slug} domainName={domain.name} linked={!!domain.linear} />;
+    }
+    if (t === "linear") {
+      return <DomainLinear slug={domain.slug} onChanged={actions.onReload} />;
     }
     if (t === "skills") {
       return (
@@ -107,6 +121,10 @@ export function DomainDetail({
     mcp: `${c.mcpOn.length} of ${c.mcpTotal} on: ${names(c.mcpOn.map((s) => s.name))}`,
     skills: `${c.skillOn} of ${c.skillTotal} on${skillsOff.length ? ` · off: ${names(skillsOff)}` : ""}`,
     plugins: `${c.pluginsOn.length} on${c.pluginsOn.length ? `: ${names(c.pluginsOn.map((p) => p.name))}` : ""}`,
+    board: domain.linear ? "Issues, take one, start a session" : "Not linked",
+    linear: domain.linear
+      ? `${domain.linear.teamKey ?? "Team"} · ${domain.linear.projectName ?? "whole team"}`
+      : "Link a team or project",
   };
 
   return (
@@ -117,7 +135,34 @@ export function DomainDetail({
         )}
         <div className="mt-1 flex items-start gap-2">
           <div className="min-w-0 flex-1">
-            <h2 className="text-[16px] font-semibold">{domain.name}</h2>
+            {renaming === null ? (
+              <h2 className="text-[16px] font-semibold">{domain.name}</h2>
+            ) : (
+              <form
+                aria-label="Rename domain"
+                className="flex flex-wrap items-center gap-1.5"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const name = renaming.trim();
+                  if (name && name !== domain.name) actions.onPatch(domain.slug, { name });
+                  setRenaming(null);
+                }}
+              >
+                <label htmlFor={`rename-${domain.slug}`} className="sr-only">Display name</label>
+                <input
+                  id={`rename-${domain.slug}`}
+                  value={renaming}
+                  autoFocus
+                  maxLength={80}
+                  onChange={(e) => setRenaming(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Escape") setRenaming(null); }}
+                  className="px-2 py-1 rounded-md bg-cc-input-bg border border-cc-border text-[14px] text-cc-fg focus:outline-none focus:ring-1 focus:ring-cc-primary"
+                />
+                <button type="submit" disabled={busy || !renaming.trim()} className="px-2.5 py-1 rounded-md bg-cc-primary text-white text-[12px] disabled:opacity-50 cursor-pointer">Rename</button>
+                <button type="button" onClick={() => setRenaming(null)} className="px-2.5 py-1 rounded-md text-cc-muted text-[12px] hover:bg-cc-hover cursor-pointer">Cancel</button>
+                <span className="basis-full text-[10px] text-cc-muted">Only the name shown in Companion changes: the slug "{domain.slug}", its folder and memory stay.</span>
+              </form>
+            )}
             {domain.description && <p className="text-[12px] text-cc-muted">{domain.description}</p>}
             <p className="text-[11px] text-cc-muted font-mono-code break-all">{domain.path}</p>
             <p className="text-[11px] text-cc-muted">
@@ -138,6 +183,11 @@ export function DomainDetail({
             </button>
             {menu && (
               <div role="menu" className="absolute right-0 mt-1 z-10 w-44 rounded-lg border border-cc-border bg-cc-card shadow-lg py-1 text-[12px]">
+                {!isGlobal && (
+                  <button type="button" role="menuitem" onClick={() => { setMenu(false); setRenaming(domain.name); }} className="block w-full text-left px-3 py-1.5 hover:bg-cc-hover cursor-pointer">
+                    Rename…
+                  </button>
+                )}
                 <button type="button" role="menuitem" onClick={() => { setMenu(false); actions.onEdit(domain.slug, "CLAUDE.md"); }} className="block w-full text-left px-3 py-1.5 hover:bg-cc-hover cursor-pointer">
                   Edit CLAUDE.md
                 </button>
@@ -176,7 +226,7 @@ export function DomainDetail({
 
       {desktop ? (
         <div>
-          <div role="tablist" aria-label="Domain settings" className="flex gap-1 border-b border-cc-border">
+          <div role="tablist" aria-label="Domain settings" className="flex gap-1 border-b border-cc-border overflow-x-auto">
             {TABS.map((t) => (
               <a
                 key={t.id}

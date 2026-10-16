@@ -56,6 +56,13 @@ function trackApiFailure(
   captureException(error, { method, path, status });
 }
 
+/** `&projectId=…` (wins) or `&teamId=…`, or "" without a scope. */
+function scopeQuery(scope?: { teamId?: string; projectId?: string }): string {
+  if (scope?.projectId) return `&projectId=${encodeURIComponent(scope.projectId)}`;
+  if (scope?.teamId) return `&teamId=${encodeURIComponent(scope.teamId)}`;
+  return "";
+}
+
 async function post<T = unknown>(path: string, body?: object): Promise<T> {
   const startedAt = nowMs();
   let failureTracked = false;
@@ -558,6 +565,113 @@ export interface DomainSummary {
   brain?: string | null;
   /** The brain its sessions use (own choice, else GLOBAL's); null when none. */
   effectiveBrain?: { slug: string; name: string; own: boolean } | null;
+  /** The Linear team/project the domain is linked to (ids and names only, never a key). */
+  linear?: DomainLinearLink;
+}
+
+/** A per-domain transition rule; absent on the link = the connection's setting applies. */
+export interface DomainLinearRule {
+  enabled: boolean;
+  stateId: string;
+  stateName: string;
+}
+
+export interface DomainLinearLink {
+  connectionId: string;
+  teamId: string;
+  teamKey?: string;
+  teamName?: string;
+  /** Absent = the whole team. */
+  projectId?: string;
+  projectName?: string;
+  autoTransition?: DomainLinearRule;
+  archiveTransition?: DomainLinearRule;
+}
+
+export interface DomainLinearView extends DomainLinearLink {
+  connectionName: string;
+  workspaceName: string;
+  /** The connection the link points at was removed. */
+  broken?: "connection_missing";
+}
+
+/** The rule that actually applies, and where it comes from. */
+export interface EffectiveLinearRule extends DomainLinearRule {
+  source: "domain" | "connection" | "settings";
+}
+
+export interface DomainLinearInfo {
+  link: DomainLinearView | null;
+  rules?: { start: EffectiveLinearRule; archive: EffectiveLinearRule };
+}
+
+/** Body of PUT /domains/:slug/linear. A rule: null = connection's setting, {enabled:false} = off. */
+export interface DomainLinearInput {
+  connectionId: string;
+  teamId: string;
+  projectId?: string;
+  autoTransition?: { enabled: boolean; stateId?: string } | null;
+  archiveTransition?: { enabled: boolean; stateId?: string } | null;
+}
+
+export interface BoardLabel {
+  id: string;
+  name: string;
+  color: string;
+  /** The label group ("Soak" for "soak 24h"). */
+  group?: string;
+}
+
+export interface BoardIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  branchName: string;
+  /** 0 = none, 1 = urgent … 4 = low. */
+  priority: number;
+  priorityLabel: string;
+  stateId: string;
+  stateName: string;
+  stateType: string;
+  updatedAt: string;
+  assignee: { id: string; name: string; avatarUrl: string | null } | null;
+  labels: BoardLabel[];
+  teamId: string;
+  teamKey: string;
+  teamName: string;
+  projectId?: string;
+  projectName?: string;
+}
+
+export interface BoardState extends LinearWorkflowState {
+  position?: number;
+  /** Canceled / duplicate: behind the "Show canceled" toggle. */
+  hidden: boolean;
+}
+
+export interface BoardSession {
+  sessionId: string;
+  name: string;
+  archived: boolean;
+  backendType: string;
+  domain: string;
+}
+
+export interface DomainBoard {
+  link: DomainLinearView;
+  team: { id: string; key: string; name: string };
+  states: BoardState[];
+  viewer: { id: string; name: string; avatarUrl: string | null };
+  issues: BoardIssue[];
+  truncated: boolean;
+  /** issueId → Companion sessions linked to it. */
+  sessions: Record<string, BoardSession[]>;
+  fetchedAt: number;
+}
+
+export interface TakenIssue extends BoardIssue {
+  description: string;
 }
 
 type Choices = Record<string, boolean | null>;
@@ -1361,6 +1475,26 @@ export const api = {
 
   // Domains
   listDomains: () => get<DomainsResponse>("/domains"),
+  /** A domain's Linear link and the transition rules that apply (no key). */
+  getDomainLinear: (slug: string) => get<DomainLinearInfo>(`/domains/${encodeURIComponent(slug)}/linear`),
+  /** Link a domain to a team (and project), validated against Linear. */
+  setDomainLinear: (slug: string, input: DomainLinearInput) =>
+    put<{ link: DomainLinearView }>(`/domains/${encodeURIComponent(slug)}/linear`, input),
+  clearDomainLinear: (slug: string) => del<{ ok: true }>(`/domains/${encodeURIComponent(slug)}/linear`),
+  listLinearTeamProjects: (teamId: string, connectionId: string) =>
+    get<{ projects: LinearProject[] }>(
+      `/linear/teams/${encodeURIComponent(teamId)}/projects?connectionId=${encodeURIComponent(connectionId)}`,
+    ),
+  /** The domain's board; `refresh` skips the server cache (Refresh button). */
+  getDomainBoard: (slug: string, refresh = false) =>
+    get<DomainBoard>(`/domains/${encodeURIComponent(slug)}/linear/board${refresh ? "?refresh=1" : ""}`),
+  moveDomainIssue: (slug: string, issueId: string, stateId: string) =>
+    post<{ ok: true }>(`/domains/${encodeURIComponent(slug)}/linear/issues/${encodeURIComponent(issueId)}/state`, { stateId }),
+  /** "Take it": assign to me and start it (never moved backwards). */
+  takeDomainIssue: (slug: string, issueId: string) =>
+    post<{ ok: true; issue: TakenIssue; moved: boolean; connectionId: string }>(
+      `/domains/${encodeURIComponent(slug)}/linear/issues/${encodeURIComponent(issueId)}/take`,
+    ),
   createDomain: (name: string, description?: string) => post<DomainSummary>("/domains", { name, description }),
   /**
    * Change a domain. The on/off maps are partial: true/false sets a choice,
@@ -1564,24 +1698,36 @@ export const api = {
       {},
     ),
 
-  searchLinearIssues: (query: string, limit = 8, connectionId?: string) =>
+  /** Search issues; `scope` limits it to a project or team (a linked domain's). */
+  searchLinearIssues: (query: string, limit = 8, connectionId?: string, scope?: { teamId?: string; projectId?: string }) =>
     get<{ issues: LinearIssue[] }>(
-      `/linear/issues?query=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}${connectionId ? `&connectionId=${encodeURIComponent(connectionId)}` : ""}`,
+      `/linear/issues?query=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}${connectionId ? `&connectionId=${encodeURIComponent(connectionId)}` : ""}${scopeQuery(scope)}`,
     ),
   getLinearConnection: (connectionId?: string) =>
     get<LinearConnectionInfo>(`/linear/connection${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
   getLinearStates: (connectionId?: string) =>
     get<{ teams: LinearTeamStates[] }>(`/linear/states${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
-  transitionLinearIssue: (issueId: string, connectionId?: string) =>
-    post<{ ok: boolean; skipped: boolean }>(
-      `/linear/issues/${encodeURIComponent(issueId)}/transition${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`,
+  /**
+   * Auto-transition on session start. With the session's domain (and the
+   * issue's team) the domain's own rule applies, else the connection's.
+   */
+  transitionLinearIssue: (issueId: string, connectionId?: string, ctx?: { domain?: string; teamId?: string }) => {
+    const q = new URLSearchParams();
+    if (connectionId) q.set("connectionId", connectionId);
+    if (ctx?.domain) q.set("domain", ctx.domain);
+    if (ctx?.teamId) q.set("teamId", ctx.teamId);
+    const qs = q.toString();
+    return post<{ ok: boolean; skipped: boolean }>(
+      `/linear/issues/${encodeURIComponent(issueId)}/transition${qs ? `?${qs}` : ""}`,
       {},
-    ),
+    );
+  },
   listLinearProjects: (connectionId?: string) =>
     get<{ projects: LinearProject[] }>(`/linear/projects${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
-  getLinearProjectIssues: (projectId: string, limit = 15, connectionId?: string) =>
+  /** Recent open issues of a project, or of a whole team (projectId "" + teamId). */
+  getLinearProjectIssues: (projectId: string, limit = 15, connectionId?: string, teamId?: string) =>
     get<{ issues: LinearIssue[] }>(
-      `/linear/project-issues?projectId=${encodeURIComponent(projectId)}&limit=${encodeURIComponent(String(limit))}${connectionId ? `&connectionId=${encodeURIComponent(connectionId)}` : ""}`,
+      `/linear/project-issues?${scopeQuery({ projectId, teamId }).slice(1)}${projectId || teamId ? "&" : ""}limit=${encodeURIComponent(String(limit))}${connectionId ? `&connectionId=${encodeURIComponent(connectionId)}` : ""}`,
     ),
   getLinearProjectMapping: (repoRoot: string) =>
     get<{ mapping: LinearProjectMapping | null }>(
