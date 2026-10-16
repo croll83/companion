@@ -282,6 +282,26 @@ describe("LinearSettingsPage — edit connection settings", () => {
     expect(screen.getByText("On session archive")).toBeInTheDocument();
   });
 
+  // Rules moved to domains: the connection's rules are the defaults of
+  // domains without their own, and the panel says where to set those.
+  it("presents the connection's rules as defaults for domains", async () => {
+    render(<LinearSettingsPage />);
+    await screen.findByText("Work");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByText(/Defaults for the domains linked to this workspace/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Domains" })).toHaveAttribute("href", "#/domains");
+  });
+
+  it("passes axe accessibility scan with the edit panel open", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<LinearSettingsPage />);
+    await screen.findByText("Work");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(mockApi.getLinearStates).toHaveBeenCalled());
+    await screen.findByText("Auto-transition");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("toggles Edit to Close and back", async () => {
     // Verifies that clicking Edit toggles the panel open/close.
     render(<LinearSettingsPage />);
