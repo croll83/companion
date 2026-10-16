@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.7.0](https://github.com/croll83/companion/compare/the-companion-v1.6.0...the-companion-v1.7.0) (2026-10-16)
+
+
+### Features
+
+* **brains:** embedded brains run the brains core; notes waiting for a person can be included ([f57df3d](https://github.com/croll83/companion/commit/f57df3da86b650362fbdd541f88e2bf0cdb2a4eb))
+* **brains:** embedded brains run the brains core; notes waiting for a person can be included ([95fe7c1](https://github.com/croll83/companion/commit/95fe7c1c155c790d2904c27986478a4583c5c7ae))
+* **domains:** Linear tab, board tab and display-name rename in the domain page ([d8c95ce](https://github.com/croll83/companion/commit/d8c95cece876e4059010d08068b5ce3adda32485))
+* **domains:** link a domain to a Linear team/project, board API and per-domain rules ([642a2fb](https://github.com/croll83/companion/commit/642a2fb8ea1145b6835d6ecdfe4bea38acf49e52))
+* **domains:** per-domain Linear boards, domain link and per-domain rules ([cd6b4e0](https://github.com/croll83/companion/commit/cd6b4e0d659e124e3b08f564c3c8e7d40861dbc1))
+* **home:** scope the Linear picker to the session domain's team/project ([7ebdac3](https://github.com/croll83/companion/commit/7ebdac32a67f275f2887753215b10ca682e3a2b2))
+* **linear:** present connection rules as defaults for domains, label the switches ([072bca3](https://github.com/croll83/companion/commit/072bca39e6e44af54d99e56c9ca04d42da23820a))
+
+
+### Bug Fixes
+
+* **domains:** show what the connection default does in the Linear rules ([fa85d51](https://github.com/croll83/companion/commit/fa85d518c2bb033d4879bb407969c1f40dc5cde3))
+* **linear:** keep the project issues query shape, return branch and team id ([a603961](https://github.com/croll83/companion/commit/a603961ddab56e0a144d40d450a44f08732aaa01))
+
 ## [1.6.0](https://github.com/croll83/companion/compare/the-companion-v1.5.0...the-companion-v1.6.0) (2026-10-15)
 
 
