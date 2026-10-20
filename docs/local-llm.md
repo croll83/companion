@@ -21,6 +21,7 @@ Companion ──spawns──▶ Claude Code ──/v1/messages──▶ Companio
   - checks the shared token and **drops every credential the client sent**. Only the upstream token, if configured, goes to vLLM. It logs which kinds of credentials arrived, never their values, and logs a warning if an Anthropic token (`sk-ant-…`) ever shows up.
   - maps Claude Code's **reasoning effort** to the model's reasoning parameters (see [Reasoning levels](#reasoning-levels)).
   - rewrites `model` to the served model, and drops Anthropic-only fields (`context_management`, `output_config`, `metadata`, `thinking`, …) and server tools.
+  - turns the `system` messages that Claude Code puts **inside** `messages` (what you type while a turn runs, and some reminders) into text of a user turn, inside `<system-reminder>` (see [Limits](#limits)).
   - answers Claude Code's **WebSearch** when a search backend is configured: it runs the search itself and has your model write the summary (see [Web search](#web-search)).
   - streams the answer back as it comes (SSE).
   - answers `count_tokens` with an estimate when the server has none.
@@ -200,6 +201,15 @@ Then, when you start a session, pick **Claude | Codex | Local**, then the provid
   To change, start a new session.
 - **Ultracode, cost and usage limits** are Anthropic features. They are hidden on local sessions, and the proxy's numbers show instead of the cost.
 - **Credentials.** Claude Code sends only `ANTHROPIC_AUTH_TOKEN`, the proxy token, when it is set. It wins over a stored login and over `CLAUDE_CODE_OAUTH_TOKEN`. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` also stops the start-up calls that would otherwise send the stored login token to api.anthropic.com. Check it on your setup: the proxy logs `credentials received: authorization: proxy token` for each session, and the context panel lists the same kinds. The proxy token is in the session's environment, so the session's own shell can read it. It opens the model server only.
+- **Messages sent mid-turn need proxy 1.2.0 or later.** Claude Code (checked on 2.1.303) delivers a message you send while a turn runs as a `role: "system"` entry in the middle of `messages`. The Anthropic API reads it. vLLM hands it to the chat template, and Qwen templates drop or misplace a system message that is not the first one, with no error, so the model never sees your correction. From 1.2.0 the proxy moves each such entry into the next user turn (after its `tool_result` blocks, or into the previous user turn when none follows), wrapped in `<system-reminder>`. The top-level `system` prompt is not touched. Older proxies: upgrade it (see [Install the proxy](#install-the-proxy-on-the-model-host)).
 - **Concurrency**: subagents run in parallel only as far as vLLM allows (`--max-num-seqs`).
 - **Turning the switch off** stops new local sessions, agent runs and domain defaults. Sessions already on a provider keep running.
 - The proxy keeps its numbers in memory, so they reset when it restarts.
+
+## Proxy versions
+
+`/health` and `/info` report the proxy's version.
+
+- **1.2.0**: `system` messages inside `messages` (Claude Code's mid-turn messages and reminders) become user-turn text, so local models see them.
+- **1.1.0**: web search emulation with a Tavily or Brave backend.
+- **1.0.0**: first release.

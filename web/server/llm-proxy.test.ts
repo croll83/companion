@@ -18,12 +18,15 @@ import type { Server } from "node:http";
  *  - SSE streamed through, tokens/TTFT/duration recorded per session
  *    (X-Companion-Session header);
  *  - count_tokens estimated when the upstream lacks it; vLLM's context
- *    error reworded as Anthropic's "prompt is too long".
+ *    error reworded as Anthropic's "prompt is too long";
+ *  - {role: "system"} entries inside `messages` (Claude Code's mid-turn
+ *    user messages) folded into user turns, which chat templates read.
  */
 
 import {
   classifyCredential,
   estimateInputTokens,
+  foldSystemMessages,
   levelFor,
   loadConfig,
   normalizeConfig,
@@ -298,5 +301,113 @@ describe("pure helpers", () => {
   it("recognises context errors only", () => {
     expect(rewordContextError("max_model_len exceeded", 65536)).toBe("prompt is too long: 65537 tokens > 65536 maximum");
     expect(rewordContextError("some other problem", 65536)).toBeNull();
+  });
+});
+
+/**
+ * Claude Code (2.1.303) sends a message typed mid-turn as {role: "system"}
+ * INSIDE `messages`. vLLM's Anthropic endpoint passes it to the chat template
+ * and Qwen templates drop a system message that is not first (200, no
+ * error), so the local model never saw the user's correction. These tests
+ * hold foldSystemMessages to: no system role left, the text kept inside a
+ * <system-reminder> of a user turn, tool_result blocks still first, never
+ * two user messages in a row, tool_use/tool_result pairs untouched.
+ */
+describe("system messages inside messages", () => {
+  const STEER = "The user sent a new message while you were working:\nstop, use port 9000 instead\n\nAddress the message above as you continue this turn.";
+  const wrapped = (text: string) => ({ type: "text", text: `<system-reminder>\n${text}\n</system-reminder>` });
+  const toolUse = { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls" } }] };
+  const toolResult = { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "a.txt" }] };
+  type M = { role: string; content?: unknown };
+  const roles = (ms: M[]) => ms.map((m) => m.role);
+  const noUserPairs = (ms: M[]) => ms.every((m, i) => i === 0 || !(m.role === "user" && ms[i - 1].role === "user"));
+
+  // The live case: the steering arrives after the tool_result turn, as the last message.
+  it("appends to the tool_result turn it follows, after the tool_result blocks", () => {
+    const input = [{ role: "user", content: "list files" }, toolUse, toolResult, { role: "system", content: [{ type: "text", text: STEER }] }];
+    const out = foldSystemMessages(input) as M[];
+    expect(roles(out)).toEqual(["user", "assistant", "user"]);
+    expect(out[2].content).toEqual([toolResult.content[0], wrapped(STEER)]);
+    expect(out[1]).toBe(toolUse);
+    // Pure: the input is not changed.
+    expect(input).toHaveLength(4);
+    expect(toolResult.content).toHaveLength(1);
+  });
+
+  // Between an assistant turn and the next user turn: goes into that turn, after its tool_result, before its text.
+  it("puts one that precedes a user turn after that turn's tool_result blocks", () => {
+    const next = { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }, { type: "text", text: "and then?" }] };
+    const out = foldSystemMessages([{ role: "user", content: "go" }, toolUse, { role: "system", content: STEER }, next]) as M[];
+    expect(roles(out)).toEqual(["user", "assistant", "user"]);
+    expect(out[2].content).toEqual([next.content[0], wrapped(STEER), next.content[1]]);
+  });
+
+  it("puts one before the first user turn at the start of it (string content becomes blocks)", () => {
+    const out = foldSystemMessages([{ role: "system", content: "env changed" }, { role: "user", content: "hello" }]) as M[];
+    expect(out).toEqual([{ role: "user", content: [wrapped("env changed"), { type: "text", text: "hello" }] }]);
+  });
+
+  it("makes a last one after an assistant turn a user message of its own", () => {
+    const out = foldSystemMessages([{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }, { role: "system", content: STEER }]) as M[];
+    expect(out).toEqual([{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }, { role: "user", content: [wrapped(STEER)] }]);
+  });
+
+  // Several in a row (steering plus an environment reminder): each its own block, in order, in one user turn.
+  it("keeps consecutive ones in order in a single user turn, string and array content alike", () => {
+    const out = foldSystemMessages([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+      { role: "system", content: "first" },
+      { role: "system", content: [{ type: "text", text: "second" }, { type: "text", text: "part two", cache_control: { type: "ephemeral" } }] },
+      { role: "system", content: [] },
+    ]) as M[];
+    expect(roles(out)).toEqual(["user", "assistant", "user"]);
+    expect(out[2].content).toEqual([wrapped("first"), wrapped("second\npart two")]);
+  });
+
+  // Between two assistant turns (no user turn to take it): a user turn of its own, so roles still alternate.
+  it("never makes two user messages in a row, and wraps text that is already a reminder only once", () => {
+    const reminder = "<system-reminder>\nalready wrapped\n</system-reminder>";
+    const out = foldSystemMessages([
+      { role: "system", content: "before anything" },
+      { role: "assistant", content: "a1" },
+      { role: "system", content: reminder },
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "u" },
+      { role: "system", content: "after user" },
+      { role: "assistant", content: "a3" },
+    ]) as M[];
+    expect(roles(out)).toEqual(["user", "assistant", "user", "assistant", "user", "assistant"]);
+    expect(noUserPairs(out)).toBe(true);
+    expect(out[2].content).toEqual([{ type: "text", text: reminder }]);
+    expect(out[4].content).toEqual([{ type: "text", text: "u" }, wrapped("after user")]);
+  });
+
+  it("leaves messages without a system entry as they are (same array)", () => {
+    const input = [{ role: "user", content: "hi" }];
+    expect(foldSystemMessages(input)).toBe(input);
+  });
+
+  // End to end: what vLLM receives has no system role inside messages, the steering text is in the
+  // last user turn after the tool_result, and the top-level system is unchanged.
+  it("sends upstream no mid-conversation system role, with the text in a user turn", async () => {
+    await setup();
+    const body = claudeCodeBody({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "please run a command" }] },
+        toolUse,
+        toolResult,
+        { role: "system", content: [{ type: "text", text: STEER }] },
+      ],
+    });
+    const res = await post("/v1/messages", body);
+    expect(res.status).toBe(200);
+    await res.text();
+    const sent = fake.messages()[0].body! as { system: unknown; messages: M[] };
+    expect(sent.messages.some((m) => m.role === "system")).toBe(false);
+    expect(roles(sent.messages)).toEqual(["user", "assistant", "user"]);
+    expect(sent.messages[2].content).toEqual([toolResult.content[0], wrapped(STEER)]);
+    expect(JSON.stringify(sent.messages)).toContain("stop, use port 9000 instead");
+    expect(sent.system).toEqual([{ type: "text", text: "You are Claude Code." }]);
   });
 });

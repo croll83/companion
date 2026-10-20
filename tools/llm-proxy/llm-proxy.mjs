@@ -14,6 +14,9 @@
 //    (`effort.levels` in the config, e.g. chat_template_kwargs);
 //  - rewrites `model` to the served model, drops Anthropic-only fields and
 //    server tools, streams SSE back untouched;
+//  - turns {role: "system"} entries inside `messages` (Claude Code's
+//    mid-turn user messages and reminders) into user-turn text, which chat
+//    templates would otherwise drop (see foldSystemMessages);
 //  - emulates Anthropic's web search server tool (web_search_20250305, what
 //    Claude Code's WebSearch asks for) when `search` is configured: it runs
 //    the search itself (Tavily or Brave), has the model write the answer
@@ -35,7 +38,7 @@ import { readFileSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-export const VERSION = "1.1.0";
+export const VERSION = "1.2.0";
 
 /** Fields of the Anthropic API that other servers do not implement (the effort is mapped, not forwarded). */
 export const DEFAULT_DROP_FIELDS = ["context_management", "output_config", "container", "mcp_servers", "service_tier", "metadata", "betas", "speed", "thread", "diagnostics"];
@@ -131,10 +134,69 @@ export function levelFor(config, body) {
   return config.effort.levels.find((l) => l.claude === asked) ?? config.effort.levels.find((l) => l.claude === config.effort.default) ?? null;
 }
 
+// ─── System messages inside `messages` ──────────────────────────────────────
+// Claude Code (checked on 2.1.303) sends what the user types mid-turn
+// ("steering") and some reminders (e.g. environment updates) as a
+// {role: "system"} entry INSIDE `messages`, not in the top-level `system`.
+// The Anthropic API reads it; vLLM's Anthropic endpoint hands it to the chat
+// template, and Qwen templates drop or misplace a system message that is not
+// first, with a 200 and no error: the model never sees the correction. So
+// every such entry becomes text of a user turn, wrapped in <system-reminder>
+// (Claude Code's own wording already says "The user sent a new message while
+// you were working"). The top-level `system` is not touched.
+
+const wrapReminder = (text) => (/^\s*<system-reminder>/.test(text) ? text : `<system-reminder>\n${text}\n</system-reminder>`);
+
+/** A user message's content as blocks (a string becomes one text block). */
+const blocksOf = (content) => (typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : []);
+
+/** Insert reminders into a user turn: after its last tool_result (Anthropic wants tool_result blocks first), else at the start. */
+function prependReminders(message, reminders) {
+  const blocks = blocksOf(message.content);
+  let at = 0;
+  blocks.forEach((b, i) => { if (isObject(b) && b.type === "tool_result") at = i + 1; });
+  return { ...message, content: [...blocks.slice(0, at), ...reminders, ...blocks.slice(at)] };
+}
+
+const appendReminders = (message, reminders) => ({ ...message, content: [...blocksOf(message.content), ...reminders] });
+
+/**
+ * `messages` without {role: "system"} entries (pure): each one's text becomes
+ * a <system-reminder> text block of a user turn. After a user turn: appended
+ * to it. After an assistant turn (or first): put in the next user turn,
+ * after its tool_result blocks; if the next turn is not a user one, or there
+ * is none, a user message of its own. Never two user messages in a row, and
+ * tool_use/tool_result pairs stay as they are. Same array when there is none.
+ */
+export function foldSystemMessages(messages) {
+  if (!Array.isArray(messages) || !messages.some((m) => isObject(m) && m.role === "system")) return messages;
+  const out = [];
+  let pending = [];
+  const flushInto = (next) => {
+    const last = out[out.length - 1];
+    if (last?.role === "user") out[out.length - 1] = appendReminders(last, pending);
+    else if (next?.role === "user") next = prependReminders(next, pending);
+    else out.push({ role: "user", content: pending });
+    pending = [];
+    return next;
+  };
+  for (const m of messages) {
+    if (isObject(m) && m.role === "system") {
+      const text = textOf(m.content).trim();
+      if (text) pending.push({ type: "text", text: wrapReminder(text) });
+      continue;
+    }
+    out.push(pending.length > 0 ? flushInto(m) : m);
+  }
+  if (pending.length > 0) flushInto(undefined);
+  return out;
+}
+
 /** The body sent upstream (pure). `inject`: add the level's parameters (messages, not count_tokens). */
 export function normalizeRequestBody(config, body, model, inject) {
   const level = levelFor(config, body);
   const out = { ...body, model };
+  if (Array.isArray(out.messages)) out.messages = foldSystemMessages(out.messages);
   for (const field of config.dropFields) delete out[field];
   if (!config.keepThinking) delete out.thinking;
   if (Array.isArray(out.tools)) {

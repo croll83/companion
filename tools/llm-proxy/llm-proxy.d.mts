@@ -40,6 +40,8 @@ export function normalizeConfig(raw: unknown): ProxyConfig;
 export function normalizeSearch(raw: unknown): SearchConfig | null;
 export function loadConfig(path: string): ProxyConfig;
 export function levelFor(config: ProxyConfig, body: Record<string, unknown>): ProxyLevel | null;
+export interface ProxyMessage { role: string; content?: unknown }
+export function foldSystemMessages(messages: ProxyMessage[]): ProxyMessage[];
 export function normalizeRequestBody(
   config: ProxyConfig,
   body: Record<string, unknown>,

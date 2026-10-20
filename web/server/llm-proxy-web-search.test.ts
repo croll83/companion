@@ -239,6 +239,21 @@ describe("emulated web search (Tavily)", () => {
     expect(query.length).toBeLessThanOrEqual(400);
   });
 
+  // The model request the emulation builds goes through the same folding as /v1/messages:
+  // a {role: "system"} entry inside messages reaches vLLM as user text, not as a system role.
+  it("folds a system entry inside messages into user text in the model request", async () => {
+    await setup();
+    const body = claudeCodeSearch();
+    body.messages = [...body.messages, { role: "system", content: "Answer in Italian." }] as typeof body.messages;
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    await res.json();
+    const sent = fake.messages()[0].body!.messages as { role: string; content: { type: string; text: string }[] }[];
+    expect(sent.map((m) => m.role)).toEqual(["user"]);
+    expect(sent[0].content.at(-1)!.text).toBe("<system-reminder>\nAnswer in Italian.\n</system-reminder>");
+    expect(sent[0].content.some((b) => b.text.startsWith("Web search results for"))).toBe(true);
+  });
+
   it("does not emulate a request that offers other tools too (server tools dropped as before)", async () => {
     await setup();
     const body = claudeCodeSearch({}, { tools: [{ name: "Bash", input_schema: { type: "object" } }, { type: "web_search_20250305", name: "web_search" }] });
