@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { api, type McpServerConfigAgent, type CompanionEnv, type LinearOAuthConnectionSummary, type DomainSummary } from "../api.js";
+import { api, type McpServerConfigAgent, type CompanionEnv, type LinearOAuthConnectionSummary, type DomainSummary, type LocalProviderView } from "../api.js";
+import type { EffortLevel } from "../utils/backends.js";
 import { useStore } from "../store.js";
 import { getModelsForBackend, getDefaultModel, getDefaultAgentMode, effortChoiceFor, toModelOptions } from "../utils/backends.js";
 import { useCodexModels } from "../utils/use-codex-models.js";
@@ -23,6 +24,8 @@ export interface AgentFormData {
   description: string;
   icon: string;
   backendType: "claude" | "codex";
+  // Claude only: run on this local provider ("" or absent = the Anthropic account); `model` is its model
+  localProvider?: string;
   model: string;
   // Reasoning effort of the runs; "" = the model's default
   effort: string;
@@ -125,8 +128,20 @@ export function AgentEditor({
   // Codex: its live catalogue (models, and each model's effort levels); the
   // static list only while it loads or when Codex never ran here.
   const codexModels = useCodexModels(form.backendType === "codex");
-  const models = form.backendType === "codex" && codexModels ? toModelOptions(codexModels) : getModelsForBackend(form.backendType);
-  const effortChoice = effortChoiceFor(form.backendType, form.model, codexModels);
+  // Local providers (Settings → Local providers): a "Local" agent is Claude
+  // Code on one of them, with its models and its reasoning levels.
+  const [localProviders, setLocalProviders] = useState<LocalProviderView[]>([]);
+  useEffect(() => {
+    api.listLocalProviders().then(setLocalProviders).catch(() => { /* none: no Local option */ });
+  }, []);
+  const localProvider = form.localProvider ? localProviders.find((p) => p.id === form.localProvider) : undefined;
+  const isLocal = !!form.localProvider;
+  const models = isLocal
+    ? (localProvider?.models ?? (form.model ? [form.model] : [])).map((m) => ({ value: m, label: m, icon: "\u25C6" }))
+    : form.backendType === "codex" && codexModels ? toModelOptions(codexModels) : getModelsForBackend(form.backendType);
+  const effortChoice = isLocal
+    ? { levels: (localProvider?.effortLevels ?? []) as EffortLevel[], defaultEffort: (localProvider?.defaultEffort ?? null) as EffortLevel | null }
+    : effortChoiceFor(form.backendType, form.model, codexModels);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(() => countAdvancedFeatures(form) > 0);
   const [showMcpForm, setShowMcpForm] = useState(false);
@@ -184,15 +199,30 @@ export function AgentEditor({
     setForm((prev) => ({
       ...prev,
       backendType: backend,
+      localProvider: "",
       model: getDefaultModel(backend),
       effort: "",
       permissionMode: getDefaultAgentMode(backend),
     }));
   }
 
+  /** Claude Code on a local provider: its default model, its default level. */
+  function handleLocalProviderChange(id: string) {
+    const p = localProviders.find((x) => x.id === id);
+    if (!p) return;
+    setForm((prev) => ({
+      ...prev,
+      backendType: "claude",
+      localProvider: p.id,
+      model: p.defaultModel ?? p.models[0] ?? "",
+      effort: "",
+      permissionMode: getDefaultAgentMode("claude"),
+    }));
+  }
+
   /** A new model keeps the chosen effort only if it takes it; else back to its default. */
   function handleModelChange(model: string) {
-    const { levels } = effortChoiceFor(form.backendType, model, codexModels);
+    const { levels } = isLocal ? effortChoice : effortChoiceFor(form.backendType, model, codexModels);
     setForm((prev) => ({
       ...prev,
       model,
@@ -280,7 +310,8 @@ export function AgentEditor({
 
   // Sessions a fork agent can copy: same backend, with a conversation, not archived.
   const forkableSessions = sdkSessions.filter(
-    (s) => (s.backendType ?? "claude") === form.backendType && !!s.cliSessionId && !s.archived,
+    // Same backend and same kind: a conversation never moves between the Anthropic account and a local provider.
+    (s) => (s.backendType ?? "claude") === form.backendType && !!s.local === isLocal && !!s.cliSessionId && !s.archived,
   );
   const sessionLabel = (s: (typeof sdkSessions)[number]) =>
     `${sessionNames.get(s.sessionId) || s.name || s.cwd.split("/").pop() || s.cwd} (${s.sessionId.slice(0, 8)})`;
@@ -459,7 +490,7 @@ export function AgentEditor({
             <div className="flex items-center bg-cc-hover/50 rounded-lg p-0.5">
               <button
                 onClick={() => handleBackendChange("claude")}
-                className={`flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors cursor-pointer ${form.backendType === "claude" ? "bg-cc-card text-cc-fg font-medium shadow-sm" : "text-cc-muted hover:text-cc-fg"}`}
+                className={`flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors cursor-pointer ${form.backendType === "claude" && !isLocal ? "bg-cc-card text-cc-fg font-medium shadow-sm" : "text-cc-muted hover:text-cc-fg"}`}
               >
                 Claude
               </button>
@@ -469,7 +500,29 @@ export function AgentEditor({
               >
                 Codex
               </button>
+              {(localProviders.length > 0 || isLocal) && (
+                <button
+                  onClick={() => handleLocalProviderChange(form.localProvider || localProviders[0]?.id || "")}
+                  aria-pressed={isLocal}
+                  title="Claude Code on a local provider: no Anthropic usage"
+                  className={`flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors cursor-pointer ${isLocal ? "bg-cc-card text-cc-fg font-medium shadow-sm" : "text-cc-muted hover:text-cc-fg"}`}
+                >
+                  Local
+                </button>
+              )}
             </div>
+
+            {isLocal && (
+              <select
+                aria-label="Local provider"
+                value={form.localProvider}
+                onChange={(e) => handleLocalProviderChange(e.target.value)}
+                className={`${pillDefault} bg-transparent`}
+              >
+                {localProviders.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                {!localProvider && <option value={form.localProvider}>{form.localProvider} (deleted)</option>}
+              </select>
+            )}
 
             {/* Model dropdown pill */}
             <div className="relative" ref={modelDropdownRef}>
@@ -505,6 +558,7 @@ export function AgentEditor({
               value={form.effort}
               onChange={(effort) => updateField("effort", effort)}
               defaultEffort={effortChoice.defaultEffort}
+              labels={isLocal ? localProvider?.effortLabels ?? {} : undefined}
               unavailableNote={form.backendType === "codex" && !codexModels
                 ? "Effort levels unknown until Codex has run once on this machine."
                 : "This model has no effort setting."}

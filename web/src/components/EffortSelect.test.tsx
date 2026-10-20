@@ -79,3 +79,11 @@ describe("EffortSelect", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+// An agent on a local provider: the levels are shown by the model level's name.
+describe("EffortSelect with labels", () => {
+  it("shows the given names", () => {
+    render(<EffortSelect label="Reasoning effort" levels={["low", "high"]} value="" onChange={() => {}} defaultEffort="high" labels={{ low: "off", high: "medium" }} unavailableNote="none" />);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Default (Medium)", "Off", "Medium"]);
+  });
+});

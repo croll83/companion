@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
 import { supportsUltracode } from "../utils/backends.js";
+import { useLocalSession } from "../utils/local-session.js";
 
 /** How long to wait for the CLI to confirm before letting the user retry. */
 const CONFIRM_TIMEOUT_MS = 10_000;
@@ -37,7 +38,9 @@ export function UltracodeToggle({ sessionId }: { sessionId: string }) {
   }, [confirmedAt]);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
-  if (backendType !== "claude" || !cliConnected || !supportsUltracode(currentModel)) {
+  // Ultracode is an Anthropic feature: never on a local provider.
+  const local = useLocalSession(sessionId);
+  if (backendType !== "claude" || local || !cliConnected || !supportsUltracode(currentModel)) {
     return null;
   }
 
