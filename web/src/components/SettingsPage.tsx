@@ -5,6 +5,7 @@ import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "..
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import { getDeviceTimeZone, listTimeZones } from "../utils/message-time.js";
 import { CompanionMcpToggle } from "./CompanionMcpToggle.js";
+import { LocalLlmSettings } from "./LocalLlmSettings.js";
 import { DEFAULT_CLI_BRIDGE_MODE, isCliBridgeMode, type CliBridgeMode } from "../../server/cli-bridge-mode.js";
 
 interface SettingsPageProps {
@@ -73,6 +74,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [timeZone, setTimeZone] = useState("");
   const [timeZoneError, setTimeZoneError] = useState("");
   const [companionMcpEnabled, setCompanionMcpEnabled] = useState(true);
+  const [localLlmEnabled, setLocalLlmEnabled] = useState(false);
   const [activeSection, setActiveSection] = useState<CategoryId>("general");
   const [apiKeyFocused, setApiKeyFocused] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -173,6 +175,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
           useStore.getState().setTimeZone(s.timeZone);
         }
         if (typeof s.companionMcpEnabled === "boolean") setCompanionMcpEnabled(s.companionMcpEnabled);
+        setLocalLlmEnabled(s.localLlmEnabled === true);
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -853,6 +856,9 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 >
                   {providerSaving ? "Saving..." : "Save Provider Settings"}
                 </button>
+
+                {/* Local LLM: off by default; on, the local providers appear */}
+                <LocalLlmSettings enabled={localLlmEnabled} onChange={setLocalLlmEnabled} />
               </div>
             </section>
 

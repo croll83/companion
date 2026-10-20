@@ -25,6 +25,13 @@ export interface AgentConfig {
   // ── Session Config ──
   /** "claude" or "codex" */
   backendType: "claude" | "codex";
+  /**
+   * Claude only: the runs use a local provider (Settings → Local providers)
+   * instead of the Anthropic account; `model` is then that provider's model
+   * (empty = its default) and `effort` one of its levels. The API also
+   * accepts `backendType: "local"` with `local: {provider, model}`.
+   */
+  local?: { provider: string; model?: string };
   /** Model to use (e.g. "claude-sonnet-4-6") */
   model: string;
   /**

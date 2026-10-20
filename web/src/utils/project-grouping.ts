@@ -22,6 +22,8 @@ export interface SessionItem {
   domain?: string;
   /** From before domains (keeps its own folder memory). */
   legacyMemory?: boolean;
+  /** Runs on a local provider (badge "LO"). */
+  local?: import("../types.js").SdkSessionInfo["local"];
 }
 
 export interface DomainRef {

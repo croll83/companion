@@ -131,6 +131,7 @@ export function AgentsPage({ route }: Props) {
       description: agent.description,
       icon: agent.icon || "",
       backendType: agent.backendType,
+      localProvider: agent.local?.provider ?? "",
       model: agent.model,
       effort: agent.effort || "",
       permissionMode: agent.permissionMode,
@@ -244,6 +245,9 @@ export function AgentsPage({ route }: Props) {
         description: form.description,
         icon: form.icon || undefined,
         backendType: form.backendType,
+        // A local agent (Claude Code on a local provider); without it the
+        // server takes the agent off any provider it had.
+        ...(form.localProvider ? { local: { provider: form.localProvider, model: form.model } } : {}),
         model: form.model,
         // null clears a saved effort (back to the model's default)
         effort: form.effort || null,

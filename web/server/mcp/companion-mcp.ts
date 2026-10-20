@@ -225,7 +225,7 @@ function agentSummary(a: JsonObject): JsonObject {
     name: a.name,
     description: a.description || undefined,
     enabled: a.enabled,
-    backend: a.backendType,
+    backend: a.local ? `local (${(a.local as JsonObject).provider})` : a.backendType,
     model: a.model || "(default)",
     effort: a.effort || "(model default)",
     cwd: a.cwd,
@@ -374,7 +374,8 @@ const TOOLS: ToolDef[] = [
         ...SCHEDULE_PROPS,
         webhook: { type: "boolean", description: "Enable a webhook URL that starts a run." },
         cwd: { type: "string", description: "Working folder of the runs. Default: this session's folder." },
-        backend: { type: "string", enum: ["claude", "codex"], description: "Default: this session's backend." },
+        backend: { type: "string", enum: ["claude", "codex", "local"], description: "Default: this session's backend. \"local\" = Claude Code on a local provider (Settings → Local providers): no Anthropic usage." },
+        local_provider: { type: "string", description: "With backend \"local\": the provider id. Default: this session's provider." },
         model: { type: "string", description: "Default: this session's model when the backend is the same." },
         effort: EFFORT_PROP,
         context_mode: { type: "string", enum: ["brief", "fork"], description: "brief (default): fresh session with only the prompt; fork: a copy of this conversation." },
@@ -388,8 +389,13 @@ const TOOLS: ToolDef[] = [
       const prompt = str(args, "prompt", true);
       const self = await ctx.api("GET", `/sessions/${enc(ctx.sessionId)}`) as JsonObject;
       const selfBackend = (self.backendType as string | undefined) ?? "claude";
-      const backend = str(args, "backend") ?? selfBackend;
-      if (backend !== "claude" && backend !== "codex") throw new ToolError('backend must be "claude" or "codex"');
+      const selfLocal = self.local as JsonObject | undefined;
+      const selfKind = selfLocal ? "local" : selfBackend;
+      const backend = str(args, "backend") ?? selfKind;
+      if (backend !== "claude" && backend !== "codex" && backend !== "local") throw new ToolError('backend must be "claude", "codex" or "local"');
+      const provider = backend === "local" ? str(args, "local_provider") ?? (selfLocal?.provider as string | undefined) : undefined;
+      if (backend === "local" && !provider) throw new ToolError('backend "local" needs local_provider (this session is not on a local provider)');
+      const sameKind = backend === selfKind && (backend !== "local" || provider === selfLocal?.provider);
       const contextMode = str(args, "context_mode") ?? "brief";
       if (contextMode !== "brief" && contextMode !== "fork") throw new ToolError('context_mode must be "brief" or "fork"');
       const sandboxed = selfBackend === "codex" && self.codexSandbox === "workspace-write";
@@ -399,7 +405,8 @@ const TOOLS: ToolDef[] = [
         prompt,
         description: str(args, "description") ?? "",
         backendType: backend,
-        model: str(args, "model") ?? (backend === selfBackend ? (self.model as string | undefined) ?? "" : ""),
+        model: str(args, "model") ?? (sameKind ? (self.model as string | undefined) ?? "" : ""),
+        ...(backend === "local" ? { local: { provider } } : {}),
         ...(str(args, "effort") ? { effort: str(args, "effort") } : {}),
         // Codex agents get this session's access: full, unless it is sandboxed.
         permissionMode: backend === "codex" && sandboxed ? "default" : "bypassPermissions",

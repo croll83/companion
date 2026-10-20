@@ -9,7 +9,7 @@ vi.mock("../ws.js", () => ({
 }));
 
 interface MockStoreState {
-  sdkSessions: { sessionId: string; model?: string; effort?: string; backendType?: string; cwd: string }[];
+  sdkSessions: { sessionId: string; model?: string; effort?: string; backendType?: string; cwd: string; local?: Record<string, unknown> }[];
   cliConnected: Map<string, boolean>;
   sessions: Map<string, { model?: string; effort?: string; backend_type?: string }>;
 }
@@ -129,5 +129,35 @@ describe("EffortSwitcher", () => {
     fireEvent.click(screen.getByLabelText("Set reasoning effort"));
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// A local provider: its levels are Claude Code effort values the proxy maps to
+// the model's, shown by the model level's name; a change is a normal set_effort
+// (the CLI applies it at runtime and sends it with the next request).
+describe("EffortSwitcher on a local provider", () => {
+  beforeEach(() => {
+    resetStore({
+      sdkSessions: [{ sessionId: "s1", model: "my-model", effort: "high", backendType: "claude", cwd: "/repo", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: ["low", "high", "xhigh"], effortLabels: { low: "off", high: "medium", xhigh: "xhigh" }, defaultEffort: "high" } }],
+      sessions: new Map([["s1", { model: "my-model" }]]),
+    });
+  });
+
+  it("shows the provider's levels by their model names and sends the effort value", () => {
+    render(<EffortSwitcher sessionId="s1" />);
+    expect(screen.getByLabelText("Set reasoning effort")).toHaveTextContent("Medium");
+    fireEvent.click(screen.getByLabelText("Set reasoning effort"));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Off", "Medium", "Xhigh"]);
+    fireEvent.click(screen.getByRole("option", { name: "Off" }));
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_effort", effort: "low" });
+  });
+
+  it("falls back to the provider's default level when none is recorded", () => {
+    resetStore({
+      sdkSessions: [{ sessionId: "s1", model: "my-model", backendType: "claude", cwd: "/repo", local: { ...{ provider: "lab", model: "my-model", providerName: "Lab", effortLevels: ["low", "high", "xhigh"], effortLabels: { low: "off", high: "medium", xhigh: "xhigh" }, defaultEffort: "high" }, effortLabels: undefined } }],
+      sessions: new Map([["s1", { model: "my-model" }]]),
+    });
+    render(<EffortSwitcher sessionId="s1" />);
+    expect(screen.getByLabelText("Set reasoning effort")).toHaveTextContent("High");
   });
 });

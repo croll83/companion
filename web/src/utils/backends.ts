@@ -132,6 +132,8 @@ export function getDefaultAgentMode(backend: BackendType): string {
 
 /** Human label for an effort level. */
 const EFFORT_LABELS: Record<string, string> = {
+  // Local providers (Qwen templates): thinking off.
+  off: "Off",
   low: "Low",
   medium: "Medium",
   high: "High",

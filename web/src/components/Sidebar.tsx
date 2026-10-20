@@ -441,6 +441,7 @@ export function Sidebar() {
       agentName: bridgeState?.agentName || sdkInfo?.agentName,
       domain: sdkInfo?.domain,
       legacyMemory: sdkInfo?.legacyMemory,
+      local: sdkInfo?.local,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 

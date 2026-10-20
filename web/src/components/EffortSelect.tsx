@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { effortLabel, type EffortLevel } from "../utils/backends.js";
+import { localEffortLabel } from "../utils/local-session.js";
 
 interface EffortSelectProps {
   /** Accessible name of the select. */
@@ -20,6 +21,8 @@ interface EffortSelectProps {
   /** An extra line under the select (e.g. "runs use the model's default"). */
   note?: string;
   className?: string;
+  /** Names to show instead of the effort's own (a local provider's model levels). */
+  labels?: Record<string, string>;
 }
 
 /**
@@ -32,7 +35,8 @@ interface EffortSelectProps {
  * catalogue, or a Claude model without effort control (parity rule: disable
  * with a note rather than offer something that does nothing).
  */
-export function EffortSelect({ label, levels, value, onChange, defaultEffort, unavailableNote, note, className = "" }: EffortSelectProps) {
+export function EffortSelect({ label, levels, value, onChange, defaultEffort, unavailableNote, note, className = "", labels }: EffortSelectProps) {
+  const name = (level: string) => (labels ? localEffortLabel(labels, level) : effortLabel(level));
   const noteId = useId();
   const offersDefault = defaultEffort !== undefined;
   const unavailable = levels.length === 0;
@@ -51,10 +55,10 @@ export function EffortSelect({ label, levels, value, onChange, defaultEffort, un
         className={`${className} disabled:opacity-50 disabled:cursor-not-allowed`}
       >
         {(offersDefault || unavailable) && (
-          <option value="">{defaultEffort ? `Default (${effortLabel(defaultEffort)})` : "Default"}</option>
+          <option value="">{defaultEffort ? `Default (${name(defaultEffort)})` : "Default"}</option>
         )}
-        {levels.map((l) => <option key={l} value={l}>{effortLabel(l)}</option>)}
-        {stale && <option value={value}>{`${effortLabel(value)} (not supported)`}</option>}
+        {levels.map((l) => <option key={l} value={l}>{name(l)}</option>)}
+        {stale && <option value={value}>{`${name(value)} (not supported)`}</option>}
       </select>
       {lines.length > 0 && <span id={noteId} className="text-[10px] text-cc-muted">{lines.join(" ")}</span>}
     </span>

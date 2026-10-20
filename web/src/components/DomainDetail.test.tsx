@@ -14,6 +14,8 @@ const mockApi = vi.hoisted(() => ({
   getDomainLinear: vi.fn(),
   listLinearConnections: vi.fn(),
   getDomainBoard: vi.fn(),
+  // The domain's default local provider (hidden while none is configured).
+  listLocalProviders: vi.fn(() => Promise.resolve([] as unknown[])),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 vi.mock("../ws.js", () => ({ sendMcpAuthenticate: vi.fn(), sendMcpOAuthCallback: vi.fn() }));

@@ -1,3 +1,4 @@
+import { resolveLocalChoice } from "./local-providers.js";
 import { usesDomain, type CliLauncher, type SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { SessionStore } from "./session-store.js";
@@ -96,6 +97,12 @@ export interface CreateSessionRequest {
   /** "new": create `folderName` inside the domain folder; "existing": attach `cwd`. */
   folderMode?: "new" | "existing";
   folderName?: string;
+  /**
+   * Run on a local provider (backend "claude", or the shorthand "local"):
+   * provider id and model (default: the provider's). `effort` is then one of
+   * the provider's levels.
+   */
+  local?: { provider?: string; model?: string };
 }
 
 export type CreateSessionResult =
@@ -428,9 +435,37 @@ export class SessionOrchestrator {
           ? body.resumeSessionAt.trim()
           : undefined;
       const forkSession = body.forkSession === true;
-      const backend = (body.backend ?? "claude") as BackendType;
+      // "local" is Claude Code on a local provider (local-spawn.ts).
+      const wantsLocal = body.backend === "local" || (body.local !== undefined && body.local !== null);
+      const backend = (wantsLocal ? "claude" : body.backend ?? "claude") as BackendType;
       if (backend !== "claude" && backend !== "codex") {
         return { ok: false, error: `Invalid backend: ${String(body.backend)}`, status: 400 };
+      }
+      if (wantsLocal && body.backend === "codex") {
+        return { ok: false, error: "Local providers run on Claude Code sessions only", status: 400 };
+      }
+      let local: { provider: string; model: string } | undefined;
+      let effort = body.effort;
+      if (wantsLocal) {
+        const choice = resolveLocalChoice(body.local ?? {}, body.effort);
+        if (!choice.ok) return { ok: false, error: choice.error, status: 400 };
+        local = choice.local;
+        effort = choice.effort;
+      }
+      // A conversation never moves between the Anthropic account and a local
+      // model: local thinking blocks carry no signature the Anthropic API
+      // accepts (and the other way round is just as untested).
+      if (resumeSessionAt) {
+        const source = this.launcher.listSessions().find((s) => s.cliSessionId === resumeSessionAt);
+        if (source && !!source.local !== !!local) {
+          return {
+            ok: false,
+            error: local
+              ? "A conversation started on the Anthropic account cannot continue on a local provider"
+              : "A conversation started on a local provider cannot continue on the Anthropic account",
+            status: 400,
+          };
+        }
       }
       // Sandboxed/container sessions were removed. A caller that still asks
       // for isolation (old UI bundle, external API client) must get an error
@@ -541,13 +576,13 @@ export class SessionOrchestrator {
       }
 
       // --- Step: Launch CLI ---
-      if (onProgress) await onProgress("launching_cli", `Launching ${backend === "codex" ? "Codex" : "Claude Code"}...`, "in_progress");
+      if (onProgress) await onProgress("launching_cli", `Launching ${backend === "codex" ? "Codex" : local ? `Claude Code on ${local.model}` : "Claude Code"}...`, "in_progress");
 
       let session: SdkSessionInfo;
       try {
         session = this.launcher.launch({
-          model: body.model,
-          effort: body.effort,
+          model: local ? local.model : body.model,
+          effort,
           permissionMode: body.permissionMode,
           cwd,
           claudeBinary: body.claudeBinary,
@@ -564,6 +599,7 @@ export class SessionOrchestrator {
           forkSession,
           systemPrompt: backend === "codex" ? linearSystemPrompt : undefined,
           domain,
+          ...(local ? { local } : {}),
         });
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);

@@ -8,7 +8,7 @@ vi.mock("../ws.js", () => ({
 }));
 
 interface MockStoreState {
-  sdkSessions: { sessionId: string; model?: string; backendType?: string; ultracode?: boolean; cwd: string }[];
+  sdkSessions: { sessionId: string; model?: string; backendType?: string; ultracode?: boolean; cwd: string; local?: Record<string, unknown> }[];
   cliConnected: Map<string, boolean>;
   sessions: Map<string, { model?: string; backend_type?: string; ultracode?: boolean; ultracodeConfirmedAt?: number }>;
 }
@@ -80,5 +80,16 @@ describe("UltracodeToggle", () => {
     resetStore({ cliConnected: new Map([["s1", false]]) });
     const { container } = render(<UltracodeToggle sessionId="s1" />);
     expect(container.innerHTML).toBe("");
+  });
+});
+
+// Ultracode is an Anthropic feature: never offered on a local provider.
+describe("UltracodeToggle on a local provider", () => {
+  it("is hidden", () => {
+    resetStore({
+      sdkSessions: [{ sessionId: "s1", model: "claude-fable-5", backendType: "claude", cwd: "/repo", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } }],
+    });
+    const { container } = render(<UltracodeToggle sessionId="s1" />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

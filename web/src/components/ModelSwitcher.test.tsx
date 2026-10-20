@@ -14,7 +14,7 @@ vi.mock("../ws.js", () => ({
 }));
 
 interface MockStoreState {
-  sdkSessions: { sessionId: string; model?: string; backendType?: string; cwd: string }[];
+  sdkSessions: { sessionId: string; model?: string; backendType?: string; cwd: string; local?: Record<string, unknown> }[];
   cliConnected: Map<string, boolean>;
   sessions: Map<string, { model?: string; backend_type?: string }>;
 }
@@ -224,5 +224,17 @@ describe("ModelSwitcher", () => {
     fireEvent.click(screen.getByLabelText("Switch model"));
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// A local session keeps its model: a Claude model would move the conversation off the provider.
+describe("ModelSwitcher on a local provider", () => {
+  it("is hidden", () => {
+    resetStore({
+      sdkSessions: [{ sessionId: "s1", model: "my-model", backendType: "claude", cwd: "/repo", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } }],
+      sessions: new Map([["s1", { model: "my-model" }]]),
+    });
+    const { container } = render(<ModelSwitcher sessionId="s1" />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
