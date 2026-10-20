@@ -6,7 +6,13 @@
 #   sudo ./install.sh --user <service-user> --upstream http://127.0.0.1:8000 \
 #        [--listen 0.0.0.0:8787] [--model <served-model-name>] [--context 131072]
 #        [--runtime /path/to/node]   # when node is not on the user's login PATH (nvm)
+#        [--search-backend tavily|brave|none --search-api-key-file <file>]
+#        [--search-max-results 5] [--search-url <url>]
 #   sudo ./install.sh --uninstall [--purge]     # --purge also deletes the config (token)
+#
+# The --search-* options turn web search on (or off with "none") in a new or
+# an existing config. The API key is read from the file (keep it out of the
+# shell history and of `ps`), stored only in the 0600 config, never printed.
 #
 # Installs:
 #   /opt/companion-llm-proxy/llm-proxy.mjs            the proxy (no dependencies)
@@ -28,8 +34,12 @@ DESTDIR=""
 RUNTIME=""
 UNINSTALL=0
 PURGE=0
+SEARCH_BACKEND=""
+SEARCH_KEY_FILE=""
+SEARCH_MAX=""
+SEARCH_URL=""
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,6 +50,10 @@ while [ $# -gt 0 ]; do
     --context) CONTEXT="$2"; shift 2 ;;
     --destdir) DESTDIR="${2%/}"; shift 2 ;;
     --runtime) RUNTIME="$2"; shift 2 ;;
+    --search-backend) SEARCH_BACKEND="$2"; shift 2 ;;
+    --search-api-key-file) SEARCH_KEY_FILE="$2"; shift 2 ;;
+    --search-max-results) SEARCH_MAX="$2"; shift 2 ;;
+    --search-url) SEARCH_URL="$2"; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --purge) PURGE=1; shift ;;
     -h|--help) usage 0 ;;
@@ -70,6 +84,14 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 [ -n "$SERVICE_USER" ] || { echo "--user is required (the account the service runs as)" >&2; exit 2; }
+case "$SEARCH_BACKEND" in
+  ""|none|tavily|brave) ;;
+  *) echo "--search-backend must be tavily, brave or none" >&2; exit 2 ;;
+esac
+if [ -n "$SEARCH_KEY_FILE" ] && [ ! -r "$SEARCH_KEY_FILE" ]; then
+  echo "Cannot read the search API key file $SEARCH_KEY_FILE" >&2
+  exit 2
+fi
 if [ -z "$DESTDIR" ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
   echo "No user $SERVICE_USER" >&2
   exit 2
@@ -109,8 +131,37 @@ if [ ! -f "$CONF" ]; then
   ' "$HOST" "$PORT" "$UPSTREAM" "$TOKEN" "$MODEL" "$CONTEXT" "$CONF")
   CREATED=1
 fi
+# Web search: set (or remove) the `search` block, keeping the rest of the config.
+if [ -n "$SEARCH_BACKEND" ]; then
+  (umask 077 && "$RUNTIME" -e '
+    const fs = require("node:fs");
+    const [file, backend, keyFile, max, url] = process.argv.slice(1);
+    const cfg = JSON.parse(fs.readFileSync(file, "utf-8"));
+    if (backend === "none") {
+      delete cfg.search;
+    } else {
+      const prev = cfg.search && cfg.search.backend === backend ? cfg.search : {};
+      const apiKey = keyFile ? fs.readFileSync(keyFile, "utf-8").trim() : prev.apiKey;
+      if (!apiKey) { console.error("--search-api-key-file is required for " + backend); process.exit(2); }
+      cfg.search = { ...prev, backend, apiKey };
+      if (max) cfg.search.maxResults = Number(max);
+      if (url) cfg.search.url = url;
+    }
+    fs.writeFileSync(file + ".new", JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+  ' "$CONF" "$SEARCH_BACKEND" "$SEARCH_KEY_FILE" "$SEARCH_MAX" "$SEARCH_URL")
+  # The new config replaces the old one only if the proxy accepts it.
+  if ! "$RUNTIME" "$APP_DIR/llm-proxy.mjs" --config "$CONF.new" --check >/dev/null; then
+    rm -f "$CONF.new"
+    echo "Config left unchanged." >&2
+    exit 2
+  fi
+  mv -f "$CONF.new" "$CONF"
+  if [ "$SEARCH_BACKEND" = "none" ]; then echo "Web search: off"; else echo "Web search: $SEARCH_BACKEND (its key is stored in $CONF only)"; fi
+fi
 chmod 0700 "$CONF_DIR"
 chmod 0600 "$CONF"
+# Refuse a config the proxy would not start with (the service would loop on it).
+"$RUNTIME" "$APP_DIR/llm-proxy.mjs" --config "$CONF" --check >/dev/null
 if [ -z "$DESTDIR" ]; then chown -R "$SERVICE_USER" "$CONF_DIR"; fi
 
 install -d -m 0755 "$(dirname "$UNIT")"
@@ -145,6 +196,6 @@ echo "Installed $NAME ($RUNTIME), config $CONF"
 if [ "$CREATED" -eq 1 ]; then
   echo "Proxy token (put it in Companion → Settings → Providers → Local LLM): $TOKEN"
 else
-  echo "Config kept as it was (edit it, then: systemctl restart $NAME)"
+  echo "Config kept${SEARCH_BACKEND:+ (web search updated)} (edit it, then: systemctl restart $NAME)"
 fi
 echo "Check: curl -s http://<this-host>:${LISTEN##*:}/health ; logs: journalctl -u $NAME -f"

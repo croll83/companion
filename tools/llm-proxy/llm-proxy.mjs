@@ -13,7 +13,12 @@
 //    the effort switcher at runtime) to the model's reasoning parameters
 //    (`effort.levels` in the config, e.g. chat_template_kwargs);
 //  - rewrites `model` to the served model, drops Anthropic-only fields and
-//    server tools (web search), streams SSE back untouched;
+//    server tools, streams SSE back untouched;
+//  - emulates Anthropic's web search server tool (web_search_20250305, what
+//    Claude Code's WebSearch asks for) when `search` is configured: it runs
+//    the search itself (Tavily or Brave), has the model write the answer
+//    from the results, and returns the server_tool_use and
+//    web_search_tool_result blocks the CLI reads (see webSearch below);
 //  - answers count_tokens locally when the upstream has none, and words a
 //    context-length 400 as Anthropic does ("prompt is too long") so Claude
 //    Code compacts;
@@ -27,10 +32,10 @@
 
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
 
 /** Fields of the Anthropic API that other servers do not implement (the effort is mapped, not forwarded). */
 export const DEFAULT_DROP_FIELDS = ["context_management", "output_config", "container", "mcp_servers", "service_tier", "metadata", "betas", "speed", "thread", "diagnostics"];
@@ -56,6 +61,14 @@ export const QWEN_LEVELS = [
 
 const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 
+/** Web search backends (config `search.backend`) and their default endpoints. */
+export const SEARCH_BACKENDS = ["tavily", "brave"];
+const SEARCH_URLS = { tavily: "https://api.tavily.com/search", brave: "https://api.search.brave.com/res/v1/web/search" };
+const DEFAULT_SEARCH_RESULTS = 5;
+const DEFAULT_SEARCH_TIMEOUT_MS = 10_000;
+/** Longest query sent to a backend (Tavily and Brave both stop at 400 characters). */
+export const MAX_QUERY_LENGTH = 400;
+
 /** Validate and complete a config object. Throws with a readable message. */
 export function normalizeConfig(raw) {
   if (!isObject(raw)) throw new Error("config must be a JSON object");
@@ -75,6 +88,7 @@ export function normalizeConfig(raw) {
   if (levels.length > 0 && !levels.some((l) => l.claude === defaultClaude)) throw new Error("effort.default must be the `claude` value of one of the levels");
   const window = Number(raw.contextWindow ?? 0);
   return {
+    search: normalizeSearch(raw.search),
     listen: { host: typeof listen.host === "string" ? listen.host : "0.0.0.0", port: Number(listen.port ?? 8787) },
     upstream: { url: upstream.url.replace(/\/+$/, "").replace(/\/v1$/, ""), token: typeof upstream.token === "string" ? upstream.token : "" },
     token: raw.token,
@@ -85,6 +99,19 @@ export function normalizeConfig(raw) {
     keepThinking: raw.keepThinking === true,
     log: raw.log !== false,
   };
+}
+
+/** The `search` block: null when web search is off (absent, null or backend "none"). */
+export function normalizeSearch(raw) {
+  if (raw === undefined || raw === null || (isObject(raw) && (raw.backend === undefined || raw.backend === "none"))) return null;
+  if (!isObject(raw) || !SEARCH_BACKENDS.includes(raw.backend)) throw new Error(`search.backend must be one of ${SEARCH_BACKENDS.join(", ")} (or "none")`);
+  if (typeof raw.apiKey !== "string" || !raw.apiKey.trim()) throw new Error(`search.apiKey is required for ${raw.backend}`);
+  if (raw.url !== undefined && (typeof raw.url !== "string" || !/^https?:\/\//.test(raw.url))) throw new Error("search.url must be an http(s) URL");
+  const maxResults = Number(raw.maxResults ?? DEFAULT_SEARCH_RESULTS);
+  if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 20) throw new Error("search.maxResults must be a whole number from 1 to 20");
+  const timeoutMs = Number(raw.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60_000) throw new Error("search.timeoutMs must be between 1000 and 60000");
+  return { backend: raw.backend, apiKey: raw.apiKey.trim(), url: raw.url ?? SEARCH_URLS[raw.backend], maxResults, timeoutMs };
 }
 
 export function loadConfig(path) {
@@ -153,6 +180,202 @@ function presented(headers) {
   return bearer ?? (typeof headers["x-api-key"] === "string" ? headers["x-api-key"].trim() : "");
 }
 
+// ─── Web search ──────────────────────────────────────────────────────────────
+// Claude Code's WebSearch tool (checked on CLI 2.1.303) does not search by
+// itself: it sends a separate POST /v1/messages whose only tool is the
+// Anthropic server tool {type: "web_search_20250305", name: "web_search",
+// max_uses: 8, allowed_domains?, blocked_domains?}, with one user message
+// "Perform a web search for the query: <query>" and a system prompt asking
+// for one search and a brief summary. From the answer it reads, in order:
+// server_tool_use blocks, web_search_tool_result blocks (only `title` and
+// `url` of each result, or `content.error_code` on an error) and the text,
+// which becomes the WebSearch tool result the main model sees.
+//
+// The proxy answers that request itself when `search` is configured: one
+// search per request (the query of the prompt), the results given to the
+// model as context, and an Anthropic-shaped answer (JSON or SSE, as asked).
+// A request that carries other tools besides web search is not emulated:
+// its server tools are dropped as before.
+
+/** Error codes of a web_search_tool_result (Anthropic API). */
+export const SEARCH_ERROR_CODES = ["too_many_requests", "invalid_tool_input", "max_uses_exceeded", "query_too_long", "request_too_large", "unavailable"];
+
+const CLAUDE_CODE_SEARCH_PROMPT = /^\s*Perform a web search for the query:\s*/;
+
+/** The web search server tool of a request that has no other tool, else null. */
+export function webSearchToolOf(body) {
+  if (!Array.isArray(body.tools) || body.tools.length !== 1) return null;
+  const t = body.tools[0];
+  return isObject(t) && typeof t.type === "string" && t.type.startsWith("web_search_") ? t : null;
+}
+
+function textOf(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((b) => isObject(b) && b.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n");
+}
+
+/**
+ * The query of a web search request: Claude Code's "Perform a web search for
+ * the query: …" (kept whole: a longer one is query_too_long), else the last
+ * user message, cut to MAX_QUERY_LENGTH.
+ */
+export function webSearchQuery(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const last = [...messages].reverse().find((m) => isObject(m) && m.role === "user");
+  const text = textOf(last?.content).trim();
+  if (CLAUDE_CODE_SEARCH_PROMPT.test(text)) return { query: text.replace(CLAUDE_CODE_SEARCH_PROMPT, "").trim(), explicit: true };
+  return { query: text.slice(0, MAX_QUERY_LENGTH).trim(), explicit: false };
+}
+
+const escapeRe = (s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Anthropic's domain filter rules: `example.com` also covers its subdomains,
+ * `docs.example.com` only that subdomain (and below), `example.com/blog`
+ * the paths under /blog, `*` is a wildcard in the path only.
+ */
+export function domainMatches(url, entry) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  const [host, ...rest] = String(entry).trim().toLowerCase().replace(/^https?:\/\//, "").split("/");
+  const h = u.hostname.toLowerCase();
+  if (!host || (h !== host && !h.endsWith(`.${host}`))) return false;
+  const path = rest.join("/");
+  if (!path) return true;
+  return new RegExp(`^/${path.split("*").map(escapeRe).join(".*")}`).test(u.pathname);
+}
+
+export function filterByDomains(results, allowed, blocked) {
+  return results.filter((r) =>
+    (!allowed?.length || allowed.some((d) => domainMatches(r.url, d))) && !(blocked?.length && blocked.some((d) => domainMatches(r.url, d))));
+}
+
+const stripTags = (s) => String(s ?? "").replace(/<[^>]+>/g, "").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&").trim();
+
+/** Bare host names for a backend's own domain filter (paths are filtered here afterwards). */
+const hostsOf = (domains) => [...new Set((domains ?? []).map((d) => String(d).replace(/^https?:\/\//, "").split("/")[0]).filter(Boolean))];
+
+class SearchError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function backendError(status) {
+  if (status === 429 || status === 432 || status === 433) return "too_many_requests";
+  if (status === 400 || status === 422) return "invalid_tool_input";
+  return "unavailable";
+}
+
+/** One search on the configured backend: [{url, title, snippet, pageAge}]. Throws SearchError. */
+async function searchBackend(search, query, filter, doFetch) {
+  const signal = AbortSignal.timeout(search.timeoutMs);
+  // Ask for more when the results are filtered here, so some are left.
+  const wanted = filter.allowed?.length || filter.blocked?.length ? 20 : search.maxResults;
+  let res;
+  try {
+    if (search.backend === "tavily") {
+      res = await doFetch(search.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${search.apiKey}` },
+        body: JSON.stringify({
+          query,
+          search_depth: "basic",
+          max_results: wanted,
+          include_published_date: true,
+          ...(filter.allowed?.length ? { include_domains: hostsOf(filter.allowed) } : {}),
+          ...(filter.blocked?.length ? { exclude_domains: hostsOf(filter.blocked) } : {}),
+        }),
+        signal,
+      });
+    } else {
+      const url = new URL(search.url);
+      url.searchParams.set("q", query);
+      url.searchParams.set("count", String(wanted));
+      res = await doFetch(url.toString(), { headers: { accept: "application/json", "x-subscription-token": search.apiKey }, signal });
+    }
+  } catch (err) {
+    throw new SearchError("unavailable", err?.name === "TimeoutError" ? `no answer within ${search.timeoutMs / 1000} s` : String(err?.message ?? err));
+  }
+  if (!res.ok) {
+    await res.body?.cancel?.();
+    throw new SearchError(backendError(res.status), `HTTP ${res.status}`);
+  }
+  let data;
+  try { data = await res.json(); } catch (err) { throw new SearchError("unavailable", `not JSON (${err?.message ?? err})`); }
+  const raw = search.backend === "tavily"
+    ? (Array.isArray(data?.results) ? data.results : []).map((r) => ({ url: r?.url, title: r?.title, snippet: r?.content, pageAge: r?.published_date }))
+    : (Array.isArray(data?.web?.results) ? data.web.results : []).map((r) => ({ url: r?.url, title: stripTags(r?.title), snippet: stripTags(r?.description), pageAge: r?.page_age ?? r?.age }));
+  return raw
+    .filter((r) => typeof r.url === "string" && /^https?:\/\//.test(r.url))
+    .map((r) => ({ url: r.url, title: typeof r.title === "string" && r.title ? r.title : r.url, snippet: typeof r.snippet === "string" ? r.snippet : "", pageAge: typeof r.pageAge === "string" && r.pageAge ? r.pageAge : null }));
+}
+
+/**
+ * Run the search a web search request asks for, or say why not:
+ * {ok: true, query, results} | {ok: false, query, code, reason}. Never throws.
+ */
+export async function runWebSearch(search, tool, body, doFetch) {
+  const { query, explicit } = webSearchQuery(body);
+  const fail = (code, reason) => ({ ok: false, query, code, reason });
+  if (!search) return fail("unavailable", "no search backend configured");
+  if (tool.max_uses !== undefined && !(Number(tool.max_uses) >= 1)) return fail("max_uses_exceeded", `max_uses is ${tool.max_uses}`);
+  if (!query) return fail("invalid_tool_input", "empty query");
+  if (explicit && query.length > MAX_QUERY_LENGTH) return fail("query_too_long", `${query.length} characters > ${MAX_QUERY_LENGTH}`);
+  const filter = { allowed: Array.isArray(tool.allowed_domains) ? tool.allowed_domains : [], blocked: Array.isArray(tool.blocked_domains) ? tool.blocked_domains : [] };
+  try {
+    const found = await searchBackend(search, query, filter, doFetch);
+    return { ok: true, query, results: filterByDomains(found, filter.allowed, filter.blocked).slice(0, search.maxResults) };
+  } catch (err) {
+    return fail(err instanceof SearchError ? err.code : "unavailable", String(err?.message ?? err));
+  }
+}
+
+/** The web_search_tool_result block of an outcome (encrypted_content: the snippet in base64, nothing is encrypted). */
+export function webSearchResultBlock(toolUseId, outcome) {
+  return {
+    type: "web_search_tool_result",
+    tool_use_id: toolUseId,
+    content: outcome.ok
+      ? outcome.results.map((r) => ({ type: "web_search_result", url: r.url, title: r.title, encrypted_content: Buffer.from(r.snippet).toString("base64"), page_age: r.pageAge }))
+      : { type: "web_search_tool_result_error", error_code: outcome.code },
+  };
+}
+
+/** The results as the model reads them, appended to the last user message. */
+export function webSearchContext(outcome) {
+  if (outcome.results.length === 0) return `The web search for "${outcome.query}" returned no results. Say so.`;
+  const lines = outcome.results.map((r, i) => `[${i + 1}] ${r.title}\nURL: ${r.url}${r.pageAge ? `\nPublished: ${r.pageAge}` : ""}${r.snippet ? `\n${r.snippet}` : ""}`);
+  return `Web search results for "${outcome.query}":\n\n${lines.join("\n\n")}\n\nAnswer from these results only and cite the sources you use as markdown links.`;
+}
+
+/**
+ * The model request of an emulated web search: no tools, the results added
+ * to the last user message. Claude Code asks without thinking (its search
+ * call has no `thinking` field), so it runs at the lowest level then.
+ */
+export function webSearchModelBody(config, body, outcome) {
+  const messages = Array.isArray(body.messages) ? body.messages.map((m) => ({ ...m })) : [];
+  const idx = messages.map((m) => m?.role).lastIndexOf("user");
+  const extra = { type: "text", text: webSearchContext(outcome) };
+  if (idx >= 0) {
+    const c = messages[idx].content;
+    messages[idx].content = [...(typeof c === "string" ? [{ type: "text", text: c }] : Array.isArray(c) ? c : []), extra];
+  } else {
+    messages.push({ role: "user", content: [extra] });
+  }
+  const out = { ...body, messages };
+  delete out.tools;
+  delete out.tool_choice;
+  const thinkingOff = !isObject(body.thinking) || body.thinking.type === "disabled";
+  if (thinkingOff && config.effort.levels.length > 0) out.output_config = { ...(isObject(body.output_config) ? body.output_config : {}), effort: config.effort.levels[0].claude };
+  return out;
+}
+
+export const newServerToolUseId = () => `srvtoolu_${randomBytes(12).toString("hex")}`;
+
 /** Tokens and timings collected while an answer streams through. */
 class AnswerTap {
   constructor(now) {
@@ -197,14 +420,14 @@ export function createProxy(config, deps = {}) {
   const startedAt = now();
   /** Per-session numbers (bounded: the 500 most recent sessions). */
   const sessions = new Map();
-  const totals = { requests: 0, errors: 0, inputTokens: 0, outputTokens: 0 };
+  const totals = { requests: 0, errors: 0, inputTokens: 0, outputTokens: 0, webSearches: 0 };
   let countTokensMissing = false;
 
   const sessionOf = (headers) => String(headers["x-companion-session"] || headers["x-claude-code-session-id"] || "unknown").slice(0, 100);
   const metricsOf = (id) => {
     let m = sessions.get(id);
     if (!m) {
-      m = { requests: 0, errors: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalDurationMs: 0, authSeen: [] };
+      m = { requests: 0, errors: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalDurationMs: 0, webSearches: 0, authSeen: [] };
       sessions.set(id, m);
       if (sessions.size > 500) sessions.delete(sessions.keys().next().value);
     }
@@ -224,6 +447,8 @@ export function createProxy(config, deps = {}) {
     m.outputTokens += tap.outputTokens;
     m.cacheReadTokens += tap.cacheReadTokens;
     m.totalDurationMs += durationMs;
+    m.webSearches += info.webSearches ?? 0;
+    totals.webSearches += info.webSearches ?? 0;
     totals.inputTokens += tap.inputTokens;
     totals.outputTokens += tap.outputTokens;
     const ttftMs = tap.firstTokenAt !== undefined ? tap.firstTokenAt - info.started : undefined;
@@ -240,7 +465,7 @@ export function createProxy(config, deps = {}) {
       ...(genMs > 0 && tap.outputTokens > 0 ? { outputTokensPerSec: Math.round((tap.outputTokens / genMs) * 10_000) / 10 } : {}),
     };
     if (config.log) {
-      logger(`[llm-proxy] ${id.slice(0, 8)} ${info.status} ${info.model} effort=${info.claudeEffort ?? "-"}→${info.level?.name ?? "-"} in=${tap.inputTokens} out=${tap.outputTokens} ttft=${ttftMs ?? "-"}ms dur=${durationMs}ms`);
+      logger(`[llm-proxy] ${id.slice(0, 8)} ${info.status} ${info.model} effort=${info.claudeEffort ?? "-"}→${info.level?.name ?? "-"} in=${tap.inputTokens} out=${tap.outputTokens} ttft=${ttftMs ?? "-"}ms dur=${durationMs}ms${info.webSearches !== undefined ? ` web_search=${info.webSearches}` : ""}`);
     }
   }
 
@@ -302,6 +527,152 @@ export function createProxy(config, deps = {}) {
     return upstreamModel ?? "default";
   }
 
+  /**
+   * A web search request (webSearchToolOf): search, then the model's answer
+   * from the results, returned after the server_tool_use and
+   * web_search_tool_result blocks. Streaming: the two blocks go out first
+   * (the query as soon as the request arrives), then the model's stream with
+   * its block indexes shifted by two. On a search error the answer is the
+   * two blocks only, the model is not asked.
+   */
+  async function handleWebSearch(req, res, id, parsed, tool) {
+    const model = await servedModel();
+    const claudeEffort = isObject(parsed.output_config) ? parsed.output_config.effort : undefined;
+    if (Array.isArray(tool.allowed_domains) && tool.allowed_domains.length > 0 && Array.isArray(tool.blocked_domains) && tool.blocked_domains.length > 0) {
+      return apiError(res, 400, "invalid_request_error", "web_search: use allowed_domains or blocked_domains, not both");
+    }
+    const started = now();
+    const tap = new AnswerTap(now);
+    const stream = parsed.stream === true;
+    const toolUseId = newServerToolUseId();
+    const msgId = `msg_${randomBytes(12).toString("hex")}`;
+    const toolUse = { type: "server_tool_use", id: toolUseId, name: typeof tool.name === "string" ? tool.name : "web_search", input: { query: webSearchQuery(parsed).query } };
+    const controller = new AbortController();
+    res.on("close", () => { if (!res.writableFinished) controller.abort(); });
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    let level = null;
+    let searches = 0;
+    const finish = (status) => record(id, tap, { started, ended: now(), status, model, level, claudeEffort, webSearches: searches });
+
+    if (stream) {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      send("message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+      send("content_block_start", { type: "content_block_start", index: 0, content_block: { ...toolUse, input: {} } });
+      send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(toolUse.input) } });
+      send("content_block_stop", { type: "content_block_stop", index: 0 });
+    }
+    const searchStarted = now();
+    const outcome = await runWebSearch(config.search, tool, parsed, doFetch);
+    if (outcome.ok) searches = 1;
+    if (config.log) {
+      logger(`[llm-proxy] ${id.slice(0, 8)} web_search ${config.search?.backend ?? "-"} ${outcome.ok ? `${outcome.results.length} results` : `error=${outcome.code} (${outcome.reason})`} in ${now() - searchStarted}ms`, !outcome.ok);
+    }
+    const resultBlock = webSearchResultBlock(toolUseId, outcome);
+    const serverToolUse = { web_search_requests: searches };
+    if (stream) {
+      send("content_block_start", { type: "content_block_start", index: 1, content_block: resultBlock });
+      send("content_block_stop", { type: "content_block_stop", index: 1 });
+    }
+    if (!outcome.ok) {
+      if (stream) {
+        send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0, server_tool_use: serverToolUse } });
+        send("message_stop", { type: "message_stop" });
+        res.end();
+      } else {
+        json(res, 200, { id: msgId, type: "message", role: "assistant", model, content: [toolUse, resultBlock], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0, server_tool_use: serverToolUse } });
+      }
+      return finish(200);
+    }
+
+    const n = normalizeRequestBody(config, webSearchModelBody(config, parsed, outcome), model, true);
+    level = n.level;
+    const fail = (status, type, message) => {
+      if (stream) {
+        send("error", { type: "error", error: { type, message } });
+        res.end();
+      } else {
+        apiError(res, status, type, message);
+      }
+      return finish(status);
+    };
+    let upstream;
+    try {
+      upstream = await doFetch(`${config.upstream.url}/v1/messages`, { method: "POST", headers: upstreamHeaders(req.headers), body: JSON.stringify(n.body), signal: controller.signal });
+    } catch (err) {
+      return fail(502, "api_error", `The model server did not answer: ${err?.message ?? err}`);
+    }
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => "");
+      const reworded = upstream.status === 400 || upstream.status === 413 ? rewordContextError(text, config.contextWindow) : null;
+      if (reworded) return fail(400, "invalid_request_error", reworded);
+      return fail(upstream.status, "api_error", `The model server answered HTTP ${upstream.status}: ${text.slice(0, 500)}`);
+    }
+    const isSse = (upstream.headers.get("content-type") ?? "").includes("text/event-stream");
+    if (!stream || !isSse || !upstream.body) {
+      let answer;
+      try { answer = await upstream.json(); } catch { answer = null; }
+      if (!isObject(answer) || !Array.isArray(answer.content)) return fail(502, "api_error", "The model server's answer is not an Anthropic message");
+      tap.usage(answer.usage);
+      tap.firstTokenAt = now();
+      if (!stream) {
+        json(res, 200, { ...answer, content: [toolUse, resultBlock, ...answer.content], usage: { ...(isObject(answer.usage) ? answer.usage : {}), server_tool_use: serverToolUse } });
+        return finish(200);
+      }
+      // A JSON answer to a streaming request: its text goes out as one block.
+      const text = answer.content.filter((b) => b?.type === "text").map((b) => b.text).join("");
+      send("content_block_start", { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } });
+      send("content_block_delta", { type: "content_block_delta", index: 2, delta: { type: "text_delta", text } });
+      send("content_block_stop", { type: "content_block_stop", index: 2 });
+      send("message_delta", { type: "message_delta", delta: { stop_reason: answer.stop_reason ?? "end_turn", stop_sequence: null }, usage: { ...(isObject(answer.usage) ? answer.usage : {}), server_tool_use: serverToolUse } });
+      send("message_stop", { type: "message_stop" });
+      res.end();
+      return finish(200);
+    }
+
+    // The model's stream, after our two blocks.
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let inputTokens = 0;
+    let stopped = false;
+    const forward = (raw) => {
+      const data = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+      if (!data) return;
+      let ev;
+      try { ev = JSON.parse(data); } catch { return; }
+      if (ev.type === "message_start") {
+        tap.usage(ev.message?.usage);
+        inputTokens = Number(ev.message?.usage?.input_tokens) || 0;
+        return;
+      }
+      if (typeof ev.type === "string" && ev.type.startsWith("content_block_")) {
+        if (tap.firstTokenAt === undefined) tap.firstTokenAt = now();
+        send(ev.type, { ...ev, index: Number(ev.index ?? 0) + 2 });
+        return;
+      }
+      if (ev.type === "message_delta") {
+        tap.usage(ev.usage);
+        send(ev.type, { ...ev, usage: { input_tokens: inputTokens, ...(isObject(ev.usage) ? ev.usage : {}), server_tool_use: serverToolUse } });
+        return;
+      }
+      if (ev.type === "message_stop") stopped = true;
+      send(ev.type ?? "message", ev);
+    };
+    try {
+      for await (const chunk of upstream.body) {
+        buffer += decoder.decode(chunk, { stream: true }).replace(/\r\n/g, "\n");
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) >= 0) {
+          forward(buffer.slice(0, sep));
+          buffer = buffer.slice(sep + 2);
+        }
+      }
+      if (buffer.trim()) forward(buffer);
+    } catch { /* client went away: aborted upstream */ }
+    if (!stopped && !res.destroyed) send("error", { type: "error", error: { type: "api_error", message: "The model server's stream ended early" } });
+    res.end();
+    return finish(stopped ? 200 : 502);
+  }
+
   async function handle(req, res) {
     const url = new URL(req.url ?? "/", "http://proxy");
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -335,6 +706,8 @@ export function createProxy(config, deps = {}) {
         contextWindow: config.contextWindow ?? maxModelLen,
         effort: { default: config.effort.default, levels: config.effort.levels.map((l) => ({ name: l.name, claude: l.claude })) },
         upstream: models.length > 0 ? "up" : "down",
+        webSearch: config.search !== null,
+        searchBackend: config.search?.backend ?? null,
       });
     }
 
@@ -372,6 +745,8 @@ export function createProxy(config, deps = {}) {
         }
       }
     }
+    const searchTool = isMessages && parsed ? webSearchToolOf(parsed) : null;
+    if (searchTool) return handleWebSearch(req, res, id, parsed, searchTool);
     const model = parsed ? await servedModel() : "-";
     const claudeEffort = isObject(parsed?.output_config) ? parsed.output_config.effort : undefined;
 
@@ -442,7 +817,7 @@ export function startProxy(config, deps = {}) {
   return new Promise((resolve) => server.listen(config.listen.port, config.listen.host, () => resolve(server)));
 }
 
-// CLI: node llm-proxy.mjs --config /etc/companion-llm-proxy/config.json
+// CLI: node llm-proxy.mjs --config /etc/companion-llm-proxy/config.json [--check]
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const i = process.argv.indexOf("--config");
@@ -454,9 +829,13 @@ if (isMain) {
     console.error(`[llm-proxy] cannot load ${path}: ${err.message}`);
     process.exit(2);
   }
+  if (process.argv.includes("--check")) {
+    console.log(`[llm-proxy] ${path} is valid (web search: ${config.search?.backend ?? "off"})`);
+    process.exit(0);
+  }
   const server = await startProxy(config);
   const addr = server.address();
-  console.log(`[llm-proxy] ${VERSION} listening on ${addr.address}:${addr.port} → ${config.upstream.url} (model ${config.model ?? "from upstream"}, ${config.effort.levels.length} levels)`);
+  console.log(`[llm-proxy] ${VERSION} listening on ${addr.address}:${addr.port} → ${config.upstream.url} (model ${config.model ?? "from upstream"}, ${config.effort.levels.length} levels, web search ${config.search?.backend ?? "off"})`);
   const stop = () => server.close(() => process.exit(0));
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);

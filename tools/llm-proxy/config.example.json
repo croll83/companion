@@ -13,5 +13,6 @@
       { "name": "xhigh", "claude": "xhigh", "params": { "chat_template_kwargs": { "reasoning_effort": "xhigh" } } }
     ]
   },
+  "search": { "backend": "tavily", "apiKey": "tvly-replace-with-your-key", "maxResults": 5 },
   "log": true
 }
