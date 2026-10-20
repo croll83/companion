@@ -171,6 +171,20 @@ describe("fetchProxyInfo / refreshProviderInfo", () => {
     expect(getLocalProvider(r.provider.id)).toMatchObject({ models: ["my-model"], contextWindow: 65536, effortLevels: ["low", "high"], effortLabels: { low: "off", high: "medium" }, defaultEffort: "high" });
   });
 
+  // The proxy's web search flag travels to the stored provider (it decides whether sessions keep WebSearch).
+  it("reads the proxy's web search and stores it", async () => {
+    const f = stub({ "/info": () => Response.json({ models: ["m"], webSearch: true, searchBackend: "tavily" }) });
+    expect(await fetchProxyInfo("http://p", "t", f)).toMatchObject({ ok: true, viaProxy: true, webSearch: true, searchBackend: "tavily" });
+    const r = createLocalProvider({ name: "Search", baseUrl: "http://p" });
+    if (!r.ok) throw new Error(r.error);
+    await refreshProviderInfo(r.provider, f);
+    expect(getLocalProvider(r.provider.id)?.webSearchBackend).toBe("tavily");
+    const older = stub({ "/info": () => Response.json({ models: ["m"] }) });
+    expect(await fetchProxyInfo("http://p", "t", older)).toMatchObject({ webSearch: false, searchBackend: null });
+    await refreshProviderInfo(r.provider, older);
+    expect(getLocalProvider(r.provider.id)?.webSearchBackend).toBeUndefined();
+  });
+
   // A plain Anthropic-compatible server (no proxy): models and vLLM's max_model_len from /v1/models.
   it("falls back to /v1/models with max_model_len", async () => {
     const f = stub({ "/v1/models": () => Response.json({ data: [{ id: "m", max_model_len: 32768 }] }) });

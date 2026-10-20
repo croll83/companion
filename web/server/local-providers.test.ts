@@ -207,6 +207,18 @@ describe("applyProxyInfo", () => {
     expect(getLocalProvider(p.id)!.updatedAt).toBe(at);
   });
 
+  // webSearch: true on /info keeps Claude Code's WebSearch on the provider's sessions; anything else turns it off.
+  it("stores whether the proxy answers web search, and its backend", () => {
+    const p = create();
+    expect(applyProxyInfo(p.id, { models: [], webSearch: true, searchBackend: "tavily" })?.webSearchBackend).toBe("tavily");
+    expect(getLocalProvider(p.id)?.webSearchBackend).toBe("tavily");
+    // A backend name that is not a short label still means "on".
+    expect(applyProxyInfo(p.id, { models: [], webSearch: true, searchBackend: "<b>bad</b>" })?.webSearchBackend).toBe("on");
+    // An older proxy (no field) or a server that is not the proxy: off.
+    expect(applyProxyInfo(p.id, { models: [] })?.webSearchBackend).toBeUndefined();
+    expect(getLocalProvider(p.id)?.webSearchBackend).toBeUndefined();
+  });
+
   it("keeps a hand-typed model list, ignores a bad window and drops a default the levels lack", () => {
     const p = create({ models: ["mine"], modelsManual: true, effortLevels: ["xhigh"], defaultEffort: "xhigh" });
     const next = applyProxyInfo(p.id, { models: ["theirs"], contextWindow: 10, effort: { levels: [{ name: "low", claude: "low" }] } });

@@ -21,7 +21,7 @@ vi.mock("./paths.js", () => ({
 vi.mock("./settings-manager.js", () => ({ getSettings: () => ({ localLlmEnabled: true }) }));
 
 import { buildLocalSpawn, contextEnv, LOCAL_MODEL_ALIAS, NO_TOKEN_PLACEHOLDER } from "./local-spawn.js";
-import { createLocalProvider } from "./local-providers.js";
+import { applyProxyInfo, createLocalProvider } from "./local-providers.js";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 let tmp: string;
@@ -67,6 +67,20 @@ describe("buildLocalSpawn", () => {
     const spawn = buildLocalSpawn(SID, { provider: "open", model: "m" });
     if ("error" in spawn) throw new Error(spawn.error);
     expect(spawn.env.ANTHROPIC_AUTH_TOKEN).toBe(NO_TOKEN_PLACEHOLDER);
+  });
+
+  // WebSearch stays only when the proxy answers it (its /info says webSearch: true), and goes again when it stops.
+  it("keeps WebSearch when the provider's proxy has a search backend", () => {
+    const r = createLocalProvider({ name: "Web", baseUrl: "http://proxy.example:8787", models: ["m"] });
+    if (!r.ok) throw new Error(r.error);
+    applyProxyInfo("web", { models: ["m"], webSearch: true, searchBackend: "tavily" });
+    const on = buildLocalSpawn(SID, { provider: "web", model: "m" });
+    if ("error" in on) throw new Error(on.error);
+    expect(on.disallowedTools).toEqual([]);
+    applyProxyInfo("web", { models: ["m"], webSearch: false, searchBackend: null });
+    const off = buildLocalSpawn(SID, { provider: "web", model: "m" });
+    if ("error" in off) throw new Error(off.error);
+    expect(off.disallowedTools).toEqual(["WebSearch"]);
   });
 
   it("fails clearly when the provider was deleted", () => {

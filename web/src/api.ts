@@ -261,6 +261,9 @@ export type LocalProviderTestResult =
     models: string[];
     contextWindow?: number | null;
     effort?: { default?: string | null; levels: { name: string; claude: string }[] };
+    /** The proxy answers Claude Code's WebSearch, with this backend. */
+    webSearch?: boolean;
+    searchBackend?: string | null;
   }
   | { ok: false; error: string };
 

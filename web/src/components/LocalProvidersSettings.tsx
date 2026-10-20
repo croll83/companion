@@ -10,7 +10,9 @@ import { api, type LocalProviderInput, type LocalProviderView } from "../api.js"
  *
  * "Test" reads the proxy's GET /info and fills the models, the context
  * window and the reasoning levels (Claude Code effort value = model level,
- * the mapping the proxy applies); they can still be edited by hand.
+ * the mapping the proxy applies); they can still be edited by hand. Whether
+ * the proxy answers web search is read from it too (create, "Refresh") and
+ * only shown: sessions keep WebSearch when it is on.
  *
  * The token is write-only: the API never returns it (only `hasToken`), so
  * the form leaves the field empty and "keeps" the saved one unless a new
@@ -91,6 +93,11 @@ export function inputOf(form: FormState, editing: boolean): LocalProviderInput |
   return input;
 }
 
+/** "Web search: on (tavily)" / "Web search: off": whether sessions keep Claude Code's WebSearch (the proxy answers it). */
+export function webSearchText(backend: string | undefined | null): string {
+  return backend ? `Web search: on${backend === "on" ? "" : ` (${backend})`}` : "Web search: off";
+}
+
 function HealthBadge({ p }: { p: LocalProviderView }) {
   const s = p.health.status;
   const cls = s === "online" ? "text-cc-success bg-cc-success/10" : s === "offline" ? "text-cc-error bg-cc-error/10" : "text-cc-muted bg-cc-hover";
@@ -116,7 +123,7 @@ function ProviderForm({ editing, onSaved, onCancel }: { editing: LocalProviderVi
     try {
       const r = await api.testLocalProvider({ baseUrl: form.baseUrl, token: form.token || undefined, id: editing?.id });
       if (r.ok) {
-        setTestResult(`Online${r.viaProxy ? " (Companion LLM proxy)" : " (not the Companion proxy: levels are not mapped)"} · ${r.models.length} model(s) in ${r.latencyMs} ms${r.models.length ? `: ${r.models.join(", ")}` : ""}`);
+        setTestResult(`Online${r.viaProxy ? " (Companion LLM proxy)" : " (not the Companion proxy: levels are not mapped)"} · ${r.models.length} model(s) in ${r.latencyMs} ms${r.models.length ? `: ${r.models.join(", ")}` : ""} · ${webSearchText(r.webSearch ? r.searchBackend ?? "on" : undefined)}`);
         setForm((f) => ({
           ...f,
           ...(!f.modelsManual && r.models.length > 0 ? { models: r.models.join(", ") } : {}),
@@ -307,6 +314,9 @@ export function LocalProvidersSettings() {
                 {p.effortLevels.length > 0 && ` · levels ${p.effortLevels.map((l) => p.effortLabels?.[l] ?? l).join("/")}`}
                 {p.hasToken && " · token saved"}
                 {p.health.error && ` · ${p.health.error}`}
+              </p>
+              <p className="text-[11px] text-cc-muted" title="Read from the proxy (Refresh): with a search backend, sessions keep Claude Code's WebSearch">
+                {webSearchText(p.webSearchBackend)}
               </p>
               <div className="mt-2 flex gap-1.5 flex-wrap">
                 <button type="button" onClick={() => setEditing(p)} className="px-2.5 py-1.5 text-xs rounded-md border border-cc-border hover:bg-cc-hover cursor-pointer" aria-label={`Edit ${p.name}`}>

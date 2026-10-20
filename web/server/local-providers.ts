@@ -58,6 +58,13 @@ export interface LocalProviderConfig {
   /** Name of the model level each value carries (e.g. low → "off"), shown in the UI. */
   effortLabels?: Record<string, string>;
   defaultEffort?: string;
+  /**
+   * The proxy's web search backend (e.g. "tavily"), when its GET /info says
+   * `webSearch: true`: sessions then keep Claude Code's WebSearch, which the
+   * proxy answers. Absent = off (WebSearch disallowed). Read from the proxy
+   * only (create, "Refresh"), never typed.
+   */
+  webSearchBackend?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -175,6 +182,7 @@ function normalizeStored(raw: unknown): LocalProviderConfig | null {
     effortLevels: levels,
     ...(Object.keys(labels).length > 0 ? { effortLabels: labels } : {}),
     ...(typeof r.defaultEffort === "string" && levels.includes(r.defaultEffort) ? { defaultEffort: r.defaultEffort } : {}),
+    ...(typeof r.webSearchBackend === "string" && LABEL_RE.test(r.webSearchBackend) ? { webSearchBackend: r.webSearchBackend } : {}),
     createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
     updatedAt: typeof r.updatedAt === "number" ? r.updatedAt : 0,
   };
@@ -346,12 +354,16 @@ export interface ProxyInfo {
   models: string[];
   contextWindow?: number | null;
   effort?: { default?: string | null; levels: { name: string; claude: string }[] };
+  /** The proxy answers Claude Code's WebSearch (tools/llm-proxy `search` config). Absent = an older proxy or not the proxy: off. */
+  webSearch?: boolean;
+  searchBackend?: string | null;
 }
 
 /**
  * Store what the proxy says: its models (unless the list was typed by
- * hand), its context window and its levels (Claude effort value → model
- * level name). The proxy's config is the source of truth for the mapping.
+ * hand), its context window, its levels (Claude effort value → model
+ * level name) and whether it answers web search. The proxy's config is the
+ * source of truth for all of them.
  */
 export function applyProxyInfo(id: string, info: ProxyInfo): LocalProviderConfig | undefined {
   const providers = readRegistry();
@@ -372,6 +384,11 @@ export function applyProxyInfo(id: string, info: ProxyInfo): LocalProviderConfig
     const def = info.effort?.default;
     if (def && p.effortLevels.includes(def)) p.defaultEffort = def;
     else if (p.defaultEffort && !p.effortLevels.includes(p.defaultEffort)) delete p.defaultEffort;
+  }
+  if (info.webSearch === true) {
+    p.webSearchBackend = typeof info.searchBackend === "string" && LABEL_RE.test(info.searchBackend) ? info.searchBackend : "on";
+  } else {
+    delete p.webSearchBackend;
   }
   if (JSON.stringify(p) === before) return p;
   p.updatedAt = Date.now();

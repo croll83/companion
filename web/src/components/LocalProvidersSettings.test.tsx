@@ -19,7 +19,7 @@ const mockApi = vi.hoisted(() => ({
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 
-import { LocalProvidersSettings, inputOf, parseLevels } from "./LocalProvidersSettings.js";
+import { LocalProvidersSettings, inputOf, parseLevels, webSearchText } from "./LocalProvidersSettings.js";
 import type { LocalProviderView } from "../api.js";
 
 const PROVIDER: LocalProviderView = {
@@ -40,6 +40,24 @@ describe("LocalProvidersSettings", () => {
     expect(within(item).getByText("Lab")).toBeInTheDocument();
     expect(within(item).getByText("offline")).toBeInTheDocument();
     expect(item).toHaveTextContent("my-model · 128k context · levels off/medium · token saved · ECONNREFUSED");
+  });
+
+  // Whether sessions on the provider keep WebSearch: read from the proxy's /info, shown on each provider.
+  it("shows whether the proxy answers web search, and with which backend", async () => {
+    mockApi.listLocalProviders.mockResolvedValue([PROVIDER, { ...PROVIDER, id: "web", name: "Web", webSearchBackend: "tavily" }]);
+    render(<LocalProvidersSettings />);
+    const items = await screen.findAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("Web search: off");
+    expect(items[1]).toHaveTextContent("Web search: on (tavily)");
+    expect(webSearchText("on")).toBe("Web search: on");
+  });
+
+  it("reports the proxy's web search in the Test result", async () => {
+    mockApi.testLocalProvider.mockResolvedValue({ ok: true, viaProxy: true, latencyMs: 3, models: ["my-model"], webSearch: true, searchBackend: "brave" });
+    render(<LocalProvidersSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Lab" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    expect(await screen.findByText(/Online \(Companion LLM proxy\)/)).toHaveTextContent("· Web search: on (brave)");
   });
 
   it("adds a provider after a Test that fills models, window and levels", async () => {

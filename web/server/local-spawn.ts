@@ -44,10 +44,17 @@ const CLEARED_ENV = [
 ];
 
 /**
- * Built-in tools that do not work on a local provider: WebSearch is a
- * server-side tool of the Anthropic API.
+ * Built-in tools that do not work on a local provider without help:
+ * WebSearch asks the Anthropic API's server-side web search tool. The proxy
+ * answers it when it has a search backend (`webSearch: true` on its
+ * GET /info, stored as the provider's webSearchBackend); otherwise it stays
+ * disallowed, so the model does not call a tool that can only fail.
  */
-export const LOCAL_DISALLOWED_TOOLS = ["WebSearch"];
+const LOCAL_DISALLOWED_TOOLS = ["WebSearch"];
+
+export function localDisallowedTools(provider: Pick<LocalProviderConfig, "webSearchBackend">): string[] {
+  return provider.webSearchBackend ? [] : [...LOCAL_DISALLOWED_TOOLS];
+}
 
 /**
  * The alias passed as `--model`: Claude Code refuses model names it does not
@@ -125,5 +132,5 @@ export function buildLocalSpawn(sessionId: string, local: LocalSessionInfo): Loc
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     ...contextEnv(provider),
   });
-  return { env, modelAlias: LOCAL_MODEL_ALIAS, disallowedTools: [...LOCAL_DISALLOWED_TOOLS], effortLevels: provider.effortLevels };
+  return { env, modelAlias: LOCAL_MODEL_ALIAS, disallowedTools: localDisallowedTools(provider), effortLevels: provider.effortLevels };
 }

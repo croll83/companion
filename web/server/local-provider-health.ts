@@ -10,7 +10,7 @@ import { applyProxyInfo, isLocalLlmEnabled, listLocalProviders, readLocalProvide
  * provider that does not answer. A check never blocks anything.
  *
  * `fetchProxyInfo` reads the proxy's `GET /info` (models, context window,
- * levels) for the form's "Test" and "Refresh" buttons, or `/v1/models`
+ * levels, web search) for the form's "Test" and "Refresh" buttons, or `/v1/models`
  * (with vLLM's max_model_len) from a server that is not the proxy.
  */
 
@@ -88,6 +88,8 @@ export async function fetchProxyInfo(baseUrl: string, token: string | null, fetc
           models: info.models.filter((m): m is string => typeof m === "string"),
           contextWindow: typeof info.contextWindow === "number" ? info.contextWindow : null,
           ...(info.effort && Array.isArray(info.effort.levels) ? { effort: info.effort } : {}),
+          webSearch: info.webSearch === true,
+          searchBackend: typeof info.searchBackend === "string" ? info.searchBackend : null,
         };
       }
     } else {
