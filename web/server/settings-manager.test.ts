@@ -62,6 +62,7 @@ describe("settings-manager", () => {
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
+      localLlmEnabled: false,
       updatedAt: 0,
     });
   });
@@ -120,6 +121,7 @@ describe("settings-manager", () => {
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
+      localLlmEnabled: false,
       updatedAt: 123,
     });
   });
@@ -202,6 +204,7 @@ describe("settings-manager", () => {
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
+      localLlmEnabled: false,
       updatedAt: 0,
     });
   });
@@ -378,6 +381,19 @@ describe("settings-manager", () => {
     writeFileSync(settingsPath, JSON.stringify({ timeZone: 42 }), "utf-8");
     _resetForTest(settingsPath);
     expect(getSettings().timeZone).toBe("");
+  });
+
+  // ── localLlmEnabled ("Enable local LLM") ─────────────────────────────────
+  // Off for everyone until turned on; only a real boolean true turns it on.
+  it("keeps local LLM off by default and persists the switch", () => {
+    expect(getSettings().localLlmEnabled).toBe(false);
+    expect(updateSettings({ localLlmEnabled: true }).localLlmEnabled).toBe(true);
+    expect(updateSettings({ publicUrl: "https://x.example" }).localLlmEnabled).toBe(true);
+    _resetForTest(settingsPath);
+    expect(getSettings().localLlmEnabled).toBe(true);
+    writeFileSync(settingsPath, JSON.stringify({ localLlmEnabled: "yes" }), "utf-8");
+    _resetForTest(settingsPath);
+    expect(getSettings().localLlmEnabled).toBe(false);
   });
 
   // ── companionMcpEnabled ("Companion MCP tools for sessions") ─────────────

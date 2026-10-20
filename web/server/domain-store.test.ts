@@ -441,6 +441,21 @@ describe("brain choice", () => {
     expect(getDomain(GLOBAL_DOMAIN)).not.toHaveProperty("brain");
   });
 
+  // "New sessions of this domain run Local · X": a provider id, an optional
+  // model, null to go back to the Anthropic account; junk is refused.
+  it("sets and clears a domain's default local provider", () => {
+    ensureGlobalDomain();
+    createDomain({ name: "Herd" });
+    expect(updateDomain("herd", { localDefault: { provider: "lab", model: " my-model " } }))
+      .toMatchObject({ ok: true, domain: { localDefault: { provider: "lab", model: "my-model" } } });
+    expect(updateDomain("herd", { localDefault: { provider: "lab" } })).toMatchObject({ ok: true, domain: { localDefault: { provider: "lab" } } });
+    expect(getDomain("herd")?.localDefault).toEqual({ provider: "lab" });
+    expect(updateDomain("herd", { localDefault: { provider: "Bad Id" } })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain("herd", { localDefault: "lab" })).toMatchObject({ ok: false, status: 400 });
+    expect(updateDomain("herd", { localDefault: null }).ok).toBe(true);
+    expect(getDomain("herd")).not.toHaveProperty("localDefault");
+  });
+
   it("resolves the effective brain: domain > GLOBAL > none", () => {
     expect(effectiveBrainSlug(undefined, {})).toBeNull();
     expect(effectiveBrainSlug(undefined, { brain: "g" })).toBe("g");

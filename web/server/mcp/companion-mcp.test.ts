@@ -279,6 +279,28 @@ describe("agent tools", () => {
     expect((await callTool(mcp, "create_agent", { name: "C" })).text).toBe('"prompt" is required');
   });
 
+  // "local" = Claude Code on a local provider: a session on one creates agents
+  // on the same provider (and its model) by default; elsewhere the provider
+  // must be named. The server validates provider, model and level.
+  it("create_agent supports backend local", async () => {
+    const { mcp, calls } = server({
+      "GET /sessions/sess-me": () => ({ body: { ...SELF, backendType: "claude", model: "my-model", local: { provider: "lab", model: "my-model" } } }),
+      "POST /agents": (call) => ({ status: 201, body: created(call.body as Record<string, unknown>) }),
+    });
+    await callTool(mcp, "create_agent", { name: "L", prompt: "p" });
+    expect(calls[1].body).toMatchObject({ backendType: "local", model: "my-model", local: { provider: "lab" } });
+    await callTool(mcp, "create_agent", { name: "M", prompt: "p", local_provider: "other" });
+    expect(calls[3].body).toMatchObject({ backendType: "local", model: "", local: { provider: "other" } });
+    await callTool(mcp, "create_agent", { name: "N", prompt: "p", backend: "claude" });
+    expect(calls[5].body).toMatchObject({ backendType: "claude", model: "" });
+    expect(calls[5].body).not.toHaveProperty("local");
+  });
+
+  it("create_agent backend local needs a provider when this session has none", async () => {
+    const { mcp } = server({ "POST /agents": (call) => ({ status: 201, body: created(call.body as Record<string, unknown>) }) });
+    expect((await callTool(mcp, "create_agent", { name: "L", prompt: "p", backend: "local" })).text).toMatch(/needs local_provider/);
+  });
+
   // The effort is passed through as given (the server checks it against the
   // model and answers 400 with the levels it takes); absent, it is not sent and
   // the runs use the model's default. update_agent "" clears it (null).

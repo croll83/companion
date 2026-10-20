@@ -1532,6 +1532,17 @@ describe("AgentExecutor", () => {
       warn.mockRestore();
     });
 
+    // A local agent runs Claude Code on its provider: the launcher gets the
+    // provider and model, and the agent's own level (the launcher settles it
+    // against the provider's levels, never against Claude's table).
+    it("launches a local agent on its provider with its own level", async () => {
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ model: "my-model", effort: "off" as never, local: { provider: "lab" } }));
+      await executor.executeAgent("test-agent");
+      expect(launcher.launch).toHaveBeenCalledWith(expect.objectContaining({
+        backendType: "claude", model: "my-model", effort: "off", local: { provider: "lab", model: "my-model" },
+      }));
+    });
+
     it("passes no effort to a model without effort control", async () => {
       mockAgentStore.getAgent.mockReturnValue(makeAgent({ model: "claude-sonnet-4-6" }));
       await executor.executeAgent("test-agent");
@@ -1772,6 +1783,16 @@ describe("AgentExecutor", () => {
     });
 
     // The API validates a fork agent on save through the same resolution.
+    // A local agent asks for a local source (session-fork.ts refuses mixing kinds).
+    it("checks the fork source as a local one for a local agent", async () => {
+      mockResolveForkSource.mockReturnValue(forkOk);
+      expect(executor.forkSourceError("src-session", "claude", true)).toBeNull();
+      expect(mockResolveForkSource).toHaveBeenLastCalledWith(launcher, "src-session", "claude", { local: true });
+      mockAgentStore.getAgent.mockReturnValue(makeAgent({ id: "forker", contextMode: "fork", sourceSessionId: "src-session", local: { provider: "lab" }, model: "my-model" }));
+      await executor.executeAgent("forker");
+      expect(mockResolveForkSource).toHaveBeenLastCalledWith(launcher, "src-session", "claude", { local: true });
+    });
+
     it("reports why a source cannot be forked, or null", () => {
       mockResolveForkSource.mockReturnValueOnce({ ok: false, error: "gone" }).mockReturnValueOnce(forkOk);
       expect(executor.forkSourceError("src-session", "codex")).toBe("gone");

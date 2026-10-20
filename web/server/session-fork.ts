@@ -54,11 +54,21 @@ export function resolveForkSource(
   launcher: Pick<CliLauncher, "getSession">,
   sourceSessionId: string | undefined,
   backendType: BackendType,
-  opts: { codexHome?: string; claudeProjectsRoot?: string } = {},
+  opts: { codexHome?: string; claudeProjectsRoot?: string; local?: boolean } = {},
 ): ForkSourceResult {
   if (!sourceSessionId) return { ok: false, error: "No source session to fork is set" };
   const info = launcher.getSession(sourceSessionId);
   if (!info) return { ok: false, error: `Source session ${sourceSessionId} no longer exists` };
+  // A conversation never moves between the Anthropic account and a local
+  // provider (local thinking blocks carry no valid signature).
+  if (!!info.local !== !!opts.local) {
+    return {
+      ok: false,
+      error: info.local
+        ? `Source session ${sourceSessionId} runs on a local provider; only an agent on a local provider can fork it`
+        : `Source session ${sourceSessionId} runs on the Anthropic account; an agent on a local provider cannot fork it`,
+    };
+  }
   const sourceBackend = info.backendType ?? "claude";
   if (sourceBackend !== backendType) {
     return {
