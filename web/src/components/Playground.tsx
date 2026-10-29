@@ -48,6 +48,9 @@ import { SessionLaunchOverlay } from "./SessionLaunchOverlay.js";
 import { SessionBrowserPane } from "./SessionBrowserPane.js";
 import { PlaygroundUpdateOverlay } from "./UpdateOverlay.js";
 import { SessionItem } from "./SessionItem.js";
+import { LocalBadge } from "./LocalBadge.js";
+import { LocalSessionMetrics } from "./LocalSessionMetrics.js";
+import { EffortSwitcher } from "./EffortSwitcher.js";
 import type { CreationProgressEvent } from "../types.js";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
@@ -1158,6 +1161,14 @@ export function Playground() {
               <MessageBubble message={MSG_REFUSAL} />
             </Card>
           </div>
+        </Section>
+
+        {/* ─── Local provider session ──────────────────────── */}
+        <Section
+          title="Local provider session"
+          description="Claude Code on a local provider: the badge (header and sidebar), the provider's reasoning levels in the effort switcher, and the proxy's numbers instead of the cost"
+        >
+          <LocalProviderDemo />
         </Section>
 
         {/* ─── Day Separators ──────────────────────── */}
@@ -4010,6 +4021,66 @@ function PlaygroundActivityTray() {
           </svg>
         </button>
       </div>
+    </div>
+  );
+}
+
+// ─── Local provider session demo ────────────────────────────────────────────
+
+const LOCAL_SESSION_ID = "playground-local-session";
+const LOCAL_INFO = { provider: "lab", model: "my-model", providerName: "Lab vLLM", effortLevels: ["off", "low", "medium", "xhigh"], defaultEffort: "medium", contextWindow: 131072 };
+
+/** A local session in the store (restored on unmount) so the real EffortSwitcher shows the provider's levels. */
+function LocalProviderDemo() {
+  useEffect(() => {
+    const before = useStore.getState();
+    const prevSdk = before.sdkSessions;
+    const prevCli = before.cliConnected.get(LOCAL_SESSION_ID);
+    before.setSdkSessions([
+      ...prevSdk.filter((s) => s.sessionId !== LOCAL_SESSION_ID),
+      { sessionId: LOCAL_SESSION_ID, state: "connected", cwd: "/tmp", createdAt: Date.now(), backendType: "claude", model: "my-model", effort: "medium", local: LOCAL_INFO },
+    ]);
+    before.setCliConnected(LOCAL_SESSION_ID, true);
+    return () => {
+      const now = useStore.getState();
+      now.setSdkSessions(now.sdkSessions.filter((s) => s.sessionId !== LOCAL_SESSION_ID));
+      useStore.setState((s) => {
+        const cliConnected = new Map(s.cliConnected);
+        if (typeof prevCli === "boolean") cliConnected.set(LOCAL_SESSION_ID, prevCli);
+        else cliConnected.delete(LOCAL_SESSION_ID);
+        return { cliConnected };
+      });
+    };
+  }, []);
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Card label="Badges (header, sidebar, provider deleted)">
+        <div className="flex items-center gap-2 flex-wrap p-3">
+          <LocalBadge local={LOCAL_INFO} />
+          <LocalBadge local={LOCAL_INFO} compact />
+          <LocalBadge local={{ ...LOCAL_INFO, missing: true }} />
+        </div>
+      </Card>
+      <Card label="Effort switcher with the provider's levels">
+        <div className="flex justify-end p-3 pt-40">
+          <EffortSwitcher sessionId={LOCAL_SESSION_ID} />
+        </div>
+      </Card>
+      <Card label="Context panel: proxy metrics instead of the cost">
+        <LocalSessionMetrics
+          sessionId={LOCAL_SESSION_ID}
+          preview={{
+            provider: { id: "lab", name: "Lab vLLM", contextWindow: 131072, health: { status: "online", checkedAt: Date.now(), latencyMs: 12 } },
+            model: "my-model",
+            effort: "medium",
+            metrics: {
+              requests: 7, errors: 0, inputTokens: 184_320, outputTokens: 5_210, cacheReadTokens: 120_000, totalDurationMs: 61_000,
+              last: { at: Date.now(), status: 200, model: "my-model", effort: "medium", inputTokens: 31_200, outputTokens: 840, ttftMs: 2_100, durationMs: 14_300, outputTokensPerSec: 68.9 },
+              authSeen: ["authorization: session token"],
+            },
+          }}
+        />
+      </Card>
     </div>
   );
 }

@@ -25,6 +25,8 @@ const mockApi = {
   listLinearOAuthConnections: vi.fn().mockResolvedValue({ connections: [] }),
   // Codex's catalogue, with each model's effort levels (empty = none fetched yet).
   getBackendModels: vi.fn().mockResolvedValue([]),
+  // Local providers ("Local" backend): none unless a test adds some.
+  listLocalProviders: vi.fn().mockResolvedValue([]),
 };
 vi.mock("../api.js", () => ({
   api: {
@@ -33,6 +35,7 @@ vi.mock("../api.js", () => ({
     listDomains: () => Promise.resolve({ root: "", skillGroups: [], domains: [{ slug: "global", name: "GLOBAL" }, { slug: "herd", name: "Herd" }] }),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
     getBackendModels: (...args: unknown[]) => mockApi.getBackendModels(...args),
+    listLocalProviders: (...args: unknown[]) => mockApi.listLocalProviders(...args),
   },
 }));
 
@@ -637,6 +640,72 @@ describe("AgentEditor reasoning effort", () => {
   it("passes axe accessibility checks with the effort select", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = renderEditor({ name: "Effort Agent", prompt: "Run", model: "claude-opus-5-5", effort: "max" });
+    expect(await axe(container, axeRules)).toHaveNoViolations();
+  });
+});
+
+// "Local": a Claude Code agent on a local provider (listed once local LLM is
+// on and a provider exists). Its models and levels are the provider's (levels
+// by the model's names); a fork run can only copy a session on a local
+// provider; Claude or Codex takes the agent off the provider.
+describe("AgentEditor — local provider", () => {
+  const PROVIDER = {
+    id: "lab", name: "Lab", baseUrl: "http://p", models: ["my-model", "other-model"], defaultModel: "other-model", contextWindow: 131072,
+    effortLevels: ["low", "high"], effortLabels: { low: "off", high: "medium" }, defaultEffort: "high",
+    createdAt: 0, updatedAt: 0, hasToken: false, health: { status: "online" },
+  };
+
+  beforeEach(() => {
+    mockApi.listLocalProviders.mockResolvedValue([PROVIDER]);
+  });
+  afterEach(() => {
+    mockApi.listLocalProviders.mockResolvedValue([]);
+    useStore.setState({ sdkSessions: [] });
+  });
+
+  it("switches to Local with the provider's default model, and back to Claude", async () => {
+    const { getForm } = renderEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Local" }));
+    expect(getForm()).toMatchObject({ backendType: "claude", localProvider: "lab", model: "other-model", effort: "" });
+    const { getForm: next } = renderEditor({ localProvider: "lab", model: "other-model" });
+    fireEvent.click(screen.getAllByRole("button", { name: "Claude" }).at(-1)!);
+    expect(next()).toMatchObject({ backendType: "claude", localProvider: "" });
+  });
+
+  it("offers the provider's models and levels by their names", async () => {
+    const { getForm } = renderEditor({ localProvider: "lab", model: "my-model" });
+    expect(await screen.findByRole("combobox", { name: "Local provider" })).toHaveValue("lab");
+    const levels = Array.from((screen.getByLabelText("Reasoning effort") as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(levels).toEqual(["Default (Medium)", "Off", "Medium"]);
+    fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "low" } });
+    expect(getForm().effort).toBe("low");
+    fireEvent.change(screen.getByRole("combobox", { name: "Local provider" }), { target: { value: "lab" } });
+    expect(getForm().model).toBe("other-model");
+  });
+
+  it("names a provider that was deleted", async () => {
+    mockApi.listLocalProviders.mockResolvedValue([]);
+    renderEditor({ localProvider: "gone", model: "m" });
+    expect(await screen.findByRole("option", { name: "gone (deleted)" })).toBeInTheDocument();
+  });
+
+  it("lists only local sessions as fork sources", async () => {
+    useStore.setState({
+      sdkSessions: [
+        { sessionId: "aaaaaaaa-1111", state: "connected", cwd: "/r", createdAt: 1, backendType: "claude", cliSessionId: "c1" },
+        { sessionId: "bbbbbbbb-2222", state: "connected", cwd: "/r", createdAt: 1, backendType: "claude", cliSessionId: "c2", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } },
+      ] as never,
+    });
+    renderEditor({ localProvider: "lab", model: "my-model", contextMode: "fork" });
+    await screen.findByRole("combobox", { name: "Local provider" });
+    const options = Array.from((screen.getByLabelText("Source session") as HTMLSelectElement).options).map((o) => o.value);
+    expect(options).toEqual(["", "bbbbbbbb-2222"]);
+  });
+
+  it("passes axe accessibility checks with Local selected", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = renderEditor({ name: "Nightly", prompt: "p", localProvider: "lab", model: "my-model" });
+    await screen.findByRole("combobox", { name: "Local provider" });
     expect(await axe(container, axeRules)).toHaveNoViolations();
   });
 });

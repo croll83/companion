@@ -1,3 +1,4 @@
+import { localProviderHealth } from "../local-provider-health.js";
 import type { Hono } from "hono";
 import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel } from "../settings-manager.js";
 import { CLI_BRIDGE_MODE_ERROR, isCliBridgeMode } from "../cli-bridge-mode.js";
@@ -12,35 +13,41 @@ export interface SettingsRouteHooks {
   onTimeZoneChanged?: () => void;
 }
 
+/** What GET and PUT /settings answer: flags and choices, never a key or token. */
+function settingsView(settings: ReturnType<typeof getSettings>, connections: ReturnType<typeof listConnections>) {
+  return {
+    anthropicApiKeyConfigured: !!settings.anthropicApiKey.trim(),
+    anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
+    claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
+    openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
+    codexDeviceAuthConfigured: hasCodexAuth(),
+    onboardingCompleted: settings.onboardingCompleted,
+    linearApiKeyConfigured: !!settings.linearApiKey.trim() || connections.length > 0,
+    linearConnectionCount: connections.length,
+    linearAutoTransition: settings.linearAutoTransition,
+    linearAutoTransitionStateName: settings.linearAutoTransitionStateName,
+    linearArchiveTransition: settings.linearArchiveTransition,
+    linearArchiveTransitionStateName: settings.linearArchiveTransitionStateName,
+    linearOAuthConfigured: !!(settings.linearOAuthClientId.trim() && settings.linearOAuthClientSecret.trim() && settings.linearOAuthAccessToken.trim()),
+    linearOAuthCredentialsSaved: !!(settings.linearOAuthClientId.trim() && settings.linearOAuthClientSecret.trim()),
+    aiValidationEnabled: settings.aiValidationEnabled,
+    aiValidationAutoApprove: settings.aiValidationAutoApprove,
+    aiValidationAutoDeny: settings.aiValidationAutoDeny,
+    publicUrl: settings.publicUrl,
+    updateChannel: settings.updateChannel,
+    cliBridgeMode: settings.cliBridgeMode,
+    telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
+    timeZone: settings.timeZone ?? "",
+    companionMcpEnabled: settings.companionMcpEnabled !== false,
+    localLlmEnabled: settings.localLlmEnabled === true,
+  };
+}
+
 export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}): void {
   api.get("/settings", (c) => {
     const settings = getSettings();
     const connections = listConnections();
-    return c.json({
-      anthropicApiKeyConfigured: !!settings.anthropicApiKey.trim(),
-      anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
-      claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
-      openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
-      codexDeviceAuthConfigured: hasCodexAuth(),
-      onboardingCompleted: settings.onboardingCompleted,
-      linearApiKeyConfigured: !!settings.linearApiKey.trim() || connections.length > 0,
-      linearConnectionCount: connections.length,
-      linearAutoTransition: settings.linearAutoTransition,
-      linearAutoTransitionStateName: settings.linearAutoTransitionStateName,
-      linearArchiveTransition: settings.linearArchiveTransition,
-      linearArchiveTransitionStateName: settings.linearArchiveTransitionStateName,
-      linearOAuthConfigured: !!(settings.linearOAuthClientId.trim() && settings.linearOAuthClientSecret.trim() && settings.linearOAuthAccessToken.trim()),
-      linearOAuthCredentialsSaved: !!(settings.linearOAuthClientId.trim() && settings.linearOAuthClientSecret.trim()),
-      aiValidationEnabled: settings.aiValidationEnabled,
-      aiValidationAutoApprove: settings.aiValidationAutoApprove,
-      aiValidationAutoDeny: settings.aiValidationAutoDeny,
-      publicUrl: settings.publicUrl,
-      updateChannel: settings.updateChannel,
-      cliBridgeMode: settings.cliBridgeMode,
-      telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
-      timeZone: settings.timeZone ?? "",
-      companionMcpEnabled: settings.companionMcpEnabled !== false,
-    });
+    return c.json(settingsView(settings, connections));
   });
 
   api.put("/settings", async (c) => {
@@ -122,6 +129,9 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
     if (body.companionMcpEnabled !== undefined && typeof body.companionMcpEnabled !== "boolean") {
       return c.json({ error: "companionMcpEnabled must be a boolean" }, 400);
     }
+    if (body.localLlmEnabled !== undefined && typeof body.localLlmEnabled !== "boolean") {
+      return c.json({ error: "localLlmEnabled must be a boolean" }, 400);
+    }
     if (body.onboardingCompleted !== undefined && typeof body.onboardingCompleted !== "boolean") {
       return c.json({ error: "onboardingCompleted must be a boolean" }, 400);
     }
@@ -146,7 +156,8 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       || body.cliBridgeMode !== undefined
       || body.telegramBotToken !== undefined
       || body.timeZone !== undefined
-      || body.companionMcpEnabled !== undefined;
+      || body.companionMcpEnabled !== undefined
+      || body.localLlmEnabled !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -250,39 +261,17 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
         typeof body.companionMcpEnabled === "boolean"
           ? body.companionMcpEnabled
           : undefined,
+      localLlmEnabled: typeof body.localLlmEnabled === "boolean" ? body.localLlmEnabled : undefined,
     });
+    // Turned on: check the providers now rather than at the next 30 s tick.
+    if (body.localLlmEnabled === true) void localProviderHealth.checkAll();
 
     // Token added/changed/cleared → spawn or stop the bridge child accordingly.
     if (body.telegramBotToken !== undefined) telegramBridgeManager.sync();
     // Agent schedules are armed in the configured zone: re-arm them.
     if ((settings.timeZone ?? "") !== previousTimeZone) hooks.onTimeZoneChanged?.();
 
-    const connectionsAfterUpdate = listConnections();
-    return c.json({
-      anthropicApiKeyConfigured: !!settings.anthropicApiKey.trim(),
-      anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
-      claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
-      openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
-      codexDeviceAuthConfigured: hasCodexAuth(),
-      onboardingCompleted: settings.onboardingCompleted,
-      linearApiKeyConfigured: !!settings.linearApiKey.trim() || connectionsAfterUpdate.length > 0,
-      linearConnectionCount: connectionsAfterUpdate.length,
-      linearAutoTransition: settings.linearAutoTransition,
-      linearAutoTransitionStateName: settings.linearAutoTransitionStateName,
-      linearArchiveTransition: settings.linearArchiveTransition,
-      linearArchiveTransitionStateName: settings.linearArchiveTransitionStateName,
-      linearOAuthConfigured: !!(settings.linearOAuthClientId.trim() && settings.linearOAuthClientSecret.trim() && settings.linearOAuthAccessToken.trim()),
-      linearOAuthCredentialsSaved: !!(settings.linearOAuthClientId.trim() && settings.linearOAuthClientSecret.trim()),
-      aiValidationEnabled: settings.aiValidationEnabled,
-      aiValidationAutoApprove: settings.aiValidationAutoApprove,
-      aiValidationAutoDeny: settings.aiValidationAutoDeny,
-      publicUrl: settings.publicUrl,
-      updateChannel: settings.updateChannel,
-      cliBridgeMode: settings.cliBridgeMode,
-      telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
-      timeZone: settings.timeZone ?? "",
-      companionMcpEnabled: settings.companionMcpEnabled !== false,
-    });
+    return c.json(settingsView(settings, listConnections()));
   });
 
   api.post("/settings/anthropic/verify", async (c) => {

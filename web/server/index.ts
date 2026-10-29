@@ -49,6 +49,7 @@ import { setCompanionPort } from "./brain/brain-endpoints.js";
 import { brainSupervisor } from "./brain/brain-supervisor.js";
 import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consolidation.js";
 import { handleBrainProxy } from "./brain/brain-proxy.js";
+import { localProviderHealth } from "./local-provider-health.js";
 import { CALLBACK_PATH as MCP_AUTH_CALLBACK_PATH, handleMcpAuthProxy } from "./mcp-auth/mcp-auth-proxy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -96,6 +97,8 @@ const orchestrator = new SessionOrchestrator({
 wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
 wsBridge.setArchivedCheck((sessionId) => launcher.getSession(sessionId)?.archived === true);
+// Local sessions keep their model (a Claude model would move the conversation off the provider).
+wsBridge.setLocalCheck((sessionId) => !!launcher.getSession(sessionId)?.local);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
 // Every Claude Code / Codex session gets the built-in `companion` MCP server
@@ -413,6 +416,10 @@ brainSupervisor.startAll();
 brainConsolidation.startAll();
 brainSupervisor.addHealthListener((slug, tick) => brainConsolidation.onHealth(slug, tick.inbox));
 
+// ── Local providers ─────────────────────────────────────────────────────────
+// Online/offline badge of each provider, checked every 30 s (never blocks a spawn).
+localProviderHealth.start();
+
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).
 telegramBridgeManager.start(port);
@@ -458,6 +465,7 @@ setInterval(() => {
 function gracefulShutdown() {
   telegramBridgeManager.stop();
   brainSupervisor.stopAll();
+  localProviderHealth.stop();
   closeLogFile();
   process.exit(0);
 }

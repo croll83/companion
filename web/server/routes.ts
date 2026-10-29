@@ -18,6 +18,7 @@ import { registerEnvRoutes } from "./routes/env-routes.js";
 import { registerDomainRoutes } from "./routes/domain-routes.js";
 import { registerDomainLinearRoutes } from "./routes/domain-linear-routes.js";
 import { registerBrainRoutes } from "./routes/brain-routes.js";
+import { localSessionView, registerLocalProviderRoutes } from "./routes/local-provider-routes.js";
 import { getBrainConsolidation } from "./brain/brain-consolidation.js";
 import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
@@ -275,6 +276,8 @@ export function createRoutes(
         gitBehind: bridge?.git_behind || 0,
         totalLinesAdded: bridge?.total_lines_added || 0,
         totalLinesRemoved: bridge?.total_lines_removed || 0,
+        // A local session: its provider's name and levels for the badge and the effort selector.
+        ...(s.local ? { local: localSessionView(s.local) } : {}),
       };
     });
     return c.json(enriched);
@@ -912,6 +915,14 @@ export function createRoutes(
   registerDomainRoutes(api, launcher);
   registerDomainLinearRoutes(api, launcher);
   registerBrainRoutes(api);
+  registerLocalProviderRoutes(api, {
+    liveSessionsUsing: (id) => launcher.listSessions()
+      .filter((s) => s.local?.provider === id && !s.archived && s.state !== "exited").length,
+    sessionLocal: (id) => {
+      const s = launcher.getSession(id);
+      return s?.local ? { ...s.local, effort: s.effort } : undefined;
+    },
+  });
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api, {

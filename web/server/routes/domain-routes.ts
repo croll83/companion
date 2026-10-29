@@ -23,6 +23,7 @@ import {
   type DomainInfo,
 } from "../domain-store.js";
 import { getBrain, listBrains } from "../brain/brain-store.js";
+import { resolveLocalChoice } from "../local-providers.js";
 import { domainMcpView, mcpTargetOf, mcpTypeOf, resolveDomain, type DomainMcpServerView } from "../domain-runtime.js";
 import { isSkillGroupOn, isSkillOn, listSkillGroups, skillDescription, skillKey, type SkillGroup } from "../skill-groups.js";
 import { isPluginOn, listInstalledPlugins, type InstalledPlugin } from "../claude-plugins.js";
@@ -301,10 +302,15 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
   });
 
   api.patch("/domains/:slug", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { brain?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as { brain?: unknown; localDefault?: unknown };
     // One brain per domain: a slug replaces the current one, and must exist.
     if (typeof body.brain === "string" && body.brain !== "inherit" && !getBrain(body.brain)) {
       return c.json({ error: `No brain "${body.brain}"` }, 400);
+    }
+    // A default local provider must exist, with that model.
+    if (body.localDefault && typeof body.localDefault === "object") {
+      const choice = resolveLocalChoice(body.localDefault as { provider?: unknown; model?: unknown }, undefined);
+      if (!choice.ok) return c.json({ error: choice.error }, 400);
     }
     const result = updateDomain(c.req.param("slug"), body as Record<string, unknown>);
     if (!result.ok) return c.json({ error: result.error }, result.status);

@@ -11,6 +11,11 @@ import { Hono } from "hono";
  */
 
 const h = vi.hoisted(() => ({ home: "" }));
+// "Enable local LLM" on, for the domain default tests (never the real settings file).
+vi.mock("../settings-manager.js", async (orig) => ({
+  ...(await orig<typeof import("../settings-manager.js")>()),
+  getSettings: () => ({ localLlmEnabled: true }),
+}));
 vi.mock("../paths.js", () => ({
   get COMPANION_HOME() {
     return h.home;
@@ -20,6 +25,7 @@ vi.mock("../paths.js", () => ({
 import { registerDomainRoutes } from "./domain-routes.js";
 import type { AccountMcpList } from "../account-mcp.js";
 import { domainDir, getDomain, setDomainLinear } from "../domain-store.js";
+import { createLocalProvider } from "../local-providers.js";
 
 let tmp: string;
 let sessions: { domain?: string; archived?: boolean }[];
@@ -158,6 +164,25 @@ describe("POST/PATCH/DELETE /domains", () => {
     expect(existsSync(join(domainDir("herd"), "CLAUDE.md"))).toBe(true);
     expect((await app.request("/domains/global", { method: "DELETE" })).status).toBe(400);
     expect((await app.request("/domains/nope", { method: "DELETE" })).status).toBe(404);
+  });
+});
+
+describe("default local provider", () => {
+  // The route checks the provider (and model) exist before the domain keeps it.
+  it("accepts an existing provider and model, refuses unknown ones", async () => {
+    const r = createLocalProvider({ name: "Lab", baseUrl: "http://lab:30000", models: ["my-model"] });
+    if (!r.ok) throw new Error(r.error);
+    await app.request("/domains", json({ name: "Herd" }));
+    const ok = await app.request("/domains/herd", patch({ localDefault: { provider: "lab", model: "my-model" } }));
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).localDefault).toEqual({ provider: "lab", model: "my-model" });
+    const bad = await app.request("/domains/herd", patch({ localDefault: { provider: "nope" } }));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toMatch(/Unknown local provider/);
+    const badModel = await app.request("/domains/herd", patch({ localDefault: { provider: "lab", model: "x" } }));
+    expect(badModel.status).toBe(400);
+    expect((await app.request("/domains/herd", patch({ localDefault: null }))).status).toBe(200);
+    expect(getDomain("herd")).not.toHaveProperty("localDefault");
   });
 });
 

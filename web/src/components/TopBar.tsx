@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useStore } from "../store.js";
 import { parseHash } from "../utils/routing.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
+import { LocalBadge } from "./LocalBadge.js";
 
 type WorkspaceTab = "chat" | "diff";
 
@@ -38,6 +39,8 @@ export function TopBar() {
       `Session ${currentSessionId.slice(0, 8)}`)
     : null;
   const showWorkspaceControls = !!(currentSessionId && isSessionView);
+  // A session on a local provider says so in the header (Local · provider/model).
+  const local = currentSessionId ? sdkSessions.find((s) => s.sessionId === currentSessionId)?.local : undefined;
   const showContextToggle = route.page === "session" && !!currentSessionId;
   const workspaceTabs: WorkspaceTab[] = ["chat", "diff"];
 
@@ -127,6 +130,12 @@ export function TopBar() {
         )}
 
         <div className="flex items-center gap-0.5 shrink-0">
+          {showWorkspaceControls && local && (
+            <>
+              <span className="sm:hidden mr-1"><LocalBadge local={local} compact /></span>
+              <span className="hidden sm:inline-flex mr-1"><LocalBadge local={local} /></span>
+            </>
+          )}
           {showWorkspaceControls && currentSessionId && (
             <AiValidationToggle sessionId={currentSessionId} />
           )}

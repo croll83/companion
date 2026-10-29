@@ -211,6 +211,8 @@ export interface CreateSessionOpts {
   createBranch?: boolean;
   useWorktree?: boolean;
   backend?: "claude" | "codex";
+  /** Claude Code on a local provider (Settings → Local providers); `effort` is then one of its levels. */
+  local?: { provider: string; model?: string };
   resumeSessionAt?: string;
   forkSession?: boolean;
   /** Domain slug (default GLOBAL). */
@@ -226,6 +228,55 @@ export interface CreateSessionOpts {
     teamName: string;
     url: string;
   };
+}
+
+// ─── Local providers (Settings → Local providers) ────────────────────────────
+// Types shared with the server: a provider never carries its token, only hasToken.
+export type { LocalProviderView, LocalSessionMetrics } from "../server/routes/local-provider-routes.js";
+import type { LocalProviderView, LocalSessionMetrics } from "../server/routes/local-provider-routes.js";
+import type { LocalProviderHealth } from "../server/local-provider-health.js";
+
+/** What the provider form sends; `token`: a string sets it, "" removes it, absent keeps it. */
+export interface LocalProviderInput {
+  name?: string;
+  baseUrl?: string;
+  token?: string;
+  models?: string[];
+  modelsManual?: boolean;
+  defaultModel?: string | null;
+  contextWindow?: number;
+  /** Claude Code effort values the proxy maps (see docs/local-llm.md). */
+  effortLevels?: string[];
+  /** Name of the model level each value carries, e.g. {low: "off"}. */
+  effortLabels?: Record<string, string>;
+  defaultEffort?: string | null;
+}
+
+/** What "Test" reads: the proxy's GET /info (viaProxy), else the server's /v1/models. */
+export type LocalProviderTestResult =
+  | {
+    ok: true;
+    viaProxy: boolean;
+    latencyMs: number;
+    models: string[];
+    contextWindow?: number | null;
+    effort?: { default?: string | null; levels: { name: string; claude: string }[] };
+    /** The proxy answers Claude Code's WebSearch, with this backend. */
+    webSearch?: boolean;
+    searchBackend?: string | null;
+  }
+  | { ok: false; error: string };
+
+/** GET /sessions/:id/local-metrics */
+export interface LocalSessionMetricsView {
+  provider: { id: string; name?: string; contextWindow?: number; health?: LocalProviderHealth; missing?: boolean };
+  model: string;
+  effort: string | null;
+  /** The model level `effort` carries (the proxy's name for it). */
+  effortLabel?: string | null;
+  metrics: LocalSessionMetrics | null;
+  /** The proxy could not be asked for the numbers. */
+  metricsError?: string;
 }
 
 export interface BackendInfo {
@@ -392,6 +443,8 @@ export interface AppSettings {
   timeZone: string;
   /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
   companionMcpEnabled?: boolean;
+  /** "Enable local LLM": Claude Code sessions on a local model (off by default). */
+  localLlmEnabled?: boolean;
 }
 
 export interface HostsCheckResult {
@@ -595,6 +648,8 @@ export interface DomainSummary {
   effectiveBrain?: { slug: string; name: string; own: boolean } | null;
   /** The Linear team/project the domain is linked to (ids and names only, never a key). */
   linear?: DomainLinearLink;
+  /** New sessions of the domain start on this local provider (the Home page preselects it). */
+  localDefault?: { provider: string; model?: string };
 }
 
 /** A per-domain transition rule; absent on the link = the connection's setting applies. */
@@ -716,6 +771,8 @@ export interface DomainPatch {
   skillChoices?: Choices;
   /** One brain per domain: a slug replaces the current one, null = none, "inherit" = GLOBAL's (not for GLOBAL). */
   brain?: string | null;
+  /** New sessions start on this local provider; null = the Anthropic account. */
+  localDefault?: { provider: string; model?: string } | null;
 }
 
 export interface DomainsResponse {
@@ -1141,6 +1198,8 @@ export interface AgentInfo {
   description: string;
   icon?: string;
   backendType: "claude" | "codex";
+  /** Claude only: the runs use this local provider (`model` is then its model). */
+  local?: { provider: string; model?: string };
   model: string;
   /** Reasoning effort of the runs; absent = the model's default. Null in an update clears it. */
   effort?: string | null;
@@ -1550,6 +1609,18 @@ export const api = {
 
   // Brains (remote and embedded). Assigned to domains with updateDomain(slug, { brain }).
   listBrains: () => get<{ brains: BrainInfo[] }>("/brains"),
+
+  // Local providers: Anthropic-compatible endpoints sessions can run on.
+  listLocalProviders: () => get<LocalProviderView[]>("/local-providers"),
+  createLocalProvider: (input: LocalProviderInput) => post<LocalProviderView>("/local-providers", input),
+  updateLocalProvider: (id: string, input: LocalProviderInput) => patch<LocalProviderView>(`/local-providers/${encodeURIComponent(id)}`, input),
+  deleteLocalProvider: (id: string) => del<{ ok: true }>(`/local-providers/${encodeURIComponent(id)}`),
+  /** GET /v1/models on a URL (unsaved: with the typed token; saved: `id`, its token unless one is typed). */
+  testLocalProvider: (input: { baseUrl?: string; token?: string; id?: string }) => post<LocalProviderTestResult>("/local-providers/test", input),
+  /** Read models, context window and levels from the proxy again. */
+  refreshLocalProvider: (id: string) =>
+    post<{ ok: boolean; viaProxy?: boolean; error?: string; provider: LocalProviderView }>(`/local-providers/${encodeURIComponent(id)}/refresh`, {}),
+  getLocalSessionMetrics: (sessionId: string) => get<LocalSessionMetricsView>(`/sessions/${encodeURIComponent(sessionId)}/local-metrics`),
   createBrain: (input: BrainInput | EmbeddedBrainInput) => post<BrainInfo>("/brains", input),
   /** Embedded brains: start, stop or restart the brain's process. */
   brainProcess: (slug: string, action: "start" | "stop" | "restart") =>
@@ -1700,6 +1771,7 @@ export const api = {
     telegramBotToken?: string;
     timeZone?: string;
     companionMcpEnabled?: boolean;
+    localLlmEnabled?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

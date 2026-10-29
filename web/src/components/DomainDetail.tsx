@@ -4,6 +4,7 @@ import { domainsHash, type DomainTab } from "../utils/routing.js";
 import { DomainBrain } from "./DomainBrain.js";
 import { DomainBoard } from "./DomainBoard.js";
 import { DomainChrome } from "./DomainChrome.js";
+import { DomainLocalDefault } from "./DomainLocalDefault.js";
 import { DomainLinear } from "./DomainLinear.js";
 import { domainCounts } from "./DomainList.js";
 import { DomainMcpServers, type NewMcpServer } from "./DomainMcpServers.js";
@@ -268,6 +269,8 @@ export function DomainDetail({
       />
 
       <DomainChrome domain={domain} busy={busy} onUpdate={async (patch) => actions.onPatch(domain.slug, patch)} />
+
+      <DomainLocalDefault domain={domain} busy={busy} onUpdate={(patch) => actions.onPatch(domain.slug, patch)} />
 
       {!desktop && tab && (
         <Sheet title={`${domain.name} · ${TABS.find((t) => t.id === tab)!.label}`} onClose={() => { window.location.hash = domainsHash(domain.slug); }}>

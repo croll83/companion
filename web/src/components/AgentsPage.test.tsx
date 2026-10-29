@@ -20,6 +20,7 @@ const mockApi = {
   getLinearOAuthStatus: vi.fn(),
   listLinearOAuthConnections: vi.fn(),
   getBackendModels: vi.fn(),
+  listLocalProviders: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
 };
 
 vi.mock("../api.js", () => ({
@@ -40,6 +41,7 @@ vi.mock("../api.js", () => ({
     getLinearOAuthStatus: (...args: unknown[]) => mockApi.getLinearOAuthStatus(...args),
     listLinearOAuthConnections: (...args: unknown[]) => mockApi.listLinearOAuthConnections(...args),
     getBackendModels: (...args: unknown[]) => mockApi.getBackendModels(...args),
+    listLocalProviders: (...args: unknown[]) => mockApi.listLocalProviders(...args),
   },
 }));
 
@@ -941,6 +943,25 @@ describe("AgentsPage", () => {
     // First argument should be the agent id, second the data payload
     expect(mockApi.updateAgent.mock.calls[0][0]).toBe("edit-1");
     expect(mockApi.updateAgent.mock.calls[0][1].name).toBe("Updated Name");
+  });
+
+  // A local agent (Claude Code on a local provider) opens on its provider and
+  // saves `local` with the model; the server takes it off the provider when
+  // the backend changes (no `local` sent).
+  it("edit mode keeps a local agent on its provider", async () => {
+    const agent = makeAgent({ id: "loc-1", name: "Local Agent", model: "my-model", local: { provider: "lab", model: "my-model" } });
+    mockApi.listAgents.mockResolvedValue([agent]);
+    mockApi.updateAgent.mockResolvedValue(agent);
+    mockApi.listLocalProviders.mockResolvedValue([{ id: "lab", name: "Lab", models: ["my-model"], effortLevels: [], health: { status: "online" } }]);
+    render(<AgentsPage route={defaultRoute} />);
+    await screen.findByText("Local Agent");
+    fireEvent.click(screen.getByLabelText("More actions"));
+    fireEvent.click(screen.getByText("Edit"));
+    expect(await screen.findByRole("combobox", { name: "Local provider" })).toHaveValue("lab");
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(mockApi.updateAgent).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateAgent.mock.calls[0][1]).toMatchObject({ backendType: "claude", model: "my-model", local: { provider: "lab", model: "my-model" } });
+    mockApi.listLocalProviders.mockResolvedValue([]);
   });
 
   // The effort round-trips: the editor opens on the saved level, a chosen one

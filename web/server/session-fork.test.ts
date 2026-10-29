@@ -113,6 +113,18 @@ describe("resolveForkSource", () => {
     });
   });
 
+  // A conversation never moves between the Anthropic account and a local
+  // provider: local thinking blocks have no signature Anthropic accepts.
+  it("forks only within the same kind (Anthropic or local)", () => {
+    addSession({ sessionId: "loc", backendType: "claude", cliSessionId: "cli-l", local: { provider: "lab", model: "m" } });
+    addSession({ sessionId: "ant", backendType: "claude", cliSessionId: "cli-a" });
+    writeClaudeTranscript("cli-l");
+    writeClaudeTranscript("cli-a");
+    expect(resolveForkSource(launcher, "loc", "claude", opts())).toMatchObject({ ok: false, error: expect.stringContaining("only an agent on a local provider") });
+    expect(resolveForkSource(launcher, "ant", "claude", { ...opts(), local: true })).toMatchObject({ ok: false, error: expect.stringContaining("cannot fork it") });
+    expect(resolveForkSource(launcher, "loc", "claude", { ...opts(), local: true }).ok).toBe(true);
+  });
+
   // Older sessions have no backendType: they are Claude sessions.
   it("treats a session without backendType as Claude", () => {
     addSession({ sessionId: "old", cliSessionId: "cli-3" });
