@@ -1,3 +1,4 @@
+import type { LocalSessionView } from "../server/routes/local-provider-routes.js";
 import type {
   SessionState,
   PermissionRequest,
@@ -151,4 +152,10 @@ export interface SdkSessionInfo {
   pinnedMemoryDir?: string;
   /** The session's own folder (stable), unlike `cwd`, which follows the CLI's `cd`. */
   folder?: string;
+  /**
+   * Claude Code on a local provider instead of the Anthropic account: the
+   * provider's name and levels (for the badge and the effort selector). Set
+   * at creation, never changed.
+   */
+  local?: LocalSessionView;
 }

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store.js";
 import { createClientMessageId, sendToSession } from "../ws.js";
 import { nextRefusalFallback, refusalFallbackLabel } from "../utils/refusal-fallback.js";
+import { useLocalSession } from "../utils/local-session.js";
 
 /** Human-readable description for known refusal categories. */
 const CATEGORY_LABELS: Record<string, string> = {
@@ -34,7 +35,10 @@ export function RefusalBanner({ refusal }: RefusalBannerProps) {
     : null;
   // The model that refused, frozen when the refusal arrived (see ws.ts) so an
   // older banner never recomputes its step from whatever the session runs now.
-  const fallbackModel = nextRefusalFallback(refusal.model);
+  // A local session has no fallback: retrying on a Claude model would move
+  // the conversation off its provider (never allowed, see SdkSessionInfo.local).
+  const local = useLocalSession(currentSessionId);
+  const fallbackModel = local ? null : nextRefusalFallback(refusal.model);
   const fallbackLabel = fallbackModel ? refusalFallbackLabel(fallbackModel) : null;
 
   function handleRetry() {
@@ -109,7 +113,9 @@ export function RefusalBanner({ refusal }: RefusalBannerProps) {
               )}
               {!fallbackModel && (
                 <span className="text-[11px] text-cc-muted italic">
-                  Every model in the fallback chain declined — try rephrasing the request.
+                  {local
+                    ? "This session runs on a local provider and keeps its model — try rephrasing the request."
+                    : "Every model in the fallback chain declined — try rephrasing the request."}
                 </span>
               )}
             </div>

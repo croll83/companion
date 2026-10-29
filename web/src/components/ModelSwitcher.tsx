@@ -3,6 +3,7 @@ import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
 import { api } from "../api.js";
 import { getModelsForBackend, toModelOptions } from "../utils/backends.js";
+import { useLocalSession } from "../utils/local-session.js";
 import type { ModelOption } from "../utils/backends.js";
 
 interface ModelSwitcherProps {
@@ -19,6 +20,7 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   // Runtime session state from WebSocket (has model from CLI init message)
   const runtimeSession = useStore((s) => s.sessions.get(sessionId));
   const cliConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
+  const local = useLocalSession(sessionId);
 
   const backendType = sdkSession?.backendType ?? runtimeSession?.backend_type ?? "claude";
   // Prefer runtime model (from CLI init) over sdkSession model (from launch config)
@@ -87,7 +89,9 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
 
   // Both backends switch model by relaunching on the resumed conversation
   // (see ws-bridge set_model). Hidden only while there is no live CLI.
-  if (!cliConnected || !currentOption) {
+  // A local session keeps its model (the header badge shows it): switching to a
+  // Claude model would move the conversation off the provider.
+  if (!cliConnected || !currentOption || local) {
     return null;
   }
 

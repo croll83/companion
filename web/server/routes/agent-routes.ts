@@ -12,6 +12,7 @@ import { accessDenied, agentAccessLevel, mcpCallerOf, sessionAccessLevel } from 
 import { isPathWithin } from "../path-scope.js";
 import { GLOBAL_DOMAIN, getDomain } from "../domain-store.js";
 import { agentEffortError } from "../agent-effort.js";
+import { resolveLocalChoice } from "../local-providers.js";
 
 /** What the routes need to know about a session (the launcher's record). */
 export type AgentSessionLookup = (sessionId: string) => {
@@ -47,8 +48,34 @@ const EDITABLE_FIELDS = [
   "backendType", "model", "effort", "permissionMode", "cwd",
   "envSlug", "env", "allowedTools", "codexInternetAccess",
   "prompt", "contextMode", "sourceSessionId", "mcpServers",
-  "triggers", "enabled", "domain", "keepRunSessions",
+  "triggers", "enabled", "domain", "keepRunSessions", "local",
 ] as const;
+
+/**
+ * `backendType: "local"` is Claude Code on a local provider: stored as
+ * backendType "claude" plus `local: {provider, model?}` (agent-types.ts).
+ * An explicit backend without `local` (the Agents page always sends both)
+ * takes the agent off its local provider; `local: null` does too.
+ */
+function normalizeLocalBackend(fields: Record<string, unknown>): void {
+  if (fields.backendType === "local") {
+    fields.backendType = "claude";
+    if (!fields.local || typeof fields.local !== "object") fields.local = { provider: "" };
+  } else if ((fields.backendType === "claude" || fields.backendType === "codex") && !("local" in fields)) {
+    fields.local = undefined;
+  }
+  if (!("local" in fields)) return;
+  const raw = fields.local;
+  if (!raw || typeof raw !== "object") {
+    fields.local = undefined;
+    return;
+  }
+  const l = raw as { provider?: unknown; model?: unknown };
+  const model = typeof l.model === "string" && l.model ? l.model : undefined;
+  fields.local = { provider: typeof l.provider === "string" ? l.provider : "", ...(model ? { model } : {}) };
+  // The run's model is the agent's `model`: the local one when given there.
+  if (model && !fields.model) fields.model = model;
+}
 
 /** A built-in Claude tool name, as `--tools` accepts it (no permission patterns). */
 const TOOL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
@@ -75,13 +102,24 @@ function validateAgentFields(
   const saved = { ...opts.saved, ...fields };
   // The effort is checked against the model the agent will have once saved,
   // so changing only the model of an agent with an effort is caught too.
-  if ("effort" in fields || "model" in fields || "backendType" in fields) {
+  if (saved.local) {
+    // A local agent: provider, model and level checked against the registry.
+    if (saved.backendType === "codex") return "Local providers run on Claude Code agents only";
+    const choice = resolveLocalChoice({ provider: saved.local.provider, model: saved.model || saved.local.model }, saved.effort);
+    if (!choice.ok) return choice.error;
+    if (saved.effort && choice.effort !== saved.effort) {
+      return `effort must be one of ${choice.provider.effortLevels.join(", ") || "(none)"} for the local provider "${choice.provider.name}" (or empty for its default)`;
+    }
+  } else if ("effort" in fields || "model" in fields || "backendType" in fields) {
     const effortError = agentEffortError(saved.backendType ?? "claude", saved.model, saved.effort);
     if (effortError) return effortError;
   }
   if (saved.contextMode === "fork") {
     if (!saved.sourceSessionId) return 'contextMode "fork" needs a sourceSessionId (the session to fork)';
-    const forkError = opts.forkSourceError?.(saved.sourceSessionId, saved.backendType ?? "claude");
+    // The kind (local or Anthropic) only when local: both must match (session-fork.ts).
+    const forkError = saved.local
+      ? opts.forkSourceError?.(saved.sourceSessionId, saved.backendType ?? "claude", true)
+      : opts.forkSourceError?.(saved.sourceSessionId, saved.backendType ?? "claude");
     if (forkError) return forkError;
   }
   if (fields.domain !== undefined && fields.domain !== null) {
@@ -104,6 +142,7 @@ function pickEditable(body: Record<string, unknown>): Partial<AgentConfig> {
   for (const key of EDITABLE_FIELDS) {
     if (key in body) result[key] = body[key];
   }
+  normalizeLocalBackend(result);
   // null or "" clears the effort (back to the model's default): an undefined
   // value is dropped when the agent is written.
   if (result.effort === null || result.effort === "") result.effort = undefined;
@@ -111,9 +150,11 @@ function pickEditable(body: Record<string, unknown>): Partial<AgentConfig> {
 }
 
 function buildCreateInput(
-  body: Record<string, unknown>,
+  rawBody: Record<string, unknown>,
   overrides?: Partial<Pick<AgentConfigCreateInput, "enabled" | "version">>,
 ): AgentConfigCreateInput {
+  const body = { ...rawBody };
+  normalizeLocalBackend(body);
   return {
     version: overrides?.version ?? 1,
     name: (body.name as string | undefined) || "",
@@ -129,6 +170,7 @@ function buildCreateInput(
     env: body.env as Record<string, string> | undefined,
     allowedTools: body.allowedTools as string[] | undefined,
     codexInternetAccess: body.codexInternetAccess as boolean | undefined,
+    ...(body.local ? { local: body.local as AgentConfig["local"] } : {}),
     prompt: (body.prompt as string | undefined) || "",
     contextMode: body.contextMode as AgentConfig["contextMode"] | undefined,
     sourceSessionId: body.sourceSessionId as string | undefined,
@@ -270,7 +312,7 @@ export function registerAgentRoutes(
   };
 
   const forkSourceError: AgentExecutor["forkSourceError"] | undefined = agentExecutor
-    ? (sourceSessionId, backendType) => agentExecutor.forkSourceError(sourceSessionId, backendType)
+    ? (...args) => agentExecutor.forkSourceError(...args)
     : undefined;
 
   /** The agent as the browser sees it: live run/schedule state, no secrets. */

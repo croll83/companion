@@ -96,6 +96,8 @@ export class WsBridge {
   private autoNamingAttempted = new Set<string>();
   /** Resolves whether a session is archived; see setArchivedCheck. */
   private isArchived: (sessionId: string) => boolean = () => false;
+  /** Whether a session runs on a local provider; see setLocalCheck. */
+  private isLocal: (sessionId: string) => boolean = () => false;
   private userMsgCounter = 0;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
@@ -170,6 +172,17 @@ export class WsBridge {
    */
   setArchivedCheck(isArchived: (sessionId: string) => boolean): void {
     this.isArchived = isArchived;
+  }
+
+  /**
+   * How to tell a session runs on a local provider (the launcher's record).
+   * Its model is never switched: a Claude model would move the conversation
+   * off the provider, and local thinking blocks carry no signature the
+   * Anthropic API accepts. Its effort goes the normal Claude way (the CLI
+   * sends it as output_config.effort, which the provider's proxy maps).
+   */
+  setLocalCheck(isLocal: (sessionId: string) => boolean): void {
+    this.isLocal = isLocal;
   }
 
   setRecorder(recorder: RecorderManager): void {
@@ -1495,6 +1508,16 @@ export class WsBridge {
     // the Codex path worked, and the picker hid itself for Codex to match — so
     // Codex sessions could never change model. Both go through the
     // orchestrator, which relaunches on the resumed conversation.
+    // A local session never changes model here: a Claude model would move the
+    // conversation off the provider (see SdkSessionInfo.local).
+    if (msg.type === "set_model" && this.isLocal(session.id)) {
+      this.broadcastToBrowsers(session, {
+        type: "error",
+        message: "A session on a local provider keeps its model: start a new session to use another one",
+      });
+      return;
+    }
+
     if (msg.type === "set_model" && (session.backendType === "claude" || session.backendType === "codex")) {
       session.state.model = msg.model;
       this.persistSession(session);

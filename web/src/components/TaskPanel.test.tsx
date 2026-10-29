@@ -21,6 +21,11 @@ vi.mock("./McpPanel.js", () => ({
   McpSection: () => <div data-testid="mcp-section">MCP Section</div>,
 }));
 
+// The local-provider usage has its own tests (LocalSessionMetrics.test.tsx).
+vi.mock("./LocalSessionMetrics.js", () => ({
+  LocalSessionMetrics: ({ sessionId }: { sessionId: string }) => <div data-testid="local-metrics">{sessionId}</div>,
+}));
+
 vi.mock("./ClaudeConfigBrowser.js", () => ({
   ClaudeConfigBrowser: () => <div data-testid="claude-config-browser">Config</div>,
 }));
@@ -81,7 +86,7 @@ interface MockStoreState {
     codex_rate_limits?: CodexRateLimits;
     context_used_percent?: number;
   }>;
-  sdkSessions: { sessionId: string; backendType?: string; cwd?: string; gitBranch?: string; envProfiles?: string[] }[];
+  sdkSessions: { sessionId: string; backendType?: string; cwd?: string; gitBranch?: string; envProfiles?: string[]; local?: Record<string, unknown> }[];
   taskPanelOpen: boolean;
   setTaskPanelOpen: ReturnType<typeof vi.fn>;
   taskPanelConfig: TaskPanelConfig;
@@ -1566,5 +1571,18 @@ describe("LinearIssueSection — comments and labels rendering", () => {
     render(<TaskPanel sessionId="s1" />);
     fireEvent.click(screen.getByTitle("Unlink issue"));
     expect(mockApi.unlinkLinearIssue).toHaveBeenCalledWith("s1");
+  });
+});
+
+// A local session has no Anthropic cost or limits: the proxy's numbers instead.
+describe("TaskPanel — local provider usage", () => {
+  it("shows the local metrics instead of the Claude usage limits", () => {
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } }],
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByTestId("local-metrics")).toHaveTextContent("s1");
+    expect(mockApi.getSessionUsageLimits).not.toHaveBeenCalled();
   });
 });

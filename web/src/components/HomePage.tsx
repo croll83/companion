@@ -18,13 +18,16 @@ import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
-import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, toModelOptions, getEffortLevels, modelSupportsEffort, DEFAULT_EFFORT, type ModelOption } from "../utils/backends.js";
+import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, toModelOptions, getEffortLevels, modelSupportsEffort, DEFAULT_EFFORT, effortLabel, type ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
 import { DomainFolderPicker, folderSlug, type FolderMode } from "./home/DomainFolderPicker.js";
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
+import { LocalProviderPicker, defaultModelOf, type LocalChoice } from "./home/LocalProviderPicker.js";
+import type { LocalProviderView } from "../api.js";
+import { localEffortLabel } from "../utils/local-session.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 import type { SavedPrompt } from "../api.js";
@@ -91,19 +94,36 @@ function formatTimeAgo(timestamp: number): string {
   return `${Math.max(1, months)}mo ago`;
 }
 
+/** The backend remembered from the last session; "local" is Claude Code on a local provider. */
+function storedBackend(): BackendType {
+  const saved = localStorage.getItem("cc-backend");
+  return saved === "local" ? "claude" : (saved as BackendType) || "claude";
+}
+
 export function HomePage() {
   const [text, setText] = useState("");
   const [backend, setBackend] = useState<BackendType>(() =>
-    (localStorage.getItem("cc-backend") as BackendType) || "claude",
+    storedBackend(),
   );
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [model, setModel] = useState(() => getDefaultModel(
-    (localStorage.getItem("cc-backend") as BackendType) || "claude",
+    storedBackend(),
   ));
   const [mode, setMode] = useState(() => getDefaultMode(
-    (localStorage.getItem("cc-backend") as BackendType) || "claude",
+    storedBackend(),
   ));
   const [effort, setEffort] = useState<string>(DEFAULT_EFFORT);
+  // "Local": Claude Code on a local provider (Settings → Local providers).
+  // The backend stays "claude"; null = the Anthropic account (or Codex).
+  const [localProviders, setLocalProviders] = useState<LocalProviderView[]>([]);
+  const [localChoice, setLocalChoice] = useState<LocalChoice | null>(null);
+  const localProvider = localChoice ? localProviders.find((p) => p.id === localChoice.provider) : undefined;
+  const isLocal = backend === "claude" && !!localChoice && !!localProvider;
+  // Effort levels: the provider's own on a local session, else the model's.
+  const effortLevels: string[] = isLocal ? localProvider!.effortLevels : getEffortLevels(model);
+  const showEffort = isLocal ? effortLevels.length > 0 : modelSupportsEffort(model);
+  // A local provider names its levels after the model's (low → "off", ...).
+  const effortName = (level: string) => (isLocal ? localEffortLabel(localProvider!.effortLabels, level) : effortLabel(level));
   const [cwd, setCwd] = useState(() => getRecentDirs()[0] || "");
   // Where the session runs: its domain, and a new folder inside it (named
   // after the session) or an existing folder attached as is.
@@ -215,6 +235,15 @@ export function HomePage() {
     }).catch(() => {});
     api.listEnvs().then(setEnvs).catch(() => {});
     api.getBackends().then(setBackends).catch(() => {});
+    api.listLocalProviders().then((list) => {
+      setLocalProviders(list);
+      // Last choice was Local: keep it while that provider exists.
+      if (localStorage.getItem("cc-backend") === "local" && list.length > 0) {
+        const saved = list.find((p) => p.id === localStorage.getItem("cc-local-provider")) ?? list[0];
+        setLocalChoice({ provider: saved.id, model: defaultModelOf(saved) });
+        setEffort(saved.defaultEffort ?? "");
+      }
+    }).catch(() => {});
     api.getSettings().then((s) => {
       setLinearConfigured(s.linearApiKeyConfigured);
     }).catch(() => {});
@@ -248,6 +277,7 @@ export function HomePage() {
 
   // When backend changes, reset model and mode to defaults
   function switchBackend(newBackend: BackendType) {
+    setLocalChoice(null);
     setBackend(newBackend);
     localStorage.setItem("cc-backend", newBackend);
     setDynamicModels(null);
@@ -306,11 +336,37 @@ export function HomePage() {
 
   // Keep effort valid for the selected model (e.g. Opus 4.6 has no "xhigh").
   useEffect(() => {
+    if (isLocal) return;
     const levels = getEffortLevels(model);
     if (levels.length > 0 && !levels.includes(effort as never)) {
       setEffort(DEFAULT_EFFORT);
     }
-  }, [model, effort]);
+  }, [model, effort, isLocal]);
+
+  /** Start the next session on a local provider (its default model and level unless given). */
+  function switchToLocal(choice?: LocalChoice) {
+    const provider = localProviders.find((p) => p.id === choice?.provider) ?? localProviders[0];
+    if (!provider) return;
+    setBackend("claude");
+    setDynamicModels(null);
+    setMode(getDefaultMode("claude"));
+    setShowBranchingControls(false);
+    setLocalChoice({ provider: provider.id, model: choice?.model && provider.models.includes(choice.model) ? choice.model : defaultModelOf(provider) });
+    setEffort(provider.defaultEffort ?? "");
+    localStorage.setItem("cc-backend", "local");
+    localStorage.setItem("cc-local-provider", provider.id);
+  }
+
+  // A domain whose sessions run on a local provider by default preselects it.
+  useEffect(() => {
+    if (localProviders.length === 0) return;
+    let active = true;
+    api.listDomains().then((res) => {
+      const def = res.domains.find((d) => d.slug === domain)?.localDefault;
+      if (active && def && localProviders.some((p) => p.id === def.provider)) switchToLocal({ provider: def.provider, model: def.model ?? "" });
+    }).catch(() => { /* no default: keep the current choice */ });
+    return () => { active = false; };
+  }, [domain, localProviders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Detect git repo when the (existing) folder changes
   useEffect(() => {
@@ -601,8 +657,9 @@ export function HomePage() {
       // Create session with progress streaming
       const result = await createSessionStream(
         {
-          model,
-          effort: modelSupportsEffort(model) ? effort : undefined,
+          model: isLocal ? localChoice!.model : model,
+          effort: showEffort && effort ? effort : undefined,
+          ...(isLocal ? { local: { provider: localChoice!.provider, model: localChoice!.model } } : {}),
           permissionMode: mode,
           cwd: effectiveCwd || undefined,
           domain,
@@ -643,8 +700,18 @@ export function HomePage() {
           cwd: result.cwd,
           createdAt: Date.now(),
           backendType: (result.backendType as BackendType | undefined) || backend,
-          model,
-          effort: modelSupportsEffort(model) ? effort : undefined,
+          model: isLocal ? localChoice!.model : model,
+          effort: showEffort && effort ? effort : undefined,
+          ...(isLocal && localProvider ? {
+            local: {
+              provider: localProvider.id,
+              model: localChoice!.model,
+              providerName: localProvider.name,
+              effortLevels: localProvider.effortLevels,
+              ...(localProvider.effortLabels ? { effortLabels: localProvider.effortLabels } : {}),
+              ...(localProvider.defaultEffort ? { defaultEffort: localProvider.defaultEffort } : {}),
+            },
+          } : {}),
           permissionMode: mode,
           resumeSessionAt: effectiveResumeSessionAt,
           forkSession: effectiveResumeSessionAt ? effectiveForkSession === true : undefined,
@@ -809,7 +876,8 @@ export function HomePage() {
     }
   }, [gitRepoInfo]);
 
-  const canSend = text.trim().length > 0 && !sending;
+  // A local provider without a model cannot start a session.
+  const canSend = text.trim().length > 0 && !sending && !(isLocal && !localChoice?.model);
 
   return (
     <div className="flex-1 h-full flex flex-col items-center px-3 sm:px-6 pb-6 pb-safe overflow-y-auto overscroll-y-contain">
@@ -914,8 +982,23 @@ export function HomePage() {
 
           {/* ── Toolbar: all controls in one bar ── */}
           <div className="flex items-center gap-1 px-2.5 sm:px-3 py-2 flex-wrap">
+            {/* Local provider + model, instead of the Claude model selector */}
+            {isLocal && (
+              <LocalProviderPicker
+                providers={localProviders}
+                value={localChoice!}
+                onChange={(next) => {
+                  const provider = localProviders.find((p) => p.id === next.provider);
+                  if (next.provider !== localChoice!.provider) {
+                    setEffort(provider?.defaultEffort ?? "");
+                    localStorage.setItem("cc-local-provider", next.provider);
+                  }
+                  setLocalChoice(next);
+                }}
+              />
+            )}
             {/* Model selector */}
-            <div className="relative" ref={modelDropdownRef}>
+            {!isLocal && <div className="relative" ref={modelDropdownRef}>
               <button
                 onClick={() => setShowModelDropdown(!showModelDropdown)}
                 aria-expanded={showModelDropdown}
@@ -943,10 +1026,10 @@ export function HomePage() {
                   ))}
                 </div>
               )}
-            </div>
+            </div>}
 
-            {/* Effort selector — only for models that support reasoning effort */}
-            {modelSupportsEffort(model) && (
+            {/* Effort selector — models that support reasoning effort, or the local provider's levels */}
+            {showEffort && (
               <div className="relative" ref={effortDropdownRef}>
                 <button
                   onClick={() => setShowEffortDropdown(!showEffortDropdown)}
@@ -957,14 +1040,14 @@ export function HomePage() {
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 opacity-70">
                     <path d="M8 1.5a1 1 0 011 1V3a5 5 0 013.5 8.5l-.7.7a1 1 0 01-.7.3H4.9a1 1 0 01-.7-.3l-.7-.7A5 5 0 017 3v-.5a1 1 0 011-1zM6 14a1 1 0 011-1h2a1 1 0 110 2H7a1 1 0 01-1-1z" />
                   </svg>
-                  <span className="capitalize">{effort}</span>
+                  <span className="capitalize">{effort ? effortName(effort) : "Default"}</span>
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 opacity-40">
                     <path d="M4 6l4 4 4-4" />
                   </svg>
                 </button>
                 {showEffortDropdown && (
                   <div className="absolute left-0 bottom-full mb-1 w-36 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
-                    {getEffortLevels(model).map((level) => (
+                    {effortLevels.map((level) => (
                       <button
                         key={level}
                         onClick={() => { setEffort(level); setShowEffortDropdown(false); }}
@@ -972,7 +1055,7 @@ export function HomePage() {
                           level === effort ? "text-cc-primary font-medium" : "text-cc-fg"
                         }`}
                       >
-                        {level}
+                        {effortName(level)}
                       </button>
                     ))}
                   </div>
@@ -1137,7 +1220,7 @@ export function HomePage() {
         <div className="mt-3 sm:mt-4 space-y-2">
 
           {/* Backend toggle */}
-          {backends.length > 1 && (
+          {(backends.length > 1 || localProviders.length > 0) && (
             <div className="flex items-center justify-center">
               <div className="flex items-center bg-cc-hover/50 rounded-lg p-0.5">
                 {backends.map((b) => (
@@ -1149,7 +1232,7 @@ export function HomePage() {
                     className={`flex items-center gap-1 px-3 py-1.5 text-xs rounded-md transition-colors ${
                       !b.available
                         ? "text-cc-muted/40 cursor-not-allowed"
-                        : backend === b.id
+                        : backend === b.id && !isLocal
                           ? "bg-cc-card text-cc-fg font-medium shadow-sm cursor-pointer"
                           : "text-cc-muted hover:text-cc-fg cursor-pointer"
                     }`}
@@ -1163,12 +1246,26 @@ export function HomePage() {
                     )}
                   </button>
                 ))}
+                {/* Local: Claude Code on a local provider (only once one is configured) */}
+                {localProviders.length > 0 && (
+                  <button
+                    onClick={() => switchToLocal(localChoice ?? undefined)}
+                    disabled={!backends.find((b) => b.id === "claude")?.available}
+                    title="Claude Code on a local provider (Settings → Local providers)"
+                    aria-pressed={isLocal}
+                    className={`flex items-center gap-1 px-3 py-1.5 text-xs rounded-md transition-colors ${
+                      isLocal ? "bg-cc-card text-cc-fg font-medium shadow-sm cursor-pointer" : "text-cc-muted hover:text-cc-fg cursor-pointer"
+                    }`}
+                  >
+                    Local
+                  </button>
+                )}
               </div>
             </div>
           )}
 
-          {/* ── Resume: Branch from session (Claude only) ── */}
-          {backend === "claude" && (
+          {/* ── Resume: Branch from session (Claude only; never across Anthropic and a local provider) ── */}
+          {backend === "claude" && !isLocal && (
             <div>
               <button
                 type="button"

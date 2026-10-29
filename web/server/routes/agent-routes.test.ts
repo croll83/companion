@@ -11,6 +11,21 @@ vi.mock("../agent-store.js", () => ({
   regenerateWebhookSecret: vi.fn(() => null),
 }));
 
+// ─── Mock the local-provider registry (never the real COMPANION_HOME) ──────
+// One provider "lab" with the model "my-model" and the levels off/low.
+vi.mock("../local-providers.js", () => ({
+  resolveLocalChoice: vi.fn((raw: { provider?: string; model?: string } | undefined, effort?: string) => {
+    if (raw?.provider !== "lab") return { ok: false, error: `Unknown local provider "${raw?.provider ?? ""}"` };
+    if (raw.model && raw.model !== "my-model") return { ok: false, error: `"${raw.model}" is not a model of the local provider "Lab"` };
+    return {
+      ok: true,
+      provider: { id: "lab", name: "Lab", effortLevels: ["off", "low"] },
+      local: { provider: "lab", model: raw.model || "my-model" },
+      effort: effort && ["off", "low"].includes(effort) ? effort : "low",
+    };
+  }),
+}));
+
 // ─── Mock settings-manager module ──────────────────────────────────────────
 vi.mock("../settings-manager.js", () => ({
   getSettings: vi.fn(() => ({
@@ -1762,5 +1777,63 @@ describe("agent effort", () => {
 
     vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ effort: "max" }));
     expect((await (await app.request("/api/agents/test-agent/export")).json()).effort).toBe("max");
+  });
+});
+
+// ─── Local providers ────────────────────────────────────────────────────────
+
+/**
+ * `backendType: "local"` (or `local: {provider}`) is a Claude Code agent on a
+ * local provider: stored as backendType "claude" + `local`, its model and
+ * level checked against the provider (mocked registry above), and a fork
+ * source checked for the same kind (Anthropic vs local).
+ */
+describe("agents on a local provider", () => {
+  const post = (body: unknown) =>
+    app.request("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const put = (body: unknown) =>
+    app.request("/api/agents/test-agent", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  it("stores backendType local as a Claude agent with its provider and model", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent({ local: { provider: "lab", model: "my-model" } }));
+    const res = await post({ name: "A", prompt: "p", backendType: "local", local: { provider: "lab", model: "my-model" }, effort: "off" });
+    expect(res.status).toBe(201);
+    expect(agentStore.createAgent).toHaveBeenCalledWith(expect.objectContaining({
+      backendType: "claude", model: "my-model", effort: "off", local: { provider: "lab", model: "my-model" },
+    }));
+  });
+
+  it("refuses an unknown provider, a missing provider, a foreign level and Codex", async () => {
+    expect((await (await post({ name: "A", prompt: "p", backendType: "local", local: { provider: "nope" } })).json()).error).toMatch(/Unknown local provider/);
+    expect((await (await post({ name: "A", prompt: "p", backendType: "local" })).json()).error).toMatch(/Unknown local provider/);
+    expect((await (await post({ name: "A", prompt: "p", local: { provider: "lab" }, effort: "max" })).json()).error).toMatch(/effort must be one of off, low/);
+    expect((await (await post({ name: "A", prompt: "p", local: { provider: "lab", model: "claude-opus-5-5" } })).json()).error).toMatch(/not a model/);
+    expect(agentStore.createAgent).not.toHaveBeenCalled();
+  });
+
+  // The Agents page sends the backend on every save: "claude" without `local` takes the agent off the provider.
+  it("clears local when the backend becomes claude or codex, keeps it on unrelated edits", async () => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ local: { provider: "lab" }, model: "my-model" }));
+    vi.mocked(agentStore.updateAgent).mockReturnValue(makeAgent());
+    expect((await put({ backendType: "claude", model: "claude-opus-5-5" })).status).toBe(200);
+    const updates = vi.mocked(agentStore.updateAgent).mock.calls[0][1];
+    expect("local" in updates && updates.local === undefined).toBe(true);
+    vi.mocked(agentStore.updateAgent).mockClear();
+    expect((await put({ description: "x" })).status).toBe(200);
+    expect(vi.mocked(agentStore.updateAgent).mock.calls[0][1]).not.toHaveProperty("local");
+    expect((await put({ local: null, model: "claude-opus-5-5" })).status).toBe(200);
+  });
+
+  it("refuses a Codex agent with a local provider", async () => {
+    vi.mocked(agentStore.getAgent).mockReturnValue(makeAgent({ backendType: "codex", model: "gpt-6-luna" }));
+    const res = await put({ local: { provider: "lab" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Local providers run on Claude Code agents only");
+  });
+
+  it("asks the executor about the fork source with the agent's kind", async () => {
+    vi.mocked(agentStore.createAgent).mockReturnValue(makeAgent());
+    await post({ name: "A", prompt: "p", backendType: "local", local: { provider: "lab" }, contextMode: "fork", sourceSessionId: "s1" });
+    expect(executor.forkSourceError).toHaveBeenCalledWith("s1", "claude", true);
   });
 });
