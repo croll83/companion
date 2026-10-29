@@ -71,6 +71,13 @@ export interface DomainInfo {
    * GLOBAL (a board is per domain); GLOBAL can have its own.
    */
   linear?: DomainLinearLink;
+  /**
+   * New sessions of this domain start on this local provider (Settings →
+   * Local providers) instead of the Anthropic account; the Home page
+   * preselects it and it can still be changed there. Not inherited from
+   * GLOBAL. The provider is checked by the route, not here.
+   */
+  localDefault?: { provider: string; model?: string };
 }
 
 /**
@@ -163,7 +170,17 @@ function normalize(raw: Partial<DomainInfo> & { slug: string }): DomainInfo {
     ...(raw.skillChoices && typeof raw.skillChoices === "object" ? { skillChoices: sanitizePlugins(raw.skillChoices) } : {}),
     ...readBrainChoice(raw),
     ...readLinearLink(raw.linear),
+    ...readLocalDefault(raw.localDefault),
   };
+}
+
+/** The `localDefault` field as stored: a provider id, optionally a model. */
+function readLocalDefault(raw: unknown): Pick<DomainInfo, "localDefault"> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  if (!isValidSlug(r.provider)) return {};
+  const model = typeof r.model === "string" && r.model.trim() ? r.model.trim() : undefined;
+  return { localDefault: { provider: r.provider, ...(model ? { model } : {}) } };
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
@@ -411,6 +428,8 @@ export interface DomainPatch {
   skillGroups?: unknown;
   /** A brain slug, null (no brain) or "inherit" (back to GLOBAL's; not for GLOBAL). Existence is checked by the route. */
   brain?: unknown;
+  /** {provider, model?} or null (sessions start on the Anthropic account). Existence is checked by the route. */
+  localDefault?: unknown;
 }
 
 export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
@@ -460,6 +479,14 @@ export function updateDomain(slug: string, patch: DomainPatch): DomainResult {
   if (patch.brain !== undefined) {
     const error = applyBrainChoice(next, patch.brain);
     if (error) return { ok: false, status: 400, error };
+  }
+  if (patch.localDefault !== undefined) {
+    delete next.localDefault;
+    if (patch.localDefault !== null) {
+      const read = readLocalDefault(patch.localDefault);
+      if (!read.localDefault) return { ok: false, status: 400, error: "localDefault must be {provider, model?} or null" };
+      next.localDefault = read.localDefault;
+    }
   }
   domains[idx] = next;
   writeRegistry(domains);

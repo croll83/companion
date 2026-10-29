@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, type ComponentType, type ReactNode } from "react";
 import { useStore } from "../store.js";
 import { api, type UsageLimits, type GitHubPRInfo, type LinearIssue, type LinearComment } from "../api.js";
+import { LocalSessionMetrics } from "./LocalSessionMetrics.js";
 import type { TaskItem, SdkSessionInfo } from "../types.js";
 import { McpSection } from "./McpPanel.js";
 import { LinearLogo } from "./LinearLogo.js";
@@ -824,6 +825,8 @@ function UsageLimitsRenderer({ sessionId }: { sessionId: string }) {
       </>
     );
   }
+  // A local provider has no Anthropic cost or limits: the proxy's numbers instead.
+  if (sdk?.local) return <LocalSessionMetrics sessionId={sessionId} />;
   return <UsageLimitsSection sessionId={sessionId} />;
 }
 

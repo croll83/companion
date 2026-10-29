@@ -5400,3 +5400,40 @@ describe("session folder and Chrome control", () => {
     expect(typeof control!.selectChromeBrowser).toBe("function");
   });
 });
+
+describe("Local-provider sessions", () => {
+  // A session on a local provider (setLocalCheck) never switches model: a
+  // Claude model would move the conversation off the provider. Its effort
+  // goes the normal Claude way (apply_flag_settings: the CLI then sends it as
+  // output_config.effort, which the provider's proxy maps to model levels).
+  let cli: ReturnType<typeof makeCliSocket>;
+  let browser: ReturnType<typeof makeBrowserSocket>;
+
+  beforeEach(() => {
+    bridge.setLocalCheck((id) => id === "s1");
+    cli = makeCliSocket("s1");
+    browser = makeBrowserSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    cli.send.mockClear();
+    browser.send.mockClear();
+  });
+
+  const sentToBrowser = () => browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+
+  it("never switches the model of a local session", () => {
+    const change = vi.fn();
+    const off = companionBus.on("session:model-change", change);
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_model", model: "claude-opus-5-5" }));
+    expect(change).not.toHaveBeenCalled();
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(sentToBrowser()[0]).toMatchObject({ type: "error", message: expect.stringContaining("keeps its model") });
+    off();
+  });
+
+  it("changes effort at runtime through the CLI, like any Claude session", () => {
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_effort", effort: "high" }));
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.request).toEqual({ subtype: "apply_flag_settings", settings: { effortLevel: "high" } });
+  });
+});

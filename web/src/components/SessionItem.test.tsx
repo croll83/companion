@@ -163,6 +163,13 @@ describe("SessionItem", () => {
     expect(screen.getByText("CC")).toBeInTheDocument();
   });
 
+  // A session on a local provider: "LO" with the full label as its name, instead of CC.
+  it("shows the LO badge for a session on a local provider", () => {
+    render(<SessionItem {...buildProps({ session: makeSession({ local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } }) })} />);
+    expect(screen.getByRole("img", { name: "Local · Lab/my-model" })).toHaveTextContent("LO");
+    expect(screen.queryByText("CC")).not.toBeInTheDocument();
+  });
+
 
   // --- Active state styling ---
 

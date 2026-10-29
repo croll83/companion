@@ -30,6 +30,7 @@ function setup(over: Partial<Parameters<typeof DomainMcpServers>[0]> = {}) {
     onSetMcp: vi.fn(),
     onAdd: vi.fn(async () => true),
     onRemove: vi.fn(async () => true),
+    onReload: vi.fn(),
     ...over,
   };
   render(<DomainMcpServers {...props} />);
@@ -62,7 +63,7 @@ describe("DomainMcpServers", () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(
       <DomainMcpServers domain={herdDomain()} domains={[globalDomain(), herdDomain()]} plugins={plugins} refreshingAccount={false}
-        onRefreshAccount={vi.fn()} busy={false} onSetMcp={vi.fn()} onAdd={vi.fn(async () => true)} onRemove={vi.fn(async () => true)} />,
+        onRefreshAccount={vi.fn()} busy={false} onSetMcp={vi.fn()} onAdd={vi.fn(async () => true)} onRemove={vi.fn(async () => true)} onReload={vi.fn()} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Details of ping" }));
     fireEvent.click(screen.getByRole("button", { name: "Add server" }));
@@ -189,5 +190,24 @@ describe("DomainMcpServers", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
     expect(p.onAdd).toHaveBeenCalledWith("global", "tool", { command: "npx", args: ["-y", "srv"] });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  });
+
+  // A private server shows its access on its row; one that cannot work until
+  // the user acts opens its access panel by itself, without a session.
+  it("shows each server's access and opens the panel of one that needs the user", () => {
+    const domain = herdDomain({
+      mcpServers: [
+        { name: "gdrive", source: "domain", enabled: true, own: false, type: "http", target: "https://drivemcp/mcp", auth: { owner: "herd", state: "needs-sign-in" } },
+        { name: "docs", source: "domain", enabled: true, own: false, type: "http", target: "https://docs/mcp", auth: { owner: "herd", state: "open" } },
+      ],
+    });
+    const p = setup({ domain, domains: [globalDomain(), domain] });
+    expect(screen.getByText("OAuth · sign-in needed")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Access to gdrive" })).toBeInTheDocument();
+    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Access to docs" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Details of docs" }));
+    expect(screen.getByRole("group", { name: "Access to docs" })).toBeInTheDocument();
+    expect(p.onReload).not.toHaveBeenCalled();
   });
 });

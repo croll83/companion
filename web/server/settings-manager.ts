@@ -66,6 +66,12 @@ export interface CompanionSettings {
    * it. Optional in fixtures; normalize() applies the default (on).
    */
   companionMcpEnabled?: boolean;
+  /**
+   * "Enable local LLM" (Settings → Providers): Claude Code sessions on a
+   * local model through the Companion LLM proxy (docs/local-llm.md). Off by
+   * default: until it is on, no "Local" choice exists anywhere.
+   */
+  localLlmEnabled?: boolean;
   updatedAt: number;
 }
 
@@ -138,6 +144,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
         ? raw.timeZone.trim()
         : "",
     companionMcpEnabled: typeof raw?.companionMcpEnabled === "boolean" ? raw.companionMcpEnabled : true,
+    localLlmEnabled: raw?.localLlmEnabled === true,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -168,7 +175,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "timeZone" | "companionMcpEnabled">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "timeZone" | "companionMcpEnabled" | "localLlmEnabled">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -198,6 +205,7 @@ export function updateSettings(
     telegramBotToken: patch.telegramBotToken ?? settings.telegramBotToken,
     timeZone: patch.timeZone ?? settings.timeZone,
     companionMcpEnabled: patch.companionMcpEnabled ?? settings.companionMcpEnabled,
+    localLlmEnabled: patch.localLlmEnabled ?? settings.localLlmEnabled,
     updatedAt: Date.now(),
   });
   persist();

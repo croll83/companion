@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
+import { LocalBadge } from "./LocalBadge.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -279,10 +280,10 @@ export function SessionItem({
           </div>
         )}
 
-        {/* Badges: backend type */}
+        {/* Badges: backend type (LO = Claude Code on a local provider) */}
         {!isEditing && (
           <span className="flex items-center gap-1 shrink-0">
-            <BackendBadge type={s.backendType} />
+            {s.local ? <LocalBadge local={s.local} compact /> : <BackendBadge type={s.backendType} />}
           </span>
         )}
       </button>

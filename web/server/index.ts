@@ -49,6 +49,8 @@ import { setCompanionPort } from "./brain/brain-endpoints.js";
 import { brainSupervisor } from "./brain/brain-supervisor.js";
 import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consolidation.js";
 import { handleBrainProxy } from "./brain/brain-proxy.js";
+import { localProviderHealth } from "./local-provider-health.js";
+import { CALLBACK_PATH as MCP_AUTH_CALLBACK_PATH, handleMcpAuthProxy } from "./mcp-auth/mcp-auth-proxy.js";
 import { trackSessionResults } from "./session-unread.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -96,6 +98,8 @@ const orchestrator = new SessionOrchestrator({
 wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
 wsBridge.setArchivedCheck((sessionId) => launcher.getSession(sessionId)?.archived === true);
+// Local sessions keep their model (a Claude model would move the conversation off the provider).
+wsBridge.setLocalCheck((sessionId) => !!launcher.getSession(sessionId)?.local);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
 // Every Claude Code / Codex session gets the built-in `companion` MCP server
@@ -226,6 +230,12 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
     // ── Embedded brains' MCP proxy — before Hono's auth: loopback + brn_ token (brain-proxy.ts)
     if (url.pathname.startsWith("/brains/")) {
       const proxied = await handleBrainProxy(req, reqAddr);
+      if (proxied) return proxied;
+    }
+
+    // ── Private MCP servers' proxy and OAuth callback — before Hono's auth: loopback + mca_ token (mcp-auth-proxy.ts)
+    if (url.pathname.startsWith("/mcp-auth/") || url.pathname === MCP_AUTH_CALLBACK_PATH) {
+      const proxied = await handleMcpAuthProxy(req, reqAddr);
       if (proxied) return proxied;
     }
 
@@ -410,6 +420,10 @@ brainSupervisor.startAll();
 brainConsolidation.startAll();
 brainSupervisor.addHealthListener((slug, tick) => brainConsolidation.onHealth(slug, tick.inbox));
 
+// ── Local providers ─────────────────────────────────────────────────────────
+// Online/offline badge of each provider, checked every 30 s (never blocks a spawn).
+localProviderHealth.start();
+
 // ── Telegram bridge ─────────────────────────────────────────────────────────
 // Supervises the single bridge child (spawned only when a bot token is set).
 telegramBridgeManager.start(port);
@@ -455,6 +469,7 @@ setInterval(() => {
 function gracefulShutdown() {
   telegramBridgeManager.stop();
   brainSupervisor.stopAll();
+  localProviderHealth.stop();
   closeLogFile();
   process.exit(0);
 }

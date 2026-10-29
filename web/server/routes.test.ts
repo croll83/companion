@@ -61,6 +61,15 @@ vi.mock("./git-utils.js", () => ({
   isWorktreeDirty: vi.fn(() => false),
 }));
 
+// Local providers: one provider "lab", read-only (never the real ~/.companion).
+vi.mock("./local-providers.js", async (orig) => ({
+  ...(await orig<typeof import("./local-providers.js")>()),
+  getLocalProvider: vi.fn((id: string) => (id === "lab"
+    ? { id: "lab", name: "Lab", baseUrl: "http://lab", models: ["my-model"], contextWindow: 131072, effortLevels: ["off", "low"], defaultEffort: "low", effortMapping: { type: "chat_template_kwargs" }, createdAt: 0, updatedAt: 0 }
+    : undefined)),
+  hasLocalProviderToken: vi.fn(() => false),
+}));
+
 vi.mock("./session-names.js", () => ({
   getName: vi.fn(() => undefined),
   setName: vi.fn(),
@@ -547,6 +556,30 @@ describe("GET /api/sessions", () => {
     const res = await app.request("/api/sessions/s9/read", { method: "POST" });
     expect(res.status).toBe(200);
     expect(unread.markRead).toHaveBeenCalledWith("s9");
+  });
+
+  // A local session carries its provider's name and levels (badge, effort selector); never a token or URL.
+  it("adds the local provider's view to local sessions", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "s1", state: "running", cwd: "/a", local: { provider: "lab", model: "my-model" } },
+    ]);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    const json = await (await app.request("/api/sessions", { method: "GET" })).json();
+    expect(json[0].local).toEqual({
+      provider: "lab", model: "my-model", providerName: "Lab", effortLevels: ["off", "low"], defaultEffort: "low", contextWindow: 131072,
+    });
+    expect(JSON.stringify(json)).not.toContain("http://lab");
+  });
+
+  // The local-provider routes are wired to the launcher: live sessions block a delete, metrics need a local session.
+  it("wires the local-provider routes to the launcher", async () => {
+    launcher.listSessions.mockReturnValue([{ sessionId: "s1", state: "running", cwd: "/a", local: { provider: "lab", model: "my-model" } }]);
+    expect((await app.request("/api/local-providers/lab", { method: "DELETE" })).status).toBe(409);
+    launcher.getSession.mockReturnValue({ sessionId: "s1", local: { provider: "lab", model: "my-model" }, effort: "off" });
+    const metrics = await (await app.request("/api/sessions/s1/local-metrics")).json();
+    expect(metrics).toMatchObject({ model: "my-model", effort: "off", provider: { name: "Lab" } });
+    launcher.getSession.mockReturnValue({ sessionId: "s2" });
+    expect((await app.request("/api/sessions/s2/local-metrics")).status).toBe(404);
   });
 
   it("enriches sessions with git data from bridge state", async () => {
@@ -1493,6 +1526,7 @@ describe("GET /api/settings", () => {
       telegramBotTokenConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
+      localLlmEnabled: false,
     });
   });
 
@@ -1551,6 +1585,7 @@ describe("GET /api/settings", () => {
       telegramBotTokenConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
+      localLlmEnabled: false,
     });
   });
 
@@ -1682,6 +1717,7 @@ describe("PUT /api/settings", () => {
       telegramBotTokenConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
+      localLlmEnabled: false,
     });
   });
 
