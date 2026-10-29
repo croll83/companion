@@ -532,6 +532,9 @@ export class AgentExecutor {
         // Scheduled and on-demand runs share their domain's memory and tools.
         domain: prep.domain || agent.domain || GLOBAL_DOMAIN,
         ...(agent.local && agent.backendType === "claude" ? { local: { provider: agent.local.provider, model: model || agent.local.model } } : {}),
+        // Known from the first spawn: no question tools for a run nobody answers.
+        agentId,
+        agentName: agent.name,
       });
 
       execution.sessionId = sessionInfo.sessionId;

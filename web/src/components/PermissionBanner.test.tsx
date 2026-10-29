@@ -492,6 +492,83 @@ describe("AskUserQuestionDisplay", () => {
     expect(payload.updated_input.answers).toEqual({ "Add context": "Custom response" });
   });
 
+  // multiSelect (Claude's AskUserQuestion): checkboxes, no answer on the
+  // first click, and one answer string per question with the labels joined
+  // by ", " (the CLI wants a string; Claude Code's own dialog joins the same
+  // way). A typed "Other" answer joins the checked options.
+  it("lets a multiSelect question check several options and sends them joined", () => {
+    const perm = makePermission({
+      request_id: "req-multi",
+      tool_name: "AskUserQuestion",
+      input: {
+        questions: [
+          {
+            header: "Days",
+            question: "Which days do you work?",
+            multiSelect: true,
+            options: [
+              { label: "Monday", description: "" },
+              { label: "Tuesday", description: "" },
+              { label: "Friday", description: "" },
+            ],
+          },
+        ],
+      },
+    });
+    render(<PermissionBanner permission={perm} sessionId="s1" />);
+    expect(screen.getByText("Choose one or more")).toBeTruthy();
+    const monday = screen.getByRole("button", { name: /Monday/ });
+    fireEvent.click(monday);
+    fireEvent.click(screen.getByRole("button", { name: /Tuesday/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Friday/ }));
+    // Unchecking works too.
+    fireEvent.click(screen.getByRole("button", { name: /Tuesday/ }));
+    expect(monday.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /Tuesday/ }).getAttribute("aria-pressed")).toBe("false");
+    expect(mockSendToSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Other..."));
+    fireEvent.change(screen.getByPlaceholderText("Type your answer..."), { target: { value: " Sunday " } });
+    // No Enter-to-submit on a question that allows several choices.
+    expect(screen.queryByText("Press Enter to submit")).toBeNull();
+    fireEvent.keyDown(screen.getByPlaceholderText("Type your answer..."), { key: "Enter" });
+    expect(mockSendToSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Submit answers"));
+    expect(mockSendToSession.mock.calls[0][1].updated_input.answers).toEqual({ "Which days do you work?": "Monday, Friday, Sunday" });
+  });
+
+  it("closing Other on a multiSelect question keeps the checked options", () => {
+    const perm = makePermission({
+      tool_name: "AskUserQuestion",
+      input: {
+        questions: [
+          { question: "Which days?", multiSelect: true, options: [{ label: "Monday" }, { label: "Friday" }] },
+          { question: "Start time?", options: [{ label: "8" }, { label: "9" }] },
+        ],
+      },
+    });
+    render(<PermissionBanner permission={perm} sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: /Monday/ }));
+    const others = screen.getAllByText("Other...");
+    fireEvent.click(others[0]);
+    fireEvent.change(screen.getByPlaceholderText("Type your answer..."), { target: { value: "Sunday" } });
+    fireEvent.click(others[0]);
+    // The single-choice question still answers with one option.
+    fireEvent.click(screen.getByRole("button", { name: /^9/ }));
+    fireEvent.click(screen.getByText("Submit answers"));
+    expect(mockSendToSession.mock.calls[0][1].updated_input.answers).toEqual({ "Which days?": "Monday", "Start time?": "9" });
+  });
+
+  it("passes axe accessibility scan with a multiSelect question", async () => {
+    const { axe } = await import("vitest-axe");
+    const perm = makePermission({
+      tool_name: "AskUserQuestion",
+      input: { questions: [{ question: "Which days?", multiSelect: true, options: [{ label: "Monday" }, { label: "Friday" }] }] },
+    });
+    const { container } = render(<PermissionBanner permission={perm} sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: /Monday/ }));
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("shows Enter hint for single-question custom Other input", () => {
     const perm = makePermission({
       tool_name: "AskUserQuestion",

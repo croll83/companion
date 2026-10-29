@@ -384,6 +384,12 @@ export interface LaunchOptions {
    * model = the provider's default; `effort` is then one of its levels.
    */
   local?: { provider: string; model?: string };
+  /**
+   * The agent this run belongs to, set before the first spawn: agent runs
+   * get no question tools (codexQuestionArgs, --permission-prompt-tool).
+   */
+  agentId?: string;
+  agentName?: string;
 }
 
 /** Whether a session spawns with its domain's context (see SdkSessionInfo.legacyMemory). */
@@ -395,6 +401,19 @@ export function usesDomain(info: Pick<SdkSessionInfo, "domain" | "legacyMemory">
  * Manages CLI backend processes (Claude Code via --sdk-url WebSocket,
  * or Codex via app-server stdio/WebSocket).
  */
+/**
+ * Codex asks the user questions (`request_user_input`, which Companion shows
+ * like Claude's AskUserQuestion) only in Plan mode, unless this feature is on
+ * (under development in codex-cli 0.161: its warning arrives as a
+ * configWarning, which the adapter ignores; an unknown feature key is ignored
+ * too, so a later Codex that renames it still starts). Without it Codex
+ * writes its questions as text and ends the turn. Agent runs keep the default:
+ * nobody is there to answer.
+ */
+export function codexQuestionArgs(info: Pick<SdkSessionInfo, "agentId">): string[] {
+  return info.agentId ? [] : ["-c", "features.default_mode_request_user_input=true"];
+}
+
 export class CliLauncher {
   /** An exit faster than this after `--resume` counts as a failed resume attempt. */
   static readonly RESUME_QUICK_EXIT_MS = 5000;
@@ -665,6 +684,10 @@ export class CliLauncher {
       options = { ...options, model: choice.local.model, effort: choice.effort, ultracode: undefined };
     }
     if (options.forkSource) info.forkSource = { ...options.forkSource };
+    if (options.agentId) {
+      info.agentId = options.agentId;
+      info.agentName = options.agentName;
+    }
     if (options.domain) {
       info.domain = options.domain;
     } else {
@@ -973,6 +996,14 @@ export class CliLauncher {
     }
     if (effectivePermissionMode) {
       args.push("--permission-mode", effectivePermissionMode);
+    }
+    // Companion answers the CLI's prompts (can_use_tool over the control
+    // protocol). Without saying so the CLI in --print mode drops
+    // AskUserQuestion, EnterPlanMode and ExitPlanMode, and denies by itself
+    // whatever would need an approval (verified on CLI 2.1.303). Agent runs
+    // keep that behaviour: nobody is there to answer, a question would hang.
+    if (!info.agentId) {
+      args.push("--permission-prompt-tool", "stdio");
     }
     if (options.allowedTools) {
       for (const tool of options.allowedTools) {
@@ -1402,6 +1433,7 @@ export class CliLauncher {
     const args: string[] = ["app-server", "--listen", listenAddr];
     // Enable Codex multi-agent mode by default (product decision).
     args.push("--enable", "multi_agent");
+    args.push(...codexQuestionArgs(info));
     const internetEnabled = options.codexInternetAccess !== false;
     args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
     // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),
@@ -1580,6 +1612,7 @@ export class CliLauncher {
     const args: string[] = ["app-server"];
     // Enable Codex multi-agent mode by default (product decision).
     args.push("--enable", "multi_agent");
+    args.push(...codexQuestionArgs(info));
     const internetEnabled = options.codexInternetAccess !== false;
     args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
     // Reasoning effort: Codex takes it as launch config (`model_reasoning_effort`),

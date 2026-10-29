@@ -259,6 +259,27 @@ function AskUserQuestionDisplay({
   const [selections, setSelections] = useState<Record<string, string>>({});
   const [customText, setCustomText] = useState<Record<string, string>>({});
   const [showCustom, setShowCustom] = useState<Record<string, boolean>>({});
+  // multiSelect questions: the checked labels, by question key.
+  const [checked, setChecked] = useState<Record<string, string[]>>({});
+
+  function isMulti(questionIdx: number): boolean {
+    return (questions[questionIdx] as Record<string, unknown> | undefined)?.multiSelect === true;
+  }
+  // One answer string per question, as the CLI expects: several labels (and
+  // the "Other" text) joined with ", ", like Claude Code's own dialog.
+  function joinAnswer(labels: string[], custom: string | undefined): string {
+    return [...labels, ...(custom?.trim() ? [custom.trim()] : [])].join(", ");
+  }
+  function setAnswer(key: string, value: string) {
+    setSelections((prev) => {
+      const next = { ...prev };
+      if (value) next[key] = value;
+      else delete next[key];
+      return next;
+    });
+  }
+  // A single question answers on click unless it allows several choices.
+  const needsSubmit = questions.length > 1 || questions.some((_q: unknown, i: number) => isMulti(i));
 
   // The Claude Code CLI keys the `answers` object by the question's TEXT, not by
   // its index: it builds the tool result via `answers[question.question]`. Keying
@@ -273,11 +294,18 @@ function AskUserQuestionDisplay({
 
   function handleOptionClick(questionIdx: number, label: string) {
     const key = keyFor(questionIdx);
+    if (isMulti(questionIdx)) {
+      const current = checked[key] ?? [];
+      const labels = current.includes(label) ? current.filter((l) => l !== label) : [...current, label];
+      setChecked((prev) => ({ ...prev, [key]: labels }));
+      setAnswer(key, joinAnswer(labels, showCustom[key] ? customText[key] : undefined));
+      return;
+    }
     setSelections((prev) => ({ ...prev, [key]: label }));
     setShowCustom((prev) => ({ ...prev, [key]: false }));
 
     // Auto-submit if single question
-    if (questions.length <= 1) {
+    if (!needsSubmit) {
       onSelect({ [key]: label });
     }
   }
@@ -285,26 +313,16 @@ function AskUserQuestionDisplay({
   function handleCustomSubmit(questionIdx: number) {
     const key = keyFor(questionIdx);
     const text = customText[key]?.trim();
-    if (!text) return;
+    if (!text || needsSubmit) return;
     setSelections((prev) => ({ ...prev, [key]: text }));
-
-    if (questions.length <= 1) {
-      onSelect({ [key]: text });
-    }
+    onSelect({ [key]: text });
   }
 
   function handleCustomChange(questionIdx: number, value: string) {
     const key = keyFor(questionIdx);
     setCustomText((prev) => ({ ...prev, [key]: value }));
-    const trimmed = value.trim();
-    setSelections((prev) => {
-      if (!trimmed) {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      }
-      return { ...prev, [key]: trimmed };
-    });
+    const labels = isMulti(questionIdx) ? checked[key] ?? [] : [];
+    setAnswer(key, joinAnswer(labels, value));
   }
 
   function handleCustomToggle(questionIdx: number) {
@@ -313,11 +331,8 @@ function AskUserQuestionDisplay({
       const wasOpen = Boolean(prev[key]);
       const next = { ...prev, [key]: !wasOpen };
       if (wasOpen) {
-        setSelections((s) => {
-          const cleared = { ...s };
-          delete cleared[key];
-          return cleared;
-        });
+        // Closing "Other" drops its text; a multiSelect question keeps its checked options.
+        setAnswer(key, joinAnswer(isMulti(questionIdx) ? checked[key] ?? [] : [], undefined));
         setCustomText((t) => {
           const cleared = { ...t };
           delete cleared[key];
@@ -365,17 +380,22 @@ function AskUserQuestionDisplay({
             {text && (
               <p className="text-sm text-cc-fg leading-relaxed">{text}</p>
             )}
+            {isMulti(i) && options.length > 0 && (
+              <p className="text-[11px] text-cc-muted">Choose one or more</p>
+            )}
             {options.length > 0 && (
               <div className="space-y-1.5">
                 {options.map((opt: Record<string, unknown>, j: number) => {
                   const label = typeof opt.label === "string" ? opt.label : String(opt);
                   const desc = typeof opt.description === "string" ? opt.description : "";
-                  const isSelected = selected === label;
+                  const multi = isMulti(i);
+                  const isSelected = multi ? (checked[key] ?? []).includes(label) : selected === label;
 
                   return (
                     <button
                       key={j}
                       onClick={() => handleOptionClick(i, label)}
+                      aria-pressed={multi ? isSelected : undefined}
                       disabled={disabled}
                       className={`w-full text-left px-3 py-2 rounded-lg border transition-all cursor-pointer disabled:opacity-50 ${
                         isSelected
@@ -384,11 +404,24 @@ function AskUserQuestionDisplay({
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                          isSelected ? "border-cc-primary" : "border-cc-muted/40"
-                        }`}>
-                          {isSelected && <span className="w-2 h-2 rounded-full bg-cc-primary" />}
-                        </span>
+                        {multi ? (
+                          // A checkbox: several options can be checked.
+                          <span className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 ${
+                            isSelected ? "border-cc-primary bg-cc-primary" : "border-cc-muted/40"
+                          }`}>
+                            {isSelected && (
+                              <svg viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="2.5" className="w-3 h-3" aria-hidden="true">
+                                <path d="M3.5 8.5l3 3 6-7" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            )}
+                          </span>
+                        ) : (
+                          <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
+                            isSelected ? "border-cc-primary" : "border-cc-muted/40"
+                          }`}>
+                            {isSelected && <span className="w-2 h-2 rounded-full bg-cc-primary" />}
+                          </span>
+                        )}
                         <div>
                           <span className="text-xs font-medium text-cc-fg">{label}</span>
                           {desc && <p className="text-[11px] text-cc-muted mt-0.5 leading-snug">{desc}</p>}
@@ -429,7 +462,7 @@ function AskUserQuestionDisplay({
                       className="w-full px-2.5 py-1.5 text-xs bg-cc-input-bg border border-cc-border rounded-lg text-cc-fg placeholder:text-cc-muted focus:outline-none focus:border-cc-primary/50"
                       autoFocus
                     />
-                    {questions.length <= 1 && (
+                    {!needsSubmit && (
                       <p className="mt-1 text-[10px] text-cc-muted">Press Enter to submit</p>
                     )}
                   </div>
@@ -440,8 +473,8 @@ function AskUserQuestionDisplay({
         );
       })}
 
-      {/* Submit all for multi-question */}
-      {questions.length > 1 && Object.keys(selections).length > 0 && (
+      {/* Submit: several questions, or any that allows several choices */}
+      {needsSubmit && Object.keys(selections).length > 0 && (
         <button
           onClick={handleSubmitAll}
           disabled={disabled}

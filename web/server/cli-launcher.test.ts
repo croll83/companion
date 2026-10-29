@@ -104,7 +104,7 @@ vi.mock("node:fs", async (importOriginal) => {
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
-import { CliLauncher } from "./cli-launcher.js";
+import { CliLauncher, codexQuestionArgs } from "./cli-launcher.js";
 import { companionBus } from "./event-bus.js";
 
 // ─── Bun.spawn mock ─────────────────────────────────────────────────────────
@@ -319,6 +319,25 @@ describe("launch", () => {
     } finally {
       delete process.env.COMPANION_FORCE_BYPASS_AS_ROOT;
     }
+  });
+
+  // Without --permission-prompt-tool the CLI drops AskUserQuestion and plan
+  // mode and denies approvals by itself (CLI 2.1.303): interactive sessions
+  // must say Companion answers. Agent runs must not: nobody would answer.
+  it("tells the CLI that Companion answers its prompts, except for agent runs", () => {
+    launcher.launch({ cwd: "/tmp" });
+    const [interactive] = mockSpawn.mock.calls[0];
+    const i = interactive.indexOf("--permission-prompt-tool");
+    expect(interactive[i + 1]).toBe("stdio");
+    const run = launcher.launch({ cwd: "/tmp", agentId: "agent-1", agentName: "Nightly" });
+    expect(run).toMatchObject({ agentId: "agent-1", agentName: "Nightly" });
+    const [agent] = mockSpawn.mock.calls[1];
+    expect(agent).not.toContain("--permission-prompt-tool");
+  });
+
+  it("asks Codex for blocking questions in default mode, except for agent runs", () => {
+    expect(codexQuestionArgs({})).toEqual(["-c", "features.default_mode_request_user_input=true"]);
+    expect(codexQuestionArgs({ agentId: "agent-1" })).toEqual([]);
   });
 
   it("downgrades bypassPermissions to acceptEdits when host launcher runs as root", () => {
@@ -974,6 +993,8 @@ describe("codex websocket launcher", () => {
     expect(codexCmd).toContain("app-server");
     expect(codexCmd).toContain("--enable");
     expect(codexCmd).toContain("multi_agent");
+    // Questions (request_user_input) in default mode too, blocking like Claude's.
+    expect(codexCmd).toContain("features.default_mode_request_user_input=true");
     expect(codexCmd).toContain("--listen");
     expect(codexCmd).toContain("ws://127.0.0.1:4500");
 

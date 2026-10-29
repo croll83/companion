@@ -302,6 +302,16 @@ const PERM_ASK_MULTI = mockPermission({
         ],
         multiSelect: false,
       },
+      {
+        header: "Environments",
+        question: "Where should it be deployed?",
+        options: [
+          { label: "Staging", description: "Shared test environment" },
+          { label: "Production", description: "Live users" },
+          { label: "Preview", description: "One per pull request" },
+        ],
+        multiSelect: true,
+      },
     ],
   },
 });

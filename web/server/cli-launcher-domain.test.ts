@@ -106,6 +106,8 @@ describe("legacy sessions spawn exactly as before", () => {
       "--model", "claude-opus-5-5",
       "--settings", '{"ultracode":true}',
       "--permission-mode", "default",
+      // Not a domain flag: every interactive session says Companion answers its prompts.
+      "--permission-prompt-tool", "stdio",
       "--mcp-config", join(configDir(), "sess-1.json"),
       "--disallowedTools", "ScheduleWakeup,CronCreate,CronDelete,CronList",
       "-p", "",
