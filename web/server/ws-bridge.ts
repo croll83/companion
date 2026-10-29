@@ -96,6 +96,8 @@ export class WsBridge {
   private autoNamingAttempted = new Set<string>();
   /** Resolves whether a session is archived; see setArchivedCheck. */
   private isArchived: (sessionId: string) => boolean = () => false;
+  /** Whether a session runs on a local provider; see setLocalCheck. */
+  private isLocal: (sessionId: string) => boolean = () => false;
   private userMsgCounter = 0;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
@@ -170,6 +172,17 @@ export class WsBridge {
    */
   setArchivedCheck(isArchived: (sessionId: string) => boolean): void {
     this.isArchived = isArchived;
+  }
+
+  /**
+   * How to tell a session runs on a local provider (the launcher's record).
+   * Its model is never switched: a Claude model would move the conversation
+   * off the provider, and local thinking blocks carry no signature the
+   * Anthropic API accepts. Its effort goes the normal Claude way (the CLI
+   * sends it as output_config.effort, which the provider's proxy maps).
+   */
+  setLocalCheck(isLocal: (sessionId: string) => boolean): void {
+    this.isLocal = isLocal;
   }
 
   setRecorder(recorder: RecorderManager): void {
@@ -452,6 +465,8 @@ export class WsBridge {
    */
   attachBackendAdapter(sessionId: string, adapter: IBackendAdapter, backendType?: BackendType): void {
     const session = this.getOrCreateSession(sessionId, backendType);
+    // A new process is attached: an idle-kill still waiting for the old one's exit no longer applies.
+    session.idleKilled = false;
     session.backendAdapter = adapter;
 
     // Advance the state machine so that system_init (starting → ready) is reachable.
@@ -748,6 +763,7 @@ export class WsBridge {
       // For Codex adapters: transition to "reconnecting" with a short debounce
       // (5s vs 15s for Claude Code, since Codex doesn't cycle its WebSocket).
       session.backendAdapter = null;
+      if (this.endIdleKilled(session)) return;
       session.stateMachine.transition("reconnecting", "codex_adapter_disconnected");
       this.persistSession(session);
       log.info("ws-bridge", "Codex adapter disconnected, starting debounce", { sessionId });
@@ -1104,6 +1120,22 @@ export class WsBridge {
   }
 
   /**
+   * The exit of a CLI the idle-kill stopped: the session goes straight to
+   * "terminated" (empty dot, Reconnect button). Going through "reconnecting"
+   * like a lost connection made the browser show a spinner that stayed for
+   * good when it missed the later "terminated" (a tab in the background).
+   * Returns whether it handled the exit.
+   */
+  private endIdleKilled(session: Session): boolean {
+    if (!session.idleKilled) return false;
+    session.idleKilled = false;
+    this.cancelDisconnectTimer(session.id);
+    session.stateMachine.transition("terminated", "idle_kill");
+    this.persistSession(session);
+    return true;
+  }
+
+  /**
    * Debounced "disconnect confirmed" path shared by both Claude transports:
    * the CLI WebSocket close (ws mode, via handleCLIClose) and the stdio reader
    * EOF (stdio mode, where no WS close ever fires, via the adapter onDisconnect).
@@ -1128,6 +1160,7 @@ export class WsBridge {
     // "terminated", which reads as at-rest and would lose the distinction.
     // Turn-scoped on purpose — see isTurnInFlight: background work must NOT
     // trigger this relaunch, because relaunching is what would kill it.
+    if (this.endIdleKilled(session)) return;
     const wasWorking = isTurnInFlight(session);
     const orphanedBackgroundWork = liveBackgroundWork(session).length;
     session.stateMachine.transition("reconnecting", trigger);
@@ -1404,6 +1437,7 @@ export class WsBridge {
     // Truly idle and at rest — kill to reclaim RAM. No auto-reconnect.
     console.log(`[ws-bridge] Idle kill triggered for ${sessionId} (idle ${Math.round(idleMs / 60_000)}min, phase=ready)`);
     this.stopIdleKillWatchdog(sessionId);
+    session.idleKilled = true;
     companionBus.emit("session:idle-kill", { sessionId });
     this.notifyCliConnection(session, false, "idle_kill");
   }
@@ -1495,6 +1529,16 @@ export class WsBridge {
     // the Codex path worked, and the picker hid itself for Codex to match — so
     // Codex sessions could never change model. Both go through the
     // orchestrator, which relaunches on the resumed conversation.
+    // A local session never changes model here: a Claude model would move the
+    // conversation off the provider (see SdkSessionInfo.local).
+    if (msg.type === "set_model" && this.isLocal(session.id)) {
+      this.broadcastToBrowsers(session, {
+        type: "error",
+        message: "A session on a local provider keeps its model: start a new session to use another one",
+      });
+      return;
+    }
+
     if (msg.type === "set_model" && (session.backendType === "claude" || session.backendType === "codex")) {
       session.state.model = msg.model;
       this.persistSession(session);

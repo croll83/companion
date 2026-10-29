@@ -23,6 +23,7 @@ const mockApi = vi.hoisted(() => ({
   refreshAccountMcp: vi.fn(),
   createDomainSkill: vi.fn(),
   removeDomainSkill: vi.fn(),
+  listLocalProviders: vi.fn(() => Promise.resolve([] as unknown[])),
 }));
 vi.mock("../api.js", () => ({ api: mockApi }));
 vi.mock("../ws.js", () => ({ sendMcpAuthenticate: vi.fn(), sendMcpOAuthCallback: vi.fn() }));

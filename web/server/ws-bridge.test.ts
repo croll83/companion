@@ -4880,6 +4880,46 @@ describe("Idle kill watchdog", () => {
     off();
   });
 
+  // The idle-kill stops the CLI on purpose: its exit must end the session at
+  // once ("terminated": empty dot, Reconnect button). Going through
+  // "reconnecting" like a lost connection showed a spinner that stayed for
+  // good in a browser that missed the later "terminated" (tab in background).
+  it("ends an idle-killed session at once when its CLI exits, without a reconnecting phase", async () => {
+    const relaunchNeeded = vi.fn();
+    const offRelaunch = companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchNeeded(sessionId));
+    const idleKillHandler = vi.fn();
+    const offKill = companionBus.on("session:idle-kill", idleKillHandler);
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const { cli, session } = await makeReadySession("s1");
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).toHaveBeenCalled();
+
+    browser.send.mockClear();
+    bridge.handleCLIClose(cli); // the killed process exits
+    expect(session.stateMachine.phase).toBe("terminated");
+    const phases = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg)).filter((m: { type: string }) => m.type === "session_phase");
+    expect(phases.map((m: { phase: string }) => m.phase)).toEqual(["terminated"]);
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(relaunchNeeded).not.toHaveBeenCalled();
+    offRelaunch();
+    offKill();
+  });
+
+  // Over stdio the CLI sends system/init only with its first turn, so a CLI
+  // relaunched when a browser opened the session sits in "initializing".
+  // That is idle, not work: it must not show busy nor escape the idle-kill.
+  it("idle-kills a CLI that never got a message (still initializing)", async () => {
+    const idleKillHandler = vi.fn();
+    const off = companionBus.on("session:idle-kill", idleKillHandler);
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    expect(bridge.getSession("s1")!.stateMachine.phase).toBe("initializing");
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 60_000);
+    expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
+    off();
+  });
+
   it("emits idle-kill + cli_disconnected after threshold while at rest (ready)", async () => {
     // No activity (user or CLI) for the threshold while in "ready" → the watchdog
     // emits session:idle-kill AND notifies browsers via cli_disconnected.
@@ -5358,5 +5398,42 @@ describe("session folder and Chrome control", () => {
     const control = bridge.chromeControl("s1");
     expect(control).not.toBeNull();
     expect(typeof control!.selectChromeBrowser).toBe("function");
+  });
+});
+
+describe("Local-provider sessions", () => {
+  // A session on a local provider (setLocalCheck) never switches model: a
+  // Claude model would move the conversation off the provider. Its effort
+  // goes the normal Claude way (apply_flag_settings: the CLI then sends it as
+  // output_config.effort, which the provider's proxy maps to model levels).
+  let cli: ReturnType<typeof makeCliSocket>;
+  let browser: ReturnType<typeof makeBrowserSocket>;
+
+  beforeEach(() => {
+    bridge.setLocalCheck((id) => id === "s1");
+    cli = makeCliSocket("s1");
+    browser = makeBrowserSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    cli.send.mockClear();
+    browser.send.mockClear();
+  });
+
+  const sentToBrowser = () => browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+
+  it("never switches the model of a local session", () => {
+    const change = vi.fn();
+    const off = companionBus.on("session:model-change", change);
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_model", model: "claude-opus-5-5" }));
+    expect(change).not.toHaveBeenCalled();
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(sentToBrowser()[0]).toMatchObject({ type: "error", message: expect.stringContaining("keeps its model") });
+    off();
+  });
+
+  it("changes effort at runtime through the CLI, like any Claude session", () => {
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_effort", effort: "high" }));
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.request).toEqual({ subtype: "apply_flag_settings", settings: { effortLevel: "high" } });
   });
 });

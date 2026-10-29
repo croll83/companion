@@ -478,7 +478,10 @@ export class AgentExecutor {
       let forkSource: ForkSource | undefined;
       let cwd = agent.cwd;
       if (agent.contextMode === "fork") {
-        const fork = resolveForkSource(this.launcher, agent.sourceSessionId, agent.backendType);
+        // A local agent forks only a local session (session-fork.ts).
+        const fork = agent.local
+          ? resolveForkSource(this.launcher, agent.sourceSessionId, agent.backendType, { local: true })
+          : resolveForkSource(this.launcher, agent.sourceSessionId, agent.backendType);
         if (!fork.ok) throw new Error(`Cannot fork the source session: ${fork.error}`);
         forkSource = fork.source;
         cwd = fork.cwd;
@@ -500,7 +503,10 @@ export class AgentExecutor {
       // model's default, and leaving it to the CLI would make the session show
       // a level it does not run at (agent-effort.ts).
       const model = prep.model ?? agent.model;
-      const settled = resolveRunEffort(agent.backendType, model, prep.effort ?? agent.effort);
+      // A local agent's levels are its provider's: the launcher settles them.
+      const settled = agent.local
+        ? { effort: prep.effort ?? agent.effort, fallback: false }
+        : resolveRunEffort(agent.backendType, model, prep.effort ?? agent.effort);
       if (settled.fallback) {
         console.warn(
           `[agent-executor] Agent "${agent.name}": effort "${prep.effort ?? agent.effort}" is not supported by ` +
@@ -525,6 +531,7 @@ export class AgentExecutor {
         forkSource,
         // Scheduled and on-demand runs share their domain's memory and tools.
         domain: prep.domain || agent.domain || GLOBAL_DOMAIN,
+        ...(agent.local && agent.backendType === "claude" ? { local: { provider: agent.local.provider, model: model || agent.local.model } } : {}),
         // Known from the first spawn: no question tools for a run nobody answers.
         agentId,
         agentName: agent.name,
@@ -723,8 +730,10 @@ export class AgentExecutor {
    * Why an agent with contextMode "fork" could not run from this source
    * right now, or null if it could (used to validate the agent on save).
    */
-  forkSourceError(sourceSessionId: string | undefined, backendType: AgentConfig["backendType"]): string | null {
-    const fork = resolveForkSource(this.launcher, sourceSessionId, backendType);
+  forkSourceError(sourceSessionId: string | undefined, backendType: AgentConfig["backendType"], local = false): string | null {
+    const fork = local
+      ? resolveForkSource(this.launcher, sourceSessionId, backendType, { local: true })
+      : resolveForkSource(this.launcher, sourceSessionId, backendType);
     return fork.ok ? null : fork.error;
   }
 

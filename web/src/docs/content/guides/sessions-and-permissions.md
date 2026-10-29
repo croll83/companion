@@ -57,7 +57,16 @@ curl -X POST http://localhost:3456/api/sessions \
 
 ### Sidebar
 
-The sidebar lists all active and recent sessions. Each entry shows the session name, backend type, connection status, and working directory. Click a session to switch to it.
+The sidebar lists all active and recent sessions. Each entry shows the session name, backend type, status dot, and working directory. Click a session to switch to it.
+
+The status dot:
+
+- **Empty**: no CLI process is running for the session.
+- **Grey**: the CLI is running, idle, and you have seen its last result.
+- **Amber, pulsing**: the session is busy. A turn, a tool call or background work it started is running, so stopping its CLI would lose work. An amber pulsing ring means it waits for your approval.
+- **Green**: the session delivered a result you have not seen yet, even if its CLI has stopped since.
+
+A result counts as seen once the session is on screen with the Companion window focused. Unread state is kept by the server: it survives a reload and is the same on every device. Each domain header shows a badge with how many of its sessions have an unread result, and a result of a session you are not looking at shows a toast in the top right corner: click it to open the session. The gear next to the domain opens its settings (MCP servers, skills, plugins).
 
 ### Chat view
 
@@ -135,6 +144,23 @@ Send `"cron": "0 9 * * 1-5"` instead of `at` for a repeating wake-up. A wake-up 
 
 - **Rename**: in **Domains** → the domain → **⋯** → **Rename…**, change the name shown in Companion (sidebar, Home page, Domains page). Only the display name changes: the slug (in URLs such as `#/domains/herd`), the folder `~/companion_domain_<slug>/`, its memory and the sessions in it stay as they are. GLOBAL cannot be renamed. The heading of the domain's `CLAUDE.md` is not rewritten: edit it yourself if you want it to match.
 - **Linear**: a domain can be linked to a Linear team or project. It then gets a **Board** tab with the team's issues, a **Take it** action that starts a session in the domain on an issue, and its own status rules for session start and archive. See [Linear Integration](#/docs/guides/linear-integration).
+
+### Private MCP servers (OAuth, API key)
+
+When you add an HTTP server in **Domains** → the domain (or GLOBAL) → **MCP servers** → **Add server**, Companion checks what it needs and shows it on the server's row:
+
+- **open**: nothing to do.
+- **OAuth**: sign in once from the row (**Sign in** → **Open the sign-in page**).
+  - If the provider lets apps register themselves, Companion does it for you.
+  - If not (Google, Microsoft…), register an OAuth client with the provider (type "Web application") with the redirect URI the row shows (`http://localhost:<port>/api/mcp-auth/callback`), then enter its client ID and secret on the row.
+  - With the browser on Companion's machine the sign-in finishes by itself. From another device the last page does not load: copy its address and paste it on the row (**Finish**).
+- **API key**: enter the key and the header it goes in (default `Authorization`, where a bare token becomes `Bearer <token>`).
+
+Companion keeps the credentials (owner-only files under `~/.companion/mcp-auth/`) and refreshes OAuth tokens by itself. Claude Code and Codex sessions reach the server through Companion's own address (`/mcp-auth/<domain>/<server>`, this machine only, with a token per session), so the credentials never reach a session, its config files or its transcript, and one sign-in serves every session. Servers in GLOBAL share one sign-in for every domain.
+
+Several servers of the same provider share one sign-in: Companion asks for the scopes of all of them at once. For Google Workspace's MCP servers (Drive, Gmail, Calendar, Docs, Sheets, Slides) it asks for the scopes Google documents for each, and for offline access, so the sign-in does not expire after an hour.
+
+Changes apply when a session starts or reloads. A server added before this feature shows **access not checked**: use **Check access**. A server whose credentials you wrote yourself as headers in `mcp.json` is left as it is.
 
 ### Migrating a legacy session into a domain
 

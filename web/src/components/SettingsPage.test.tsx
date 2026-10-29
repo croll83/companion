@@ -70,6 +70,7 @@ const mockApi = {
   regenerateAuthToken: vi.fn(),
   getAuthQr: vi.fn(),
   verifyAnthropicKey: vi.fn(),
+  listLocalProviders: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -87,6 +88,7 @@ vi.mock("../api.js", () => ({
     regenerateAuthToken: (...args: unknown[]) => mockApi.regenerateAuthToken(...args),
     getAuthQr: (...args: unknown[]) => mockApi.getAuthQr(...args),
     verifyAnthropicKey: (...args: unknown[]) => mockApi.verifyAnthropicKey(...args),
+    listLocalProviders: (...args: unknown[]) => mockApi.listLocalProviders(...args),
   },
 }));
 
@@ -147,6 +149,7 @@ beforeEach(() => {
     ],
   });
   mockTelemetry.getTelemetryPreferenceEnabled.mockReturnValue(true);
+  mockApi.listLocalProviders.mockResolvedValue([]);
 });
 
 describe("SettingsPage", () => {
@@ -1897,5 +1900,24 @@ describe("SettingsPage – time zone", () => {
     } finally {
       (Intl as { supportedValuesOf?: unknown }).supportedValuesOf = original;
     }
+  });
+});
+
+// Providers → "Enable local LLM": off by default (no provider fields), on
+// as saved (the local providers appear), with a link to the guide.
+describe("SettingsPage – local LLM", () => {
+  it("shows the switch off and no provider fields by default", async () => {
+    render(<SettingsPage />);
+    const toggle = await screen.findByRole("switch", { name: /Enable local LLM/ });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(screen.getAllByRole("link", { name: "How it works" }).some((a) => a.getAttribute("href")?.endsWith("docs/local-llm.md"))).toBe(true);
+    expect(screen.queryByRole("button", { name: "Add local provider" })).not.toBeInTheDocument();
+  });
+
+  it("shows the local providers when it is on", async () => {
+    mockApi.getSettings.mockResolvedValueOnce({ anthropicApiKeyConfigured: false, anthropicModel: "", updateChannel: "stable", publicUrl: "", localLlmEnabled: true });
+    render(<SettingsPage />);
+    expect(await screen.findByRole("button", { name: "Add local provider" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /Enable local LLM/ })).toHaveAttribute("aria-checked", "true");
   });
 });

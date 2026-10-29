@@ -66,6 +66,8 @@ vi.mock("./settings-manager.js", () => ({
     claudeCodeOAuthToken: "",
     openaiApiKey: "",
     onboardingCompleted: false,
+    // Local providers are off by default; their tests need them on.
+    localLlmEnabled: true,
   })),
 }));
 
@@ -110,6 +112,7 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { resolveSessionEnv } from "./session-env.js";
 import { createDomain, domainDir, ensureGlobalDomain, setDomainLinear } from "./domain-store.js";
+import { createLocalProvider, deleteLocalProvider } from "./local-providers.js";
 
 // ── Mock factories ──────────────────────────────────────────────────────────
 
@@ -528,6 +531,50 @@ describe("SessionOrchestrator", () => {
         expect(result.error).toContain("Invalid backend");
         expect(result.status).toBe(400);
       }
+    });
+
+    // "Local" = Claude Code on a local provider: the provider/model/level are
+    // checked against the registry and handed to the launcher, which builds
+    // the proxy env (see cli-launcher-local.test.ts for the spawn itself).
+    describe("local providers", () => {
+      beforeEach(() => {
+        deleteLocalProvider("lab");
+        const r = createLocalProvider({ name: "Lab", baseUrl: "http://lab:30000", models: ["my-model"] });
+        if (!r.ok) throw new Error(r.error);
+      });
+
+      it("launches a Claude session with the provider's model and a level it has", async () => {
+        const result = await orchestrator.createSession({ cwd: "/test", backend: "local", local: { provider: "lab" }, effort: "max" });
+        expect(result.ok).toBe(true);
+        expect(deps.launcher.launch).toHaveBeenCalledWith(expect.objectContaining({
+          backendType: "claude", model: "my-model", effort: "high", local: { provider: "lab", model: "my-model" },
+        }));
+      });
+
+      it("refuses an unknown provider or model, and Codex", async () => {
+        const unknown = await orchestrator.createSession({ cwd: "/test", backend: "local", local: { provider: "nope" } });
+        expect(unknown).toMatchObject({ ok: false, status: 400, error: expect.stringContaining("Unknown local provider") });
+        const badModel = await orchestrator.createSession({ cwd: "/test", local: { provider: "lab", model: "claude-opus-5-5" } });
+        expect(badModel).toMatchObject({ ok: false, status: 400 });
+        const codex = await orchestrator.createSession({ cwd: "/test", backend: "codex", local: { provider: "lab" } });
+        expect(codex).toMatchObject({ ok: false, status: 400, error: expect.stringContaining("Claude Code") });
+        expect(deps.launcher.launch).not.toHaveBeenCalled();
+      });
+
+      // Thinking blocks of a local model carry no valid Anthropic signature:
+      // a conversation never moves between the two (in either direction).
+      it("refuses to continue a conversation across Anthropic and local", async () => {
+        deps.launcher.listSessions.mockReturnValue([
+          { sessionId: "a", cliSessionId: "cli-anthropic" },
+          { sessionId: "l", cliSessionId: "cli-local", local: { provider: "lab", model: "my-model" } },
+        ]);
+        const toLocal = await orchestrator.createSession({ cwd: "/test", backend: "local", local: { provider: "lab" }, resumeSessionAt: "cli-anthropic" });
+        expect(toLocal).toMatchObject({ ok: false, status: 400, error: expect.stringContaining("cannot continue on a local provider") });
+        const toAnthropic = await orchestrator.createSession({ cwd: "/test", resumeSessionAt: "cli-local" });
+        expect(toAnthropic).toMatchObject({ ok: false, status: 400, error: expect.stringContaining("cannot continue on the Anthropic account") });
+        const same = await orchestrator.createSession({ cwd: "/test", backend: "local", local: { provider: "lab" }, resumeSessionAt: "cli-local" });
+        expect(same.ok).toBe(true);
+      });
     });
 
     // Sandboxed/container sessions were removed. A request that still asks for

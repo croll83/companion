@@ -29,6 +29,7 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     listDomains: vi.fn(),
     createDomain: vi.fn(),
     getDomainLinear: vi.fn(),
+    listLocalProviders: vi.fn(),
   },
   createSessionStreamMock: vi.fn(),
   mockStoreState: {
@@ -118,6 +119,8 @@ describe("HomePage", () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     mockStoreGetState.mockReturnValue(buildStoreMock());
+    // Local providers: none (local LLM off) unless a test adds some.
+    mockApi.listLocalProviders.mockResolvedValue([]);
     mockApi.listDomains.mockResolvedValue({
       root: "/home/ubuntu",
       skillGroups: [],
@@ -1496,6 +1499,7 @@ describe("HomePage domains", () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.listLocalProviders.mockResolvedValue([]);
     mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
     mockApi.listEnvs.mockResolvedValue([]);
     mockApi.getBackends.mockResolvedValue([{ id: "claude", name: "Claude", available: true }]);
@@ -1651,5 +1655,96 @@ describe("HomePage with a Linear-linked domain", () => {
     render(<HomePage />);
     await screen.findByRole("radio", { name: "New folder in this domain" });
     expect(mockApi.getDomainLinear).not.toHaveBeenCalled();
+  });
+});
+
+// "Local": Claude Code on a local provider (only once "Enable local LLM" is on
+// and a provider exists, i.e. the list is not empty). The session is created
+// with backend "claude" + `local`, the provider's model and one of its levels
+// (shown by the model level's name); "Branch from session" is hidden (a
+// conversation never moves between Anthropic and a local model).
+describe("HomePage — local providers", () => {
+  const PROVIDER = {
+    id: "lab", name: "Lab", baseUrl: "http://proxy.example:8787", models: ["my-model", "other-model"], defaultModel: "my-model",
+    contextWindow: 131072, effortLevels: ["low", "high", "xhigh"], effortLabels: { low: "off", high: "medium", xhigh: "xhigh" },
+    defaultEffort: "high", createdAt: 0, updatedAt: 0, hasToken: true, health: { status: "online" },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    mockStoreGetState.mockReturnValue(buildStoreMock());
+    mockApi.listLocalProviders.mockResolvedValue([PROVIDER]);
+    mockApi.getHome.mockResolvedValue({ home: "/home/ubuntu", cwd: "/repo" });
+    mockApi.listEnvs.mockResolvedValue([]);
+    mockApi.getBackends.mockResolvedValue([{ id: "claude", name: "Claude", available: true }, { id: "codex", name: "Codex", available: true }]);
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: false });
+    mockApi.getRepoInfo.mockResolvedValue({ repoRoot: "/repo", repoName: "repo", currentBranch: "main", defaultBranch: "main", isWorktree: false });
+    mockApi.listBranches.mockResolvedValue([]);
+    mockApi.listSessions.mockResolvedValue([]);
+    mockApi.discoverClaudeSessions.mockResolvedValue({ sessions: [] });
+    mockApi.listPrompts.mockResolvedValue([]);
+    mockApi.getBackendModels.mockResolvedValue([]);
+    mockApi.listDomains.mockResolvedValue({
+      root: "/home/ubuntu",
+      skillGroups: [],
+      domains: [
+        { slug: "global", name: "GLOBAL", path: "/home/ubuntu/companion_domain_global" },
+        { slug: "herd", name: "Herd", path: "/home/ubuntu/companion_domain_herd", localDefault: { provider: "lab", model: "other-model" } },
+      ],
+    });
+    createSessionStreamMock.mockResolvedValue({ sessionId: "local-session", state: "starting", cwd: "/repo", backendType: "claude" });
+  });
+
+  it("offers Local and creates a session on the provider with its level", async () => {
+    render(<HomePage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Local" }));
+    expect(screen.getByRole("combobox", { name: "Local provider" })).toHaveValue("lab");
+    expect(screen.getByRole("combobox", { name: "Local model" })).toHaveValue("my-model");
+    expect(screen.queryByRole("button", { name: /Branch from session/ })).not.toBeInTheDocument();
+    // The provider's levels, by the model's names; the default (high) is "Medium".
+    const effort = screen.getByRole("button", { name: "Reasoning effort" });
+    expect(effort).toHaveTextContent("Medium");
+    fireEvent.click(effort);
+    fireEvent.click(screen.getByRole("button", { name: "Off" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Local model" }), { target: { value: "other-model" } });
+    fireEvent.change(screen.getByPlaceholderText("Fix a bug, build a feature, refactor code..."), { target: { value: "Fix it" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalledWith(
+      expect.objectContaining({ backend: "claude", model: "other-model", effort: "low", local: { provider: "lab", model: "other-model" } }),
+      expect.any(Function),
+    ));
+    expect(window.localStorage.getItem("cc-backend")).toBe("local");
+    // Back to Claude: the Claude model selector again, no local choice sent.
+    fireEvent.click(screen.getByRole("button", { name: "Claude" }));
+    expect(screen.queryByRole("combobox", { name: "Local provider" })).not.toBeInTheDocument();
+  });
+
+  it("preselects a domain's default local provider and model", async () => {
+    window.localStorage.setItem("cc-domain", "herd");
+    render(<HomePage />);
+    expect(await screen.findByRole("combobox", { name: "Local model" })).toHaveValue("other-model");
+    expect(screen.getByRole("button", { name: "Local" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("restores Local from the last choice", async () => {
+    window.localStorage.setItem("cc-backend", "local");
+    window.localStorage.setItem("cc-local-provider", "lab");
+    render(<HomePage />);
+    expect(await screen.findByRole("combobox", { name: "Local provider" })).toHaveValue("lab");
+  });
+
+  it("offers no Local choice without providers (local LLM off)", async () => {
+    mockApi.listLocalProviders.mockResolvedValue([]);
+    render(<HomePage />);
+    await screen.findByRole("button", { name: "Codex" });
+    expect(screen.queryByRole("button", { name: "Local" })).not.toBeInTheDocument();
+  });
+
+  it("passes axe accessibility checks with Local selected", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<HomePage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Local" }));
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

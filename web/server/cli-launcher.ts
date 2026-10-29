@@ -48,6 +48,8 @@ import {
   type ClaudeDomainSpawn,
   type CodexDomainMcp,
 } from "./domain-runtime.js";
+import { buildLocalSpawn, type LocalSessionInfo } from "./local-spawn.js";
+import { resolveLocalChoice } from "./local-providers.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -298,6 +300,14 @@ export interface SdkSessionInfo {
   chromeActive?: boolean;
   /** Claude only, when chromeActive: the browser to drive ("local" or a deviceId). See chrome-browser.ts. */
   chromeBrowserPref?: string;
+  /**
+   * Claude only: the session runs on a local provider (local-spawn.ts)
+   * instead of the Anthropic account. Set at creation and never changed:
+   * switching an existing conversation between Anthropic and a local model
+   * is not allowed (thinking blocks of a local model carry no signature the
+   * Anthropic API accepts). `model` above is the same local model.
+   */
+  local?: LocalSessionInfo;
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport. */
@@ -369,6 +379,11 @@ export interface LaunchOptions {
    * domains existed); Companion's own entry points always pass one.
    */
   domain?: string;
+  /**
+   * Claude only: run on a local provider (Settings → Local providers). No
+   * model = the provider's default; `effort` is then one of its levels.
+   */
+  local?: { provider: string; model?: string };
   /**
    * The agent this run belongs to, set before the first spawn: agent runs
    * get no question tools (codexQuestionArgs, --permission-prompt-tool).
@@ -656,6 +671,18 @@ export class CliLauncher {
     if (backendType === "claude" && options.tools && options.tools.length > 0) {
       info.tools = [...options.tools];
     }
+    if (options.local) {
+      // Validated again here for embedders; the orchestrator and the agent
+      // executor check it first to answer with a clear error.
+      if (backendType !== "claude") throw new Error("Local providers run on Claude Code sessions only");
+      const choice = resolveLocalChoice(options.local, options.effort);
+      if (!choice.ok) throw new Error(choice.error);
+      info.local = choice.local;
+      info.model = choice.local.model;
+      info.effort = choice.effort;
+      info.ultracode = undefined;
+      options = { ...options, model: choice.local.model, effort: choice.effort, ultracode: undefined };
+    }
     if (options.forkSource) info.forkSource = { ...options.forkSource };
     if (options.agentId) {
       info.agentId = options.agentId;
@@ -899,6 +926,20 @@ export class CliLauncher {
       }
     }
 
+    // A local session: the env that points Claude Code at its provider's proxy
+    // (local-spawn.ts). Its provider may have been deleted since.
+    let localSpawn: ReturnType<typeof buildLocalSpawn> | null = null;
+    if (info.local) {
+      localSpawn = buildLocalSpawn(sessionId, info.local);
+      if ("error" in localSpawn) {
+        console.error(`[cli-launcher] Session ${sessionId}: ${localSpawn.error}`);
+        info.state = "exited";
+        info.exitCode = 1;
+        this.persistState();
+        return;
+      }
+    }
+
     const args: string[] = [
       ...(bridgeConfigPath || useStdio ? [] : ["--sdk-url", sdkUrl]),
       "--print",
@@ -909,15 +950,21 @@ export class CliLauncher {
       "--verbose",
     ];
 
-    if (options.model) {
+    if (localSpawn) {
+      // An alias Claude Code knows, resolved to the local model by the env.
+      args.push("--model", localSpawn.modelAlias);
+    } else if (options.model) {
       args.push("--model", options.model);
     }
     // Reasoning effort: only pass `--effort` when the chosen model actually
     // supports it; passing it to a non-supporting model is rejected. This seeds
     // the launch — later changes are applied at runtime (apply_flag_settings)
     // and recorded back here, so a relaunch resumes on the current level.
-    if (options.effort && isValidEffort(options.model, options.effort)) {
-      args.push("--effort", options.effort);
+    // A local session takes its provider's levels (Claude Code effort values
+    // the proxy maps to the model's reasoning levels; CLI 2.1.303 sends them
+    // as output_config.effort for any model name).
+    if (localSpawn ? !!options.effort && localSpawn.effortLevels.includes(options.effort) : options.effort && isValidEffort(options.model, options.effort)) {
+      args.push("--effort", options.effort!);
     }
     // Domain context (memory, skills, MCP, CLAUDE.md), rebuilt at every spawn
     // so edits to the domain apply at the next (re)launch. Legacy sessions get
@@ -937,7 +984,7 @@ export class CliLauncher {
     // relaunches the CLI often (model/effort change, mid-turn recovery). Without
     // re-passing it here every relaunch would silently drop it.
     const flagSettings: Record<string, unknown> = {};
-    if (options.ultracode && supportsUltracode(options.model)) flagSettings.ultracode = true;
+    if (!localSpawn && options.ultracode && supportsUltracode(options.model)) flagSettings.ultracode = true;
     if (domainSpawn) {
       Object.assign(flagSettings, domainSpawn.settings);
     } else if (info.pinnedMemoryDir) {
@@ -966,6 +1013,10 @@ export class CliLauncher {
     // Read from the session record so relaunches keep the restriction.
     if (info.tools && info.tools.length > 0) {
       args.push("--tools", info.tools.join(","));
+    }
+    // Tools that run on Anthropic's servers do not exist on a local provider.
+    if (localSpawn && localSpawn.disallowedTools.length > 0) {
+      args.push("--disallowedTools", localSpawn.disallowedTools.join(","));
     }
     // The built-in `companion` MCP server, added to (never replacing) the
     // user's own MCP servers: no --strict-mcp-config.
@@ -1012,6 +1063,9 @@ export class CliLauncher {
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
       ...domainSpawn?.env,
       ...options.env,
+      // Last, so no profile, request env or settings token can put an
+      // Anthropic credential back into a local session.
+      ...localSpawn?.env,
       PATH: getEnrichedPath(),
       ...(bridgeConfigPath ? { CLAUDE_BRIDGE_CONFIG: bridgeConfigPath } : {}),
       ...(bridgeMode === "tlsLoopback" && this.tlsCaPath
@@ -1130,11 +1184,12 @@ export class CliLauncher {
    * from ~/.codex, then (re)write the `companion` MCP server entry.
    */
   /**
-   * Brain tokens reach Codex as env vars for its MCP header; keep them out of
-   * the shell commands it runs (see codexShellExcludeOverride).
+   * Brain tokens and the private MCP proxy token reach Codex as env vars for
+   * its MCP headers; keep them out of the shell commands it runs (see
+   * codexShellExcludeOverride).
    */
   private hideBrainTokensFromShell(args: string[], codexHome: string, env: Record<string, string> | undefined): void {
-    if (!env || !Object.keys(env).some((k) => k.startsWith("COMPANION_BRAIN_"))) return;
+    if (!env || !Object.keys(env).some((k) => k.startsWith("COMPANION_BRAIN_") || k.startsWith("COMPANION_MCP_AUTH_"))) return;
     let toml = "";
     try {
       toml = readFileSync(join(codexHome, "config.toml"), "utf-8");

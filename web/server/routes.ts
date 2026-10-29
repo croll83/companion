@@ -18,6 +18,7 @@ import { registerEnvRoutes } from "./routes/env-routes.js";
 import { registerDomainRoutes } from "./routes/domain-routes.js";
 import { registerDomainLinearRoutes } from "./routes/domain-linear-routes.js";
 import { registerBrainRoutes } from "./routes/brain-routes.js";
+import { localSessionView, registerLocalProviderRoutes } from "./routes/local-provider-routes.js";
 import { getBrainConsolidation } from "./brain/brain-consolidation.js";
 import { registerAgentRoutes, registerAgentWebhookRoute } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
@@ -42,6 +43,8 @@ import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-
 import { isMcpRouteAllowed, isMcpToken, mcpCallerRefusal, verifyMcpToken } from "./companion-mcp-auth.js";
 import { listConnectedBrowsers } from "./chrome-browser-probe.js";
 import QRCode from "qrcode";
+import { sessionUnread } from "./session-unread.js";
+import { isSessionWorking } from "./session-work.js";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
 const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "13338");
@@ -253,6 +256,11 @@ export function createRoutes(
     });
   });
 
+  const busyNow = (sessionId: string): boolean => {
+    const live = wsBridge.getSession(sessionId);
+    return !!live && wsBridge.isCliConnected(sessionId) && isSessionWorking(live);
+  };
+
   api.get("/sessions", (c) => {
     const sessions = launcher.listSessions();
     const names = sessionNames.getAllNames();
@@ -275,9 +283,23 @@ export function createRoutes(
         gitBehind: bridge?.git_behind || 0,
         totalLinesAdded: bridge?.total_lines_added || 0,
         totalLinesRemoved: bridge?.total_lines_removed || 0,
+        // A local session: its provider's name and levels for the badge and the effort selector.
+        ...(s.local ? { local: localSessionView(s.local) } : {}),
+        // Delivered a result nobody has seen yet (session-unread.ts).
+        unread: sessionUnread.isUnread(s.sessionId),
+        // Doing work that must not be interrupted (the idle-kill's own test):
+        // a turn, a tool call, background work, a pending approval.
+        busy: busyNow(s.sessionId),
       };
     });
+    sessionUnread.prune(new Set(sessions.map((s) => s.sessionId)));
     return c.json(enriched);
+  });
+
+  // The user saw the session (on screen, page visible): its result is read.
+  api.post("/sessions/:id/read", (c) => {
+    sessionUnread.markRead(c.req.param("id"));
+    return c.json({ ok: true });
   });
 
   api.get("/sessions/:id", (c) => {
@@ -912,6 +934,14 @@ export function createRoutes(
   registerDomainRoutes(api, launcher);
   registerDomainLinearRoutes(api, launcher);
   registerBrainRoutes(api);
+  registerLocalProviderRoutes(api, {
+    liveSessionsUsing: (id) => launcher.listSessions()
+      .filter((s) => s.local?.provider === id && !s.archived && s.state !== "exited").length,
+    sessionLocal: (id) => {
+      const s = launcher.getSession(id);
+      return s?.local ? { ...s.local, effort: s.effort } : undefined;
+    },
+  });
 
   registerPromptRoutes(api);
   registerSettingsRoutes(api, {

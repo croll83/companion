@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
 import { getEffortLevels, DEFAULT_EFFORT, effortLabel } from "../utils/backends.js";
+import { localEffortLabel, useLocalSession } from "../utils/local-session.js";
 
 interface EffortSwitcherProps {
   sessionId: string;
@@ -27,13 +28,21 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
 
   const backendType = sdkSession?.backendType ?? runtimeSession?.backend_type ?? "claude";
   const currentModel = runtimeSession?.model ?? sdkSession?.model ?? "";
-  const currentEffort = runtimeSession?.effort ?? sdkSession?.effort ?? DEFAULT_EFFORT;
+  const currentEffort = runtimeSession?.effort ?? sdkSession?.effort ?? sdkSession?.local?.defaultEffort ?? DEFAULT_EFFORT;
   // Codex reports its per-model levels with the session (they vary by model and
   // are only knowable server-side); Claude resolves them from the static table.
   const codexLevels = runtimeSession?.supportedEfforts;
-  const levels = backendType === "codex"
-    ? ((codexLevels ?? []) as ReturnType<typeof getEffortLevels>)
-    : getEffortLevels(currentModel);
+  // A local provider has its own levels: Claude Code effort values the
+  // provider's proxy maps to the model's (low → "off", ...), shown by the
+  // model level's name. A change goes the normal Claude way (the CLI sends
+  // it as output_config.effort with the next request), no relaunch.
+  const local = useLocalSession(sessionId);
+  const label = (level: string) => (local ? localEffortLabel(local.effortLabels, level) : effortLabel(level));
+  const levels = local
+    ? (local.effortLevels as ReturnType<typeof getEffortLevels>)
+    : backendType === "codex"
+      ? ((codexLevels ?? []) as ReturnType<typeof getEffortLevels>)
+      : getEffortLevels(currentModel);
 
   const handleSelect = useCallback(
     (effort: string) => {
@@ -80,7 +89,7 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
     return null;
   }
 
-  const currentLabel = effortLabel(currentEffort);
+  const currentLabel = label(currentEffort);
 
   return (
     <div ref={containerRef} className="relative shrink-0">
@@ -123,7 +132,7 @@ export function EffortSwitcher({ sessionId }: EffortSwitcherProps) {
               role="option"
               aria-selected={level === currentEffort}
             >
-              <span className="flex-1 text-left">{effortLabel(level)}</span>
+              <span className="flex-1 text-left">{label(level)}</span>
               {level === currentEffort && (
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary shrink-0">
                   <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />

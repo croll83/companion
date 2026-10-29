@@ -211,6 +211,8 @@ export interface CreateSessionOpts {
   createBranch?: boolean;
   useWorktree?: boolean;
   backend?: "claude" | "codex";
+  /** Claude Code on a local provider (Settings → Local providers); `effort` is then one of its levels. */
+  local?: { provider: string; model?: string };
   resumeSessionAt?: string;
   forkSession?: boolean;
   /** Domain slug (default GLOBAL). */
@@ -226,6 +228,55 @@ export interface CreateSessionOpts {
     teamName: string;
     url: string;
   };
+}
+
+// ─── Local providers (Settings → Local providers) ────────────────────────────
+// Types shared with the server: a provider never carries its token, only hasToken.
+export type { LocalProviderView, LocalSessionMetrics } from "../server/routes/local-provider-routes.js";
+import type { LocalProviderView, LocalSessionMetrics } from "../server/routes/local-provider-routes.js";
+import type { LocalProviderHealth } from "../server/local-provider-health.js";
+
+/** What the provider form sends; `token`: a string sets it, "" removes it, absent keeps it. */
+export interface LocalProviderInput {
+  name?: string;
+  baseUrl?: string;
+  token?: string;
+  models?: string[];
+  modelsManual?: boolean;
+  defaultModel?: string | null;
+  contextWindow?: number;
+  /** Claude Code effort values the proxy maps (see docs/local-llm.md). */
+  effortLevels?: string[];
+  /** Name of the model level each value carries, e.g. {low: "off"}. */
+  effortLabels?: Record<string, string>;
+  defaultEffort?: string | null;
+}
+
+/** What "Test" reads: the proxy's GET /info (viaProxy), else the server's /v1/models. */
+export type LocalProviderTestResult =
+  | {
+    ok: true;
+    viaProxy: boolean;
+    latencyMs: number;
+    models: string[];
+    contextWindow?: number | null;
+    effort?: { default?: string | null; levels: { name: string; claude: string }[] };
+    /** The proxy answers Claude Code's WebSearch, with this backend. */
+    webSearch?: boolean;
+    searchBackend?: string | null;
+  }
+  | { ok: false; error: string };
+
+/** GET /sessions/:id/local-metrics */
+export interface LocalSessionMetricsView {
+  provider: { id: string; name?: string; contextWindow?: number; health?: LocalProviderHealth; missing?: boolean };
+  model: string;
+  effort: string | null;
+  /** The model level `effort` carries (the proxy's name for it). */
+  effortLabel?: string | null;
+  metrics: LocalSessionMetrics | null;
+  /** The proxy could not be asked for the numbers. */
+  metricsError?: string;
 }
 
 export interface BackendInfo {
@@ -392,6 +443,8 @@ export interface AppSettings {
   timeZone: string;
   /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
   companionMcpEnabled?: boolean;
+  /** "Enable local LLM": Claude Code sessions on a local model (off by default). */
+  localLlmEnabled?: boolean;
 }
 
 export interface HostsCheckResult {
@@ -506,7 +559,35 @@ export interface DomainMcpServerView {
   target: string;
   /** Account servers: health from the last `claude mcp list`. */
   health?: string;
+  /** HTTP servers of a mcp.json: the access they need, handled by Companion (server/mcp-auth/). */
+  auth?: McpAuthView;
 }
+
+/** Access of a private MCP server as the Domains page shows it (never a secret). */
+export interface McpAuthView {
+  /** Whose credentials: the domain that declares the server, or "global" (shared by every domain). */
+  owner: string;
+  state: "unchecked" | "open" | "manual" | "needs-client" | "needs-sign-in" | "signed-in" | "needs-key" | "key-set";
+  issuer?: string;
+  account?: string;
+  clientId?: string;
+  hasClientSecret?: boolean;
+  dynamicClient?: boolean;
+  scopes?: string[];
+  /** Other servers signed in by the same sign-in. */
+  sharedWith?: string[];
+  /** Redirect URI to register with the provider. */
+  redirectUri?: string;
+  header?: string;
+  error?: string;
+}
+
+export type McpAuthAction =
+  | { action: "check" }
+  | { action: "client"; clientId: string; clientSecret?: string }
+  | { action: "key"; header: string; value: string }
+  | { action: "finish"; url: string }
+  | { action: "sign-out" };
 
 /** A Claude Code marketplace plugin installed for the user, turned on/off per domain. */
 export interface PluginInfo {
@@ -567,6 +648,8 @@ export interface DomainSummary {
   effectiveBrain?: { slug: string; name: string; own: boolean } | null;
   /** The Linear team/project the domain is linked to (ids and names only, never a key). */
   linear?: DomainLinearLink;
+  /** New sessions of the domain start on this local provider (the Home page preselects it). */
+  localDefault?: { provider: string; model?: string };
 }
 
 /** A per-domain transition rule; absent on the link = the connection's setting applies. */
@@ -688,6 +771,8 @@ export interface DomainPatch {
   skillChoices?: Choices;
   /** One brain per domain: a slug replaces the current one, null = none, "inherit" = GLOBAL's (not for GLOBAL). */
   brain?: string | null;
+  /** New sessions start on this local provider; null = the Anthropic account. */
+  localDefault?: { provider: string; model?: string } | null;
 }
 
 export interface DomainsResponse {
@@ -1113,6 +1198,8 @@ export interface AgentInfo {
   description: string;
   icon?: string;
   backendType: "claude" | "codex";
+  /** Claude only: the runs use this local provider (`model` is then its model). */
+  local?: { provider: string; model?: string };
   model: string;
   /** Reasoning effort of the runs; absent = the model's default. Null in an update clears it. */
   effort?: string | null;
@@ -1434,6 +1521,9 @@ export const api = {
     );
   },
 
+  /** The user saw the session: its delivered result is read (sidebar's unread state). */
+  markSessionRead: (sessionId: string) =>
+    post<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/read`, {}),
   killSession: (sessionId: string) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/kill`),
 
@@ -1522,6 +1612,18 @@ export const api = {
 
   // Brains (remote and embedded). Assigned to domains with updateDomain(slug, { brain }).
   listBrains: () => get<{ brains: BrainInfo[] }>("/brains"),
+
+  // Local providers: Anthropic-compatible endpoints sessions can run on.
+  listLocalProviders: () => get<LocalProviderView[]>("/local-providers"),
+  createLocalProvider: (input: LocalProviderInput) => post<LocalProviderView>("/local-providers", input),
+  updateLocalProvider: (id: string, input: LocalProviderInput) => patch<LocalProviderView>(`/local-providers/${encodeURIComponent(id)}`, input),
+  deleteLocalProvider: (id: string) => del<{ ok: true }>(`/local-providers/${encodeURIComponent(id)}`),
+  /** GET /v1/models on a URL (unsaved: with the typed token; saved: `id`, its token unless one is typed). */
+  testLocalProvider: (input: { baseUrl?: string; token?: string; id?: string }) => post<LocalProviderTestResult>("/local-providers/test", input),
+  /** Read models, context window and levels from the proxy again. */
+  refreshLocalProvider: (id: string) =>
+    post<{ ok: boolean; viaProxy?: boolean; error?: string; provider: LocalProviderView }>(`/local-providers/${encodeURIComponent(id)}/refresh`, {}),
+  getLocalSessionMetrics: (sessionId: string) => get<LocalSessionMetricsView>(`/sessions/${encodeURIComponent(sessionId)}/local-metrics`),
   createBrain: (input: BrainInput | EmbeddedBrainInput) => post<BrainInfo>("/brains", input),
   /** Embedded brains: start, stop or restart the brain's process. */
   brainProcess: (slug: string, action: "start" | "stop" | "restart") =>
@@ -1572,6 +1674,12 @@ export const api = {
     post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),
   removeDomainMcpServer: (slug: string, name: string) =>
     del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`),
+  /** Change the access of a private MCP server (probe again, OAuth client, API key, finish or end a sign-in). */
+  mcpAuth: (slug: string, name: string, { action, ...body }: McpAuthAction) =>
+    post<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}/auth/${action}`, body),
+  /** Start an OAuth sign-in to a private MCP server: the page to open. */
+  mcpSignIn: (slug: string, name: string) =>
+    post<{ authUrl: string; redirectUri: string }>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}/auth/sign-in`, {}),
 
   /** Browsers connected to Claude in Chrome, listed by a short isolated Claude query. `force` bypasses the brief cache. */
   listChromeBrowsers: (force?: boolean) =>
@@ -1666,6 +1774,7 @@ export const api = {
     telegramBotToken?: string;
     timeZone?: string;
     companionMcpEnabled?: boolean;
+    localLlmEnabled?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

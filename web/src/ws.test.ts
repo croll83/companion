@@ -857,6 +857,26 @@ describe("handleMessage: result", () => {
     expect(state.sessionStatus.get("s1")).toBe("idle");
   });
 
+  // A turn that ends off screen makes the session unread and raises a toast
+  // (utils/session-unread.ts); the sidebar shows it green, the domain counts it.
+  it("marks a session unread with a toast when its result arrives off screen", () => {
+    window.location.hash = "#/session/other";
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result", subtype: "success", is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1,
+        total_cost_usd: 0, stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u-unread", session_id: "s1",
+      },
+    });
+    expect(useStore.getState().unreadSessions.has("s1")).toBe(true);
+    expect(useStore.getState().resultToasts.map((t) => t.sessionId)).toContain("s1");
+    window.location.hash = "";
+  });
+
   it("clears transient streaming draft bubble when a turn ends without a final assistant message", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });

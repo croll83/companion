@@ -139,9 +139,11 @@ export function codexBrainEnv(b: DomainBrain | null): Record<string, string> {
 
 /** Env var names Companion gives Codex for brains (their values are tokens). */
 export const BRAIN_ENV_PATTERN = "COMPANION_BRAIN_*";
+/** The same for the token of Companion's proxy to private MCP servers (mcp-auth/). */
+export const MCP_AUTH_ENV_PATTERN = "COMPANION_MCP_AUTH_*";
 
 /**
- * The `-c` override that keeps brain tokens out of the commands Codex runs.
+ * The `-c` override that keeps brain (and private MCP proxy) tokens out of the commands Codex runs.
  * Codex passes its own environment to shell commands (verified on 0.161: an
  * `echo $COMPANION_BRAIN_…_TOKEN` printed it), while only the Codex process
  * needs the token for the MCP header. `shell_environment_policy.exclude`
@@ -153,7 +155,7 @@ export function codexShellExcludeOverride(configToml: string): string {
   const section = /^\[shell_environment_policy\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(configToml)?.[1] ?? "";
   const list = /^\s*exclude\s*=\s*\[([^\]]*)\]/m.exec(section)?.[1] ?? "";
   for (const m of list.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)) existing.push(m[1] ?? m[2]);
-  const all = [...new Set([...existing, BRAIN_ENV_PATTERN])];
+  const all = [...new Set([...existing, BRAIN_ENV_PATTERN, MCP_AUTH_ENV_PATTERN])];
   return `shell_environment_policy.exclude=[${all.map((x) => JSON.stringify(x)).join(", ")}]`;
 }
 

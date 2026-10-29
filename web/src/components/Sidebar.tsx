@@ -8,6 +8,7 @@ import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js"
 import { SessionItem } from "./SessionItem.js";
 import { groupSessionsByDomain, type DomainRef, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 import { DomainGroup, domainCollapseKey } from "./DomainGroup.js";
+import { syncUnreadFromServer } from "../utils/session-unread.js";
 
 interface NavItem {
   id: string;
@@ -143,6 +144,7 @@ export function Sidebar() {
   const recentlyRenamed = useStore((s) => s.recentlyRenamed);
   const clearRecentlyRenamed = useStore((s) => s.clearRecentlyRenamed);
   const pendingPermissions = useStore((s) => s.pendingPermissions);
+  const unreadSessions = useStore((s) => s.unreadSessions);
   const linkedLinearIssues = useStore((s) => s.linkedLinearIssues);
   const collapsedProjects = useStore((s) => s.collapsedProjects);
   const toggleProjectCollapse = useStore((s) => s.toggleProjectCollapse);
@@ -157,6 +159,7 @@ export function Sidebar() {
         if (active) {
           const store = useStore.getState();
           store.setSdkSessions(list);
+          syncUnreadFromServer(list);
           // Remove client-side sessions the server no longer knows about.
           // Re-read state AFTER setSdkSessions so we get the freshest snapshot —
           // a session_init WebSocket message may have arrived while listSessions()
@@ -437,10 +440,13 @@ export function Sidebar() {
       backendType: bridgeState?.backend_type || sdkInfo?.backendType || "claude",
       repoRoot: bridgeState?.repo_root || "",
       permCount: pendingPermissions.get(id)?.size ?? 0,
+      unread: unreadSessions.has(id),
+      busy: sdkInfo?.busy ?? false,
       agentId: bridgeState?.agentId || sdkInfo?.agentId,
       agentName: bridgeState?.agentName || sdkInfo?.agentName,
       domain: sdkInfo?.domain,
       legacyMemory: sdkInfo?.legacyMemory,
+      local: sdkInfo?.local,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 

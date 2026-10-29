@@ -25,7 +25,7 @@ interface MockStoreState {
   setActiveTab: ReturnType<typeof vi.fn>;
   markChatTabReentry: ReturnType<typeof vi.fn>;
   sessions: Map<string, { cwd?: string }>;
-  sdkSessions: { sessionId: string; cwd?: string; model?: string; backendType?: string }[];
+  sdkSessions: { sessionId: string; cwd?: string; model?: string; backendType?: string; local?: Record<string, unknown> }[];
   gitChangedFilesCount: Map<string, number>;
 }
 
@@ -150,5 +150,15 @@ describe("TopBar", () => {
     const { container } = render(<TopBar />);
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// A session on a local provider says so in the header: "Local · provider/model".
+describe("TopBar on a local session", () => {
+  it("shows the local badge", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } }] });
+    render(<TopBar />);
+    expect(screen.getByText("Local · Lab/my-model")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Local · Lab/my-model" })).toBeInTheDocument();
   });
 });

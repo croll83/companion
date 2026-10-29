@@ -13,6 +13,7 @@ vi.mock("../ws.js", () => ({
 interface MockStoreState {
   currentSessionId: string | null;
   messages: Map<string, { id: string; role: string; content: string }[]>;
+  sdkSessions?: { sessionId: string; local?: Record<string, unknown> }[];
 }
 
 let storeState: MockStoreState;
@@ -115,5 +116,17 @@ describe("RefusalBanner", () => {
     const { container } = render(<RefusalBanner refusal={REFUSAL} />);
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// A local session has no fallback: retrying on a Claude model would move the
+// conversation off its provider (never allowed).
+describe("RefusalBanner on a local provider", () => {
+  it("offers no retry on another model", () => {
+    resetStore({ sdkSessions: [{ sessionId: "s1", local: { provider: "lab", model: "my-model", providerName: "Lab", effortLevels: [] } }] });
+    render(<RefusalBanner refusal={REFUSAL} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText(/runs on a local provider and keeps its model/)).toBeInTheDocument();
+    expect(mockSendToSession).not.toHaveBeenCalled();
   });
 });

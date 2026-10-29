@@ -46,6 +46,9 @@ const { mockStoreState, mockGetState } = vi.hoisted(() => {
     setTaskPanelOpen: vi.fn(),
     clearCreation: vi.fn(),
     setUpdateInfo: vi.fn(),
+    // Unread results and their toasts (ResultToasts, utils/session-unread.ts).
+    unreadSessions: new Set(),
+    resultToasts: [],
   };
   mockGetState.mockReturnValue(mockStoreState);
   return { mockStoreState, mockGetState };

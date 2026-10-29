@@ -33,7 +33,7 @@ describe("groupSessionsByDomain", () => {
   it("groups by domain with GLOBAL first, sessions directly inside, whatever their folder", () => {
     const groups = groupSessionsByDomain([
       makeItem({ id: "s1", cwd: "/h/companion_domain_herd/one", domain: "herd", status: "running", permCount: 1, createdAt: 100 }),
-      makeItem({ id: "s2", cwd: "/repos/herd-app", domain: "herd", createdAt: 200 }),
+      makeItem({ id: "s2", cwd: "/repos/herd-app", domain: "herd", createdAt: 200, unread: true }),
       makeItem({ id: "s3", cwd: "/home/u/old", legacyMemory: true }),
       makeItem({ id: "s4", cwd: "/home/u/new", domain: "global" }),
       makeItem({ id: "s5", cwd: "/x", domain: "alpha" }),
@@ -50,6 +50,9 @@ describe("groupSessionsByDomain", () => {
     expect(ids(herd.sessions)).toEqual(["s2", "s1"]);
     expect(herd.runningCount).toBe(1);
     expect(herd.permCount).toBe(1);
+    // The header's badge: sessions with a result not seen yet.
+    expect(herd.unreadCount).toBe(1);
+    expect(groups[0].unreadCount).toBe(0);
     // Without the domain list (not loaded yet) GLOBAL still gets its name.
     expect(groupSessionsByDomain([makeItem({ domain: "global" })], [])[0].label).toBe("GLOBAL");
   });

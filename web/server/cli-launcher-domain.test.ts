@@ -353,9 +353,9 @@ describe("domain brain (both CLIs)", () => {
     expect(toml).toContain('bearer_token_env_var = "COMPANION_BRAIN_TEAM_TOKEN"');
     expect(toml).not.toContain("tok-launch");
     // Codex passes its env to the shell commands it runs (verified: an echo
-    // printed the token): the brain variables are excluded from them.
+    // printed the token): the brain (and MCP proxy token) variables are excluded from them.
     const codexArgs = spawnArgs(1);
-    const i = codexArgs.indexOf('shell_environment_policy.exclude=["COMPANION_BRAIN_*"]');
+    const i = codexArgs.indexOf('shell_environment_policy.exclude=["COMPANION_BRAIN_*", "COMPANION_MCP_AUTH_*"]');
     expect(i).toBeGreaterThan(0);
     expect(codexArgs[i - 1]).toBe("-c");
     // Without a token there is nothing to hide: no override.

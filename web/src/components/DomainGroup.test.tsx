@@ -1,22 +1,25 @@
 // @vitest-environment jsdom
 /**
  * DomainGroup is a domain's section in the sidebar: a collapsible header
- * (name, running/waiting dots, session count) above its sessions.
+ * (name, unread badge, waiting dot, session count) above its sessions.
+ * Green means "new result" in the sidebar now, so the header no longer
+ * shows a green "running" dot: the badge counts the unread sessions.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { DomainGroup, domainCollapseKey } from "./DomainGroup.js";
 
-const group = { key: "herd", label: "Herd", sessions: [], sessionCount: 3, runningCount: 2, permCount: 1 };
+const group = { key: "herd", label: "Herd", sessions: [], sessionCount: 3, runningCount: 2, permCount: 1, unreadCount: 2 };
 
 describe("DomainGroup", () => {
   it("renders the domain header and its sessions", () => {
     render(<DomainGroup group={group} isCollapsed={false} onToggleCollapse={vi.fn()} isFirst><p>session row</p></DomainGroup>);
     expect(screen.getByRole("region", { name: "Domain Herd" })).toBeInTheDocument();
     expect(screen.getByText("3 sessions")).toBeInTheDocument();
-    expect(screen.getByTitle("2 running in Herd")).toBeInTheDocument();
-    expect(screen.getByTitle("1 waiting in Herd")).toBeInTheDocument();
+    expect(screen.getByTitle("2 sessions with a new result in Herd")).toHaveTextContent("2 unread");
+    expect(screen.queryByTitle(/running in Herd/)).toBeNull();
+    expect(screen.getByTitle("1 waiting for your approval in Herd")).toBeInTheDocument();
     expect(screen.getByText("session row")).toBeInTheDocument();
   });
 
@@ -27,6 +30,13 @@ describe("DomainGroup", () => {
     );
     expect(await axe(container)).toHaveNoViolations();
     expect(screen.getByText("1 session")).toBeInTheDocument();
+  });
+
+  it("shows no badge when every result was seen, and a singular title for one", () => {
+    const { rerender } = render(<DomainGroup group={{ ...group, unreadCount: 0 }} isCollapsed={false} onToggleCollapse={vi.fn()} isFirst><p>x</p></DomainGroup>);
+    expect(screen.queryByText(/unread/)).toBeNull();
+    rerender(<DomainGroup group={{ ...group, unreadCount: 1 }} isCollapsed={false} onToggleCollapse={vi.fn()} isFirst><p>x</p></DomainGroup>);
+    expect(screen.getByTitle("1 session with a new result in Herd")).toBeInTheDocument();
   });
 
   // Collapse state lives in the store's collapsed set, under a prefixed key.

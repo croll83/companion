@@ -16,6 +16,8 @@ const managerMock = vi.hoisted(() => ({ sync: vi.fn(), reload: vi.fn(), isRunnin
 vi.mock("../telegram-bridge-manager.js", () => ({ telegramBridgeManager: managerMock }));
 vi.mock("../linear-connections.js", () => ({ listConnections: () => [] }));
 vi.mock("../codex-auth-check.js", () => ({ hasCodexAuth: () => false }));
+const healthMock = vi.hoisted(() => ({ checkAll: vi.fn(async () => {}) }));
+vi.mock("../local-provider-health.js", () => ({ localProviderHealth: healthMock }));
 
 import { registerSettingsRoutes } from "./settings-routes.js";
 import { _resetForTest, getSettings } from "../settings-manager.js";
@@ -140,5 +142,22 @@ describe("PUT /settings companionMcpEnabled", () => {
     expect(bad.status).toBe(400);
     expect((await bad.json()).error).toBe("companionMcpEnabled must be a boolean");
     expect(getSettings().companionMcpEnabled).toBe(false);
+  });
+});
+
+describe("PUT /settings localLlmEnabled", () => {
+  // "Enable local LLM": off by default; turning it on checks the providers
+  // at once (their badges), and only a boolean is accepted.
+  it("round-trips the switch, checks providers when turned on, validates it", async () => {
+    expect((await (await app.request("/settings")).json()).localLlmEnabled).toBe(false);
+    const on = await putSettings({ localLlmEnabled: true });
+    expect((await on.json()).localLlmEnabled).toBe(true);
+    expect(healthMock.checkAll).toHaveBeenCalledTimes(1);
+    expect(getSettings().localLlmEnabled).toBe(true);
+    await putSettings({ localLlmEnabled: false });
+    expect(healthMock.checkAll).toHaveBeenCalledTimes(1);
+    const bad = await putSettings({ localLlmEnabled: "yes" });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toBe("localLlmEnabled must be a boolean");
   });
 });

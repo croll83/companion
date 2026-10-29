@@ -55,6 +55,7 @@ interface MockStoreState {
   sessionNames: Map<string, string>;
   recentlyRenamed: Set<string>;
   pendingPermissions: Map<string, Map<string, unknown>>;
+  unreadSessions: Set<string>;
   linkedLinearIssues: Map<string, unknown>;
   collapsedProjects: Set<string>;
   setCurrentSession: ReturnType<typeof vi.fn>;
@@ -66,6 +67,8 @@ interface MockStoreState {
   markRecentlyRenamed: ReturnType<typeof vi.fn>;
   clearRecentlyRenamed: ReturnType<typeof vi.fn>;
   setSdkSessions: ReturnType<typeof vi.fn>;
+  setUnreadSessions: ReturnType<typeof vi.fn>;
+  setSessionUnread: ReturnType<typeof vi.fn>;
 }
 
 function makeSession(id: string, overrides: Partial<SessionState> = {}): SessionState {
@@ -120,11 +123,14 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     sessionNames: new Map(),
     recentlyRenamed: new Set(),
     pendingPermissions: new Map(),
+    unreadSessions: new Set<string>(),
     linkedLinearIssues: new Map(),
     collapsedProjects: new Set(),
     setCurrentSession: vi.fn(),
     toggleProjectCollapse: vi.fn(),
     removeSession: vi.fn(),
+    setUnreadSessions: vi.fn(),
+    setSessionUnread: vi.fn(),
     newSession: vi.fn(),
     setSidebarOpen: vi.fn(),
     setSessionName: vi.fn(),
@@ -666,7 +672,9 @@ describe("Sidebar", () => {
     expect(screen.queryByText("project-a")).toBeNull();
   });
 
-  it("domain header shows running status dot and session count", () => {
+  // The header counts the domain's sessions with an unread result (Apple-style
+  // badge); running ones no longer get a green dot (green means "new result").
+  it("domain header shows the unread badge and session count", () => {
     const session1 = makeSession("s1", { cwd: "/home/user/myapp" });
     const session2 = makeSession("s2", { cwd: "/home/user/myapp" });
     const sdk1 = makeSdkSession("s1", { cwd: "/home/user/myapp" });
@@ -674,11 +682,13 @@ describe("Sidebar", () => {
     mockState = createMockState({
       sessions: new Map([["s1", session1], ["s2", session2]]),
       sdkSessions: [sdk1, sdk2],
-      sessionStatus: new Map([["s1", "running"], ["s2", "running"]]),
+      sessionStatus: new Map([["s1", "running"], ["s2", "idle"]]),
+      unreadSessions: new Set(["s2"]),
     });
 
     render(<Sidebar />);
-    expect(screen.getByTitle("2 running in GLOBAL")).toBeInTheDocument();
+    expect(screen.getByTitle("1 session with a new result in GLOBAL")).toBeInTheDocument();
+    expect(screen.queryByTitle(/running in GLOBAL/)).toBeNull();
     expect(screen.getByText("2 sessions")).toBeInTheDocument();
   });
 
@@ -889,6 +899,8 @@ describe("Sidebar", () => {
     // Polling re-evaluates which sockets to hold (focused + live CLIs) instead
     // of opening one per session, which made every refresh replay every history.
     expect(mockSyncSessionSockets).toHaveBeenCalled();
+    // The server's unread list reaches the store (green dots, domain badges).
+    expect(mockState.setUnreadSessions).toHaveBeenCalledWith([]);
     expect(mockState.setSessionName).toHaveBeenCalledWith("s1", "Server Name");
     // Since the store had a random two-word name, markRecentlyRenamed should fire
     expect(mockState.markRecentlyRenamed).toHaveBeenCalledWith("s1");
