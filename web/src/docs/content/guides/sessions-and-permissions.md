@@ -57,7 +57,16 @@ curl -X POST http://localhost:3456/api/sessions \
 
 ### Sidebar
 
-The sidebar lists all active and recent sessions. Each entry shows the session name, backend type, connection status, and working directory. Click a session to switch to it.
+The sidebar lists all active and recent sessions. Each entry shows the session name, backend type, status dot, and working directory. Click a session to switch to it.
+
+The status dot:
+
+- **Empty**: no CLI process is running for the session.
+- **Grey**: the CLI is running, idle, and you have seen its last result.
+- **Amber, pulsing**: the session is busy. A turn, a tool call or background work it started is running, so stopping its CLI would lose work. An amber pulsing ring means it waits for your approval.
+- **Green**: the session delivered a result you have not seen yet, even if its CLI has stopped since.
+
+A result counts as seen once the session is on screen with the Companion window focused. Unread state is kept by the server: it survives a reload and is the same on every device. Each domain header shows a badge with how many of its sessions have an unread result, and a result of a session you are not looking at shows a toast in the top right corner: click it to open the session. The gear next to the domain opens its settings (MCP servers, skills, plugins).
 
 ### Chat view
 

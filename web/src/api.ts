@@ -1521,6 +1521,9 @@ export const api = {
     );
   },
 
+  /** The user saw the session: its delivered result is read (sidebar's unread state). */
+  markSessionRead: (sessionId: string) =>
+    post<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/read`, {}),
   killSession: (sessionId: string) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/kill`),
 

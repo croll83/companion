@@ -22,6 +22,16 @@ import type { SessionPhase } from "./session-state-machine.js";
 /** Phases in which no work can be in flight. */
 const AT_REST: ReadonlySet<SessionPhase> = new Set<SessionPhase>(["ready", "terminated"]);
 
+/**
+ * For isSessionWorking, a CLI that is starting up is at rest too. Over stdio
+ * the CLI reports system/init only with its first turn, so a CLI relaunched
+ * when a browser opened the session sits in "initializing" until the user
+ * writes: counting that as work showed it busy (amber) while idle and kept
+ * the idle-kill from ever reclaiming it. A turn that really started shows
+ * up anyway (cliState, open tool calls, a pending approval).
+ */
+const AT_REST_OR_BOOTING: ReadonlySet<SessionPhase> = new Set<SessionPhase>([...AT_REST, "starting", "initializing"]);
+
 type MaybeContent = { message?: { content?: Array<Record<string, unknown>> } };
 
 function contentBlocks(msg: BrowserIncomingMessage): Array<Record<string, unknown>> {
@@ -129,5 +139,5 @@ export function isSessionWorking(session: Session): boolean {
   // or backgrounded agent is live, or its turn is not over.
   if (liveBackgroundWork(session).length > 0) return true;
   if (session.cliState === "running" || session.cliState === "requires_action") return true;
-  return !AT_REST.has(session.stateMachine.phase);
+  return !AT_REST_OR_BOOTING.has(session.stateMachine.phase);
 }

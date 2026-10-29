@@ -55,6 +55,8 @@ export interface Session {
   /** Timestamp of last non-keepalive CLI message (for idle detection) */
   /** Tool calls issued but not yet resolved — see session-work.ts. */
   openToolCalls: Set<string>;
+  /** The idle-kill stopped this CLI on purpose: its exit is not a lost connection. */
+  idleKilled?: boolean;
   /** Live background tasks as last reported by the CLI — see session-work.ts. */
   backgroundTasks: Map<string, { type: string; description: string; ambient: boolean }>;
   /** The CLI's declared turn state, when it reports one. */

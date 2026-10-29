@@ -29,41 +29,65 @@ interface SessionItemProps {
   editInputRef: RefObject<HTMLInputElement | null>;
 }
 
-type DerivedStatus = "awaiting" | "running" | "reconnecting" | "idle" | "exited";
+type DerivedStatus = "awaiting" | "busy" | "reconnecting" | "unread" | "idle" | "exited";
 
+/**
+ * The session's dot, most urgent first:
+ *  - awaiting: an approval waits for the user (amber, pulsing ring);
+ *  - busy: a turn, a tool call or background work is running, i.e. killing
+ *    the CLI would lose work (amber, pulsing) — the server's `busy` is the
+ *    idle-kill's own test, the live status covers a turn as it starts;
+ *  - reconnecting;
+ *  - unread: a result the user has not seen yet (green), even once the CLI exited;
+ *  - idle: CLI alive, nothing to see (grey);
+ *  - exited: no CLI process (empty).
+ */
 function deriveStatus(s: SessionItemType, permCount: number): DerivedStatus {
   if (permCount > 0) return "awaiting";
-  if ((s.status === "running" || s.status === "compacting") && s.isConnected) return "running";
+  if (((s.status === "running" || s.status === "compacting") && s.isConnected) || (s.busy && s.isConnected)) return "busy";
   if (s.isReconnecting) return "reconnecting";
+  if (s.unread) return "unread";
   if (s.isConnected) return "idle";
   return "exited";
 }
 
+const STATUS_LABEL: Record<DerivedStatus, string> = {
+  awaiting: "Waiting for your approval",
+  busy: "Working",
+  reconnecting: "Reconnecting",
+  unread: "New result",
+  idle: "Idle",
+  exited: "Not running",
+};
+
 function StatusDot({ status }: { status: DerivedStatus }) {
+  const label = STATUS_LABEL[status];
   switch (status) {
-    case "running":
+    case "busy":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="absolute inset-0 rounded-full bg-cc-success animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
-          <span className="w-2 h-2 rounded-full bg-cc-success block" />
+        <span className="relative shrink-0 w-2 h-2" aria-hidden="true" title={label}>
+          <span className="absolute inset-0 rounded-full bg-cc-warning animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
+          <span className="w-2 h-2 rounded-full bg-cc-warning block" />
         </span>
       );
     case "awaiting":
       return (
-        <span className="relative shrink-0 w-2 h-2">
+        <span className="relative shrink-0 w-2 h-2" aria-hidden="true" title={label}>
           <span className="w-2 h-2 rounded-full bg-cc-warning block animate-[ring-pulse_1.5s_ease-out_infinite]" />
         </span>
       );
     case "reconnecting":
       return (
-        <span className="relative shrink-0 w-2 h-2">
+        <span className="relative shrink-0 w-2 h-2" aria-hidden="true" title={label}>
           <span className="w-2 h-2 rounded-full border border-cc-warning/40 border-t-cc-warning block animate-spin" />
         </span>
       );
+    case "unread":
+      return <span className="w-2 h-2 rounded-full bg-cc-success shrink-0" aria-hidden="true" title={label} />;
     case "idle":
-      return <span className="w-2 h-2 rounded-full bg-cc-muted/40 shrink-0" />;
+      return <span className="w-2 h-2 rounded-full bg-cc-muted/40 shrink-0" aria-hidden="true" title={label} />;
     case "exited":
-      return <span className="w-2 h-2 rounded-full border border-cc-muted/25 shrink-0" />;
+      return <span className="w-2 h-2 rounded-full border border-cc-muted/25 shrink-0" aria-hidden="true" title={label} />;
   }
 }
 

@@ -43,6 +43,8 @@ import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-
 import { isMcpRouteAllowed, isMcpToken, mcpCallerRefusal, verifyMcpToken } from "./companion-mcp-auth.js";
 import { listConnectedBrowsers } from "./chrome-browser-probe.js";
 import QRCode from "qrcode";
+import { sessionUnread } from "./session-unread.js";
+import { isSessionWorking } from "./session-work.js";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
 const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "13338");
@@ -254,6 +256,11 @@ export function createRoutes(
     });
   });
 
+  const busyNow = (sessionId: string): boolean => {
+    const live = wsBridge.getSession(sessionId);
+    return !!live && wsBridge.isCliConnected(sessionId) && isSessionWorking(live);
+  };
+
   api.get("/sessions", (c) => {
     const sessions = launcher.listSessions();
     const names = sessionNames.getAllNames();
@@ -278,9 +285,21 @@ export function createRoutes(
         totalLinesRemoved: bridge?.total_lines_removed || 0,
         // A local session: its provider's name and levels for the badge and the effort selector.
         ...(s.local ? { local: localSessionView(s.local) } : {}),
+        // Delivered a result nobody has seen yet (session-unread.ts).
+        unread: sessionUnread.isUnread(s.sessionId),
+        // Doing work that must not be interrupted (the idle-kill's own test):
+        // a turn, a tool call, background work, a pending approval.
+        busy: busyNow(s.sessionId),
       };
     });
+    sessionUnread.prune(new Set(sessions.map((s) => s.sessionId)));
     return c.json(enriched);
+  });
+
+  // The user saw the session (on screen, page visible): its result is read.
+  api.post("/sessions/:id/read", (c) => {
+    sessionUnread.markRead(c.req.param("id"));
+    return c.json({ ok: true });
   });
 
   api.get("/sessions/:id", (c) => {

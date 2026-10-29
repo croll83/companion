@@ -158,4 +158,8 @@ export interface SdkSessionInfo {
    * at creation, never changed.
    */
   local?: LocalSessionView;
+  /** Delivered a result the user has not seen yet (server/session-unread.ts). */
+  unread?: boolean;
+  /** Doing work that must not be interrupted: a turn, a tool call, background work, a pending approval. */
+  busy?: boolean;
 }

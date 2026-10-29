@@ -17,6 +17,8 @@ import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { UpdateOverlay } from "./components/UpdateOverlay.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
 import { FileViewerModal } from "./components/FileViewerModal.js";
+import { ResultToasts } from "./components/ResultToasts.js";
+import { markViewedSessionRead } from "./utils/session-unread.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -82,6 +84,18 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
+
+  // The session on screen is read: on opening it, and when the user comes
+  // back to the window or the tab (utils/session-unread.ts).
+  useEffect(() => {
+    markViewedSessionRead();
+    window.addEventListener("focus", markViewedSessionRead);
+    document.addEventListener("visibilitychange", markViewedSessionRead);
+    return () => {
+      window.removeEventListener("focus", markViewedSessionRead);
+      document.removeEventListener("visibilitychange", markViewedSessionRead);
+    };
+  }, [hash]);
 
   // Capture the localStorage-restored session ID during render (before any effects run)
   // so the mount logic can use it even if the hash-sync branch would clear it.
@@ -337,6 +351,7 @@ export default function App() {
       <UpdateOverlay active={updateOverlayActive} />
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
       <FileViewerModal />
+      <ResultToasts />
     </div>
   );
 }

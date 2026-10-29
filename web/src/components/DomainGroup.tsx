@@ -17,8 +17,9 @@ export function domainCollapseKey(slug: string): string {
 }
 
 /**
- * Sidebar section of one domain: a collapsible header (domain name, running
- * and waiting dots, session count) above its sessions, and a gear opening the
+ * Sidebar section of one domain: a collapsible header (domain name, a badge
+ * counting the sessions with a result not seen yet, a dot when one waits for
+ * an approval, session count) above its sessions, and a gear opening the
  * domain's settings (#/domains/<slug>).
  */
 export function DomainGroup({ group, isCollapsed, onToggleCollapse, isFirst, children }: DomainGroupProps) {
@@ -41,11 +42,17 @@ export function DomainGroup({ group, isCollapsed, onToggleCollapse, isFirst, chi
         </svg>
         <span className="text-[11px] font-bold text-cc-fg/80 truncate uppercase tracking-wider">{group.label}</span>
         <span className="flex items-center gap-1 ml-auto shrink-0">
-          {group.runningCount > 0 && (
-            <span className="w-1.5 h-1.5 rounded-full bg-cc-success" title={`${group.runningCount} running in ${group.label}`} />
-          )}
           {group.permCount > 0 && (
-            <span className="w-1.5 h-1.5 rounded-full bg-cc-warning" title={`${group.permCount} waiting in ${group.label}`} />
+            <span className="w-1.5 h-1.5 rounded-full bg-cc-warning" title={`${group.permCount} waiting for your approval in ${group.label}`} />
+          )}
+          {group.unreadCount > 0 && (
+            <span
+              className="min-w-4 h-4 px-1 rounded-full bg-cc-error text-white text-[10px] font-semibold leading-4 text-center tabular-nums"
+              title={`${group.unreadCount} session${group.unreadCount === 1 ? "" : "s"} with a new result in ${group.label}`}
+            >
+              {group.unreadCount}
+              <span className="sr-only"> unread</span>
+            </span>
           )}
         </span>
         <span className="text-[10px] text-cc-muted tabular-nums shrink-0">

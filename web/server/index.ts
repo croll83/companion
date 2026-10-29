@@ -51,6 +51,7 @@ import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consoli
 import { handleBrainProxy } from "./brain/brain-proxy.js";
 import { localProviderHealth } from "./local-provider-health.js";
 import { CALLBACK_PATH as MCP_AUTH_CALLBACK_PATH, handleMcpAuthProxy } from "./mcp-auth/mcp-auth-proxy.js";
+import { trackSessionResults } from "./session-unread.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -408,6 +409,9 @@ migrateLinearCredentialsToAgents();
 agentExecutor.startAll();
 // After the orchestrator is wired: a wake-up due at startup relaunches its session.
 wakeupScheduler.startAll();
+
+// Sessions whose turn ended become "unread" until a browser shows them (sidebar).
+trackSessionResults();
 
 // ── Embedded brains ─────────────────────────────────────────────────────────
 // Children start in the background: the proxy holds early requests up to 10 s.

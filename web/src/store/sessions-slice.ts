@@ -51,6 +51,10 @@ export interface SessionsSlice {
   /** MCP OAuth logins in progress, per session then server name. */
   mcpAuth: Map<string, Record<string, McpAuthState>>;
   collapsedProjects: Set<string>;
+  /** Sessions that delivered a result the user has not seen (server truth, see utils/session-unread.ts). */
+  unreadSessions: Set<string>;
+  /** "Result ready" toasts, oldest first (ResultToasts). */
+  resultToasts: { key: number; sessionId: string }[];
 
   setCurrentSession: (id: string | null) => void;
   addSession: (session: SessionState) => void;
@@ -71,6 +75,11 @@ export interface SessionsSlice {
   /** Set (or with null clear) the OAuth login state of one MCP server. */
   setMcpAuth: (sessionId: string, serverName: string, state: McpAuthState | null) => void;
   toggleProjectCollapse: (projectKey: string) => void;
+  setUnreadSessions: (ids: Iterable<string>) => void;
+  setSessionUnread: (sessionId: string, unread: boolean) => void;
+  /** Show (or move to the end, for a session already toasted) a "result ready" toast. */
+  pushResultToast: (sessionId: string) => void;
+  dismissResultToast: (key: number) => void;
   setSessionAiValidation: (sessionId: string, settings: { aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null }) => void;
 }
 
@@ -90,6 +99,8 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
   mcpServers: new Map(),
   mcpAuth: new Map(),
   collapsedProjects: getInitialCollapsedProjects(),
+  unreadSessions: new Set(),
+  resultToasts: [],
 
   setCurrentSession: (id) => {
     if (id) {
@@ -272,6 +283,26 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       localStorage.setItem("cc-collapsed-projects", JSON.stringify(Array.from(collapsedProjects)));
       return { collapsedProjects };
     }),
+
+  setUnreadSessions: (ids) => set({ unreadSessions: new Set(ids) }),
+
+  setSessionUnread: (sessionId, unread) =>
+    set((s) => {
+      if (s.unreadSessions.has(sessionId) === unread) return {};
+      const unreadSessions = new Set(s.unreadSessions);
+      if (unread) unreadSessions.add(sessionId);
+      else unreadSessions.delete(sessionId);
+      return { unreadSessions };
+    }),
+
+  pushResultToast: (sessionId) =>
+    set((s) => {
+      // At most 3 on screen; a session's newer result replaces its older toast.
+      const kept = s.resultToasts.filter((t) => t.sessionId !== sessionId).slice(-2);
+      return { resultToasts: [...kept, { key: (s.resultToasts.at(-1)?.key ?? 0) + 1, sessionId }] };
+    }),
+
+  dismissResultToast: (key) => set((s) => ({ resultToasts: s.resultToasts.filter((t) => t.key !== key) })),
 
   setSessionAiValidation: (sessionId, settings) =>
     set((s) => {
