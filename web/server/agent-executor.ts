@@ -525,6 +525,9 @@ export class AgentExecutor {
         forkSource,
         // Scheduled and on-demand runs share their domain's memory and tools.
         domain: prep.domain || agent.domain || GLOBAL_DOMAIN,
+        // Known from the first spawn: no question tools for a run nobody answers.
+        agentId,
+        agentName: agent.name,
       });
 
       execution.sessionId = sessionInfo.sessionId;
