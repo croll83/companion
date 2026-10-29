@@ -151,4 +151,8 @@ export interface SdkSessionInfo {
   pinnedMemoryDir?: string;
   /** The session's own folder (stable), unlike `cwd`, which follows the CLI's `cd`. */
   folder?: string;
+  /** Delivered a result the user has not seen yet (server/session-unread.ts). */
+  unread?: boolean;
+  /** Doing work that must not be interrupted: a turn, a tool call, background work, a pending approval. */
+  busy?: boolean;
 }

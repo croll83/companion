@@ -98,10 +98,32 @@ describe("SessionItem", () => {
 
   // --- Status dot rendering ---
 
-  it("shows running status dot when session is running and connected", () => {
-    // Ensures the animated success dot appears for actively running sessions.
+  it("shows the busy (amber) dot when session is running and connected", () => {
+    // A running session is busy: amber and pulsing (green now means "new result").
     const { container } = render(<SessionItem {...buildProps()} />);
-    expect(container.querySelector(".bg-cc-success")).toBeTruthy();
+    expect(container.querySelector(".bg-cc-warning")).toBeTruthy();
+    expect(container.querySelector("[title='Working']")).toBeTruthy();
+    expect(container.querySelector(".bg-cc-success")).toBeNull();
+  });
+
+  // The server's busy flag covers work the live status cannot see: a turn
+  // that ended while a background task it started still runs.
+  it("shows the busy dot for background work after the turn ended", () => {
+    const { container } = render(
+      <SessionItem {...buildProps({ session: makeSession({ status: "idle", busy: true }) })} />,
+    );
+    expect(container.querySelector("[title='Working']")).toBeTruthy();
+  });
+
+  it("shows the green dot for an unread result, even once the CLI exited, until it is busy again", () => {
+    const { container, rerender } = render(
+      <SessionItem {...buildProps({ session: makeSession({ status: "idle", unread: true }) })} />,
+    );
+    expect(container.querySelector(".bg-cc-success[title='New result']")).toBeTruthy();
+    rerender(<SessionItem {...buildProps({ session: makeSession({ status: "idle", unread: true, isConnected: false }) })} />);
+    expect(container.querySelector("[title='New result']")).toBeTruthy();
+    rerender(<SessionItem {...buildProps({ session: makeSession({ status: "running", unread: true }) })} />);
+    expect(container.querySelector("[title='Working']")).toBeTruthy();
   });
 
   it("shows awaiting status dot when session has pending permissions", () => {
@@ -527,11 +549,11 @@ describe("SessionItem", () => {
 
   // --- Compacting status treated as running ---
 
-  it("shows running dot when session status is compacting and connected", () => {
+  it("shows the busy dot when session status is compacting and connected", () => {
     // Compacting is functionally a running state from the user's perspective.
     const { container } = render(
       <SessionItem {...buildProps({ session: makeSession({ status: "compacting" }) })} />,
     );
-    expect(container.querySelector(".bg-cc-success")).toBeTruthy();
+    expect(container.querySelector("[title='Working']")).toBeTruthy();
   });
 });

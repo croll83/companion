@@ -49,6 +49,7 @@ import { setCompanionPort } from "./brain/brain-endpoints.js";
 import { brainSupervisor } from "./brain/brain-supervisor.js";
 import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consolidation.js";
 import { handleBrainProxy } from "./brain/brain-proxy.js";
+import { trackSessionResults } from "./session-unread.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -398,6 +399,9 @@ migrateLinearCredentialsToAgents();
 agentExecutor.startAll();
 // After the orchestrator is wired: a wake-up due at startup relaunches its session.
 wakeupScheduler.startAll();
+
+// Sessions whose turn ended become "unread" until a browser shows them (sidebar).
+trackSessionResults();
 
 // ── Embedded brains ─────────────────────────────────────────────────────────
 // Children start in the background: the proxy holds early requests up to 10 s.

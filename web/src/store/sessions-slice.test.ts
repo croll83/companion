@@ -441,3 +441,29 @@ describe("Connection and session status", () => {
     expect(useStore.getState().sessionStatus.get("s1")).toBeNull();
   });
 });
+
+// Unread sessions (sidebar's green dot, domain badges) and "result ready"
+// toasts. setSessionUnread must not churn the set when nothing changes, so
+// the sidebar does not re-render on every poll.
+describe("unread sessions and result toasts", () => {
+  it("replaces, adds and removes unread sessions", () => {
+    useStore.getState().setUnreadSessions(["a", "b"]);
+    expect([...useStore.getState().unreadSessions]).toEqual(["a", "b"]);
+    const before = useStore.getState().unreadSessions;
+    useStore.getState().setSessionUnread("a", true);
+    expect(useStore.getState().unreadSessions).toBe(before);
+    useStore.getState().setSessionUnread("c", true);
+    useStore.getState().setSessionUnread("a", false);
+    expect([...useStore.getState().unreadSessions].sort()).toEqual(["b", "c"]);
+  });
+
+  it("keeps one toast per session, the newest last, at most three, and dismisses by key", () => {
+    useStore.setState({ resultToasts: [] });
+    const s = () => useStore.getState().resultToasts;
+    for (const id of ["a", "b", "a", "c", "d"]) useStore.getState().pushResultToast(id);
+    expect(s().map((t) => t.sessionId)).toEqual(["a", "c", "d"]);
+    expect(new Set(s().map((t) => t.key)).size).toBe(3);
+    useStore.getState().dismissResultToast(s()[1].key);
+    expect(s().map((t) => t.sessionId)).toEqual(["a", "d"]);
+  });
+});

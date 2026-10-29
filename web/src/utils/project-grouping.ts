@@ -16,6 +16,10 @@ export interface SessionItem {
   backendType: "claude" | "codex";
   repoRoot: string;
   permCount: number;
+  /** Delivered a result the user has not seen yet. */
+  unread?: boolean;
+  /** Doing work that must not be interrupted (turn, tool call, background work). */
+  busy?: boolean;
   agentId?: string;
   agentName?: string;
   /** Domain slug (absent = GLOBAL). */
@@ -38,6 +42,8 @@ export interface DomainGroup {
   sessionCount: number;
   runningCount: number;
   permCount: number;
+  /** Sessions with a result the user has not seen (the header's badge). */
+  unreadCount: number;
 }
 
 /**
@@ -63,6 +69,7 @@ export function groupSessionsByDomain(sessions: SessionItem[], domains: DomainRe
       sessionCount: list.length,
       runningCount: list.filter((s) => s.status === "running").length,
       permCount: list.reduce((n, s) => n + s.permCount, 0),
+      unreadCount: list.filter((s) => s.unread).length,
     });
   }
   return result.sort((a, b) => {

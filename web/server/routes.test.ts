@@ -1,6 +1,10 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
+// The unread registry is a singleton on COMPANION_HOME: never the real one here.
+const unread = vi.hoisted(() => ({ isUnread: vi.fn((_id: string) => false), markRead: vi.fn(), prune: vi.fn() }));
+vi.mock("./session-unread.js", () => ({ sessionUnread: unread }));
+
 vi.mock("./auth-manager.js", () => ({
   verifyToken: vi.fn(() => true),
   getToken: vi.fn(() => "test-token-for-routes"),
@@ -508,13 +512,41 @@ describe("GET /api/sessions", () => {
     expect(json).toEqual([
       {
         sessionId: "s1", state: "running", cwd: "/a", folder: "/a", name: "Fix auth bug",
-        gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0,
+        gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0, unread: false, busy: false,
       },
       {
         sessionId: "s2", state: "stopped", cwd: "/b", folder: "/b",
-        gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0,
+        gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0, unread: false, busy: false,
       },
     ]);
+    // Sessions that no longer exist are forgotten by the unread registry.
+    expect(unread.prune).toHaveBeenCalledWith(new Set(["s1", "s2"]));
+  });
+
+  // unread: from the registry; busy: the idle-kill's own test, only with a live CLI.
+  it("marks unread sessions and busy ones", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "s1", state: "running", cwd: "/a" },
+      { sessionId: "s2", state: "running", cwd: "/b" },
+      { sessionId: "s3", state: "running", cwd: "/c" },
+    ]);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    unread.isUnread.mockImplementation((id: string) => id === "s2");
+    const working = {
+      pendingPermissions: new Map(), openToolCalls: new Map([["t", {}]]), backgroundTasks: new Map(),
+      cliState: "idle", stateMachine: { phase: "ready" },
+    };
+    bridge.getSession.mockImplementation((id: string) => (id === "s1" || id === "s3" ? working : null));
+    bridge.isCliConnected = vi.fn((id: string) => id === "s1");
+    const json = await (await app.request("/api/sessions", { method: "GET" })).json();
+    expect(json.map((s: { unread: boolean; busy: boolean }) => [s.unread, s.busy])).toEqual([[false, true], [true, false], [false, false]]);
+    unread.isUnread.mockImplementation(() => false);
+  });
+
+  it("marks a session read", async () => {
+    const res = await app.request("/api/sessions/s9/read", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(unread.markRead).toHaveBeenCalledWith("s9");
   });
 
   it("enriches sessions with git data from bridge state", async () => {
