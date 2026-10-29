@@ -86,6 +86,7 @@ export function DomainDetail({
           onSetMcp={(slug, name, value) => actions.onPatch(slug, { mcp: { [name]: value } })}
           onAdd={actions.onAddServer}
           onRemove={actions.onRemoveServer}
+          onReload={actions.onReload}
         />
       );
     }

@@ -1153,11 +1153,12 @@ export class CliLauncher {
    * from ~/.codex, then (re)write the `companion` MCP server entry.
    */
   /**
-   * Brain tokens reach Codex as env vars for its MCP header; keep them out of
-   * the shell commands it runs (see codexShellExcludeOverride).
+   * Brain tokens and the private MCP proxy token reach Codex as env vars for
+   * its MCP headers; keep them out of the shell commands it runs (see
+   * codexShellExcludeOverride).
    */
   private hideBrainTokensFromShell(args: string[], codexHome: string, env: Record<string, string> | undefined): void {
-    if (!env || !Object.keys(env).some((k) => k.startsWith("COMPANION_BRAIN_"))) return;
+    if (!env || !Object.keys(env).some((k) => k.startsWith("COMPANION_BRAIN_") || k.startsWith("COMPANION_MCP_AUTH_"))) return;
     let toml = "";
     try {
       toml = readFileSync(join(codexHome, "config.toml"), "utf-8");

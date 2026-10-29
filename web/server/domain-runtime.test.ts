@@ -47,7 +47,12 @@ import {
   prepareCodexDomainHome,
   removeDomainRuntime,
   resolveDomain,
+  withCompanionAuth,
+  MCP_AUTH_TOKEN_ENV,
 } from "./domain-runtime.js";
+import { setCompanionPort } from "./brain/brain-endpoints.js";
+import { mcpAuthDir, writeOwnerAuth } from "./mcp-auth/mcp-auth-store.js";
+import { tokenDomain } from "./mcp-auth/mcp-auth-proxy.js";
 import { listSkillGroups } from "./skill-groups.js";
 import { rewriteCodexMcpServers } from "./companion-mcp-config.js";
 
@@ -537,5 +542,96 @@ describe("plugins for Codex", () => {
     expect(mcpTargetOf({ url: "http://x", headers: { Authorization: "secret" } })).toBe("http://x");
     expect(mcpTargetOf({ command: "npx", args: ["-y", "srv"], env: { TOKEN: "secret" } })).toBe("npx -y srv");
     expect(mcpTargetOf({})).toBe("");
+  });
+});
+
+// Private HTTP servers (mcp-auth/): Companion holds their credentials and
+// sessions reach them through its proxy, with their own `mca_` token. The
+// real URL, the credentials and any CLI OAuth client must not reach a CLI;
+// open and unprobed servers, and servers whose URL changed since the probe,
+// stay as they are.
+describe("private MCP servers through Companion's proxy", () => {
+  beforeEach(() => {
+    setCompanionPort(3456);
+    writeMcp(GLOBAL_DOMAIN, { gpriv: { type: "http", url: "https://gpriv.example/mcp" }, gopen: { type: "http", url: "https://gopen.example/mcp" } });
+    writeMcp("herd", {
+      priv: { type: "http", url: "https://priv.example/mcp", headers: { "X-Trace": "1", Authorization: "Bearer by-hand" }, oauth: { clientId: "cli-client" } },
+      moved: { type: "http", url: "https://new.example/mcp" },
+      unchecked: { type: "http", url: "https://u.example/mcp" },
+      cmd: { command: "c" },
+    });
+    writeOwnerAuth("herd", {
+      servers: {
+        priv: { kind: "oauth", url: "https://priv.example/mcp", issuer: "https://as.example", checkedAt: 1 },
+        moved: { kind: "apiKey", url: "https://old.example/mcp", header: "X", value: "v", checkedAt: 1 },
+      },
+      grants: {},
+    });
+    writeOwnerAuth(GLOBAL_DOMAIN, {
+      servers: {
+        gpriv: { kind: "apiKey", url: "https://gpriv.example/mcp", header: "X-Key", value: "k", checkedAt: 1 },
+        gopen: { kind: "open", url: "https://gopen.example/mcp", checkedAt: 1 },
+      },
+      grants: {},
+    });
+  });
+
+  it("rewrites only the private servers to the proxy, for their owner", () => {
+    const r = resolveDomain("herd");
+    const { servers, proxied } = withCompanionAuth(effectiveMcpServers(r), r, "TOKEN");
+    expect(proxied).toBe(true);
+    expect(servers.priv).toEqual({
+      type: "http",
+      url: "http://127.0.0.1:3456/mcp-auth/herd/priv",
+      headers: { "X-Trace": "1", Authorization: "Bearer TOKEN" },
+    });
+    expect(servers.gpriv.url).toBe("http://127.0.0.1:3456/mcp-auth/global/gpriv");
+    expect(servers.gopen).toEqual({ type: "http", url: "https://gopen.example/mcp" });
+    expect(servers.moved.url).toBe("https://new.example/mcp");
+    expect(servers.unchecked.url).toBe("https://u.example/mcp");
+    expect(servers.cmd).toEqual({ command: "c" });
+    const r2 = resolveDomain(GLOBAL_DOMAIN);
+    expect(withCompanionAuth({ gopen: { url: "https://gopen.example/mcp" } }, r2, "T").proxied).toBe(false);
+  });
+
+  it("Claude: the session's own token in its generated mcp.json", () => {
+    buildClaudeDomainSpawn("s-claude", "herd");
+    const mcp = JSON.parse(readFileSync(join(domainRuntimeDir("s-claude"), "mcp.json"), "utf-8"));
+    const auth: string = mcp.mcpServers.priv.headers.Authorization;
+    expect(auth).toMatch(/^Bearer mca_/);
+    expect(tokenDomain(auth.slice(7))).toBe("herd");
+    expect(JSON.stringify(mcp)).not.toContain("by-hand");
+    expect(JSON.stringify(mcp)).not.toContain("priv.example");
+  });
+
+  it("Codex: config.toml names the env var, the token is in the process env only", () => {
+    const codexHome = join(tmp, "codex-home");
+    mkdirSync(codexHome, { recursive: true });
+    const prepared = prepareCodexDomainHome(codexHome, "herd", { userAgentsMdPath: join(tmp, "none.md"), sessionId: "s-codex" });
+    const toml = prepared.mcp.tables.map((t) => t.join("\n")).join("\n");
+    expect(toml).toContain('url = "http://127.0.0.1:3456/mcp-auth/herd/priv"');
+    expect(toml).toContain(`bearer_token_env_var = "${MCP_AUTH_TOKEN_ENV}"`);
+    expect(toml).not.toContain("mca_");
+    expect(tokenDomain(prepared.env[MCP_AUTH_TOKEN_ENV])).toBe("herd");
+  });
+
+  // Domains without private servers never touch the proxy's key or tokens.
+  it("mints nothing when no server of the domain is private", () => {
+    writeMcp("herd", { open: { type: "http", url: "https://open.example/mcp" } });
+    writeMcp(GLOBAL_DOMAIN, {});
+    buildClaudeDomainSpawn("s-plain", "herd");
+    expect(existsSync(join(mcpAuthDir(), "key"))).toBe(false);
+    const r = resolveDomain("herd");
+    const mint = vi.fn(() => "T");
+    expect(withCompanionAuth(effectiveMcpServers(r), r, mint).proxied).toBe(false);
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("the Domains page sees each server's access", () => {
+    const view = domainMcpView(resolveDomain("herd"), []);
+    expect(view.find((s) => s.name === "priv")?.auth).toMatchObject({ owner: "herd", state: "needs-client" });
+    expect(view.find((s) => s.name === "gpriv")?.auth).toMatchObject({ owner: "global", state: "key-set", header: "X-Key" });
+    expect(view.find((s) => s.name === "unchecked")?.auth).toEqual({ owner: "herd", state: "unchecked" });
+    expect(view.find((s) => s.name === "cmd")?.auth).toBeUndefined();
   });
 });

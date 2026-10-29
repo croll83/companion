@@ -2246,3 +2246,23 @@ describe("legacy memory", () => {
     expect(JSON.parse(opts.body)).toEqual({ domain: "herd", files: ["a.md"] });
   });
 });
+
+// Access of a private MCP server (Domains page): the action is the last path
+// segment and the rest of the object is the body; names are URL-encoded.
+describe("private MCP server access", () => {
+  it("posts each action to its route with its body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ slug: "acme" }));
+    await api.mcpAuth("acme", "g drive", { action: "client", clientId: "cid", clientSecret: "s" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/domains/acme/mcp/g%20drive/auth/client");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ clientId: "cid", clientSecret: "s" });
+  });
+
+  it("starts a sign-in and returns the page to open", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ authUrl: "https://as/authorize", redirectUri: "http://localhost:3456/api/mcp-auth/callback" }));
+    const r = await api.mcpSignIn("acme", "gdrive");
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/domains/acme/mcp/gdrive/auth/sign-in");
+    expect(r.authUrl).toBe("https://as/authorize");
+  });
+});

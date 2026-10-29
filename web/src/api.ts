@@ -559,7 +559,35 @@ export interface DomainMcpServerView {
   target: string;
   /** Account servers: health from the last `claude mcp list`. */
   health?: string;
+  /** HTTP servers of a mcp.json: the access they need, handled by Companion (server/mcp-auth/). */
+  auth?: McpAuthView;
 }
+
+/** Access of a private MCP server as the Domains page shows it (never a secret). */
+export interface McpAuthView {
+  /** Whose credentials: the domain that declares the server, or "global" (shared by every domain). */
+  owner: string;
+  state: "unchecked" | "open" | "manual" | "needs-client" | "needs-sign-in" | "signed-in" | "needs-key" | "key-set";
+  issuer?: string;
+  account?: string;
+  clientId?: string;
+  hasClientSecret?: boolean;
+  dynamicClient?: boolean;
+  scopes?: string[];
+  /** Other servers signed in by the same sign-in. */
+  sharedWith?: string[];
+  /** Redirect URI to register with the provider. */
+  redirectUri?: string;
+  header?: string;
+  error?: string;
+}
+
+export type McpAuthAction =
+  | { action: "check" }
+  | { action: "client"; clientId: string; clientSecret?: string }
+  | { action: "key"; header: string; value: string }
+  | { action: "finish"; url: string }
+  | { action: "sign-out" };
 
 /** A Claude Code marketplace plugin installed for the user, turned on/off per domain. */
 export interface PluginInfo {
@@ -1643,6 +1671,12 @@ export const api = {
     post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),
   removeDomainMcpServer: (slug: string, name: string) =>
     del<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`),
+  /** Change the access of a private MCP server (probe again, OAuth client, API key, finish or end a sign-in). */
+  mcpAuth: (slug: string, name: string, { action, ...body }: McpAuthAction) =>
+    post<DomainSummary>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}/auth/${action}`, body),
+  /** Start an OAuth sign-in to a private MCP server: the page to open. */
+  mcpSignIn: (slug: string, name: string) =>
+    post<{ authUrl: string; redirectUri: string }>(`/domains/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}/auth/sign-in`, {}),
 
   /** Browsers connected to Claude in Chrome, listed by a short isolated Claude query. `force` bypasses the brief cache. */
   listChromeBrowsers: (force?: boolean) =>

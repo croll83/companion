@@ -195,9 +195,11 @@ describe("collisions and adoption", () => {
 // shell commands Codex runs, keeping the user's own excludes (a -c replaces
 // the whole array).
 describe("codexShellExcludeOverride", () => {
-  it("adds the brain pattern alone when the config has no excludes", () => {
-    expect(codexShellExcludeOverride("")).toBe('shell_environment_policy.exclude=["COMPANION_BRAIN_*"]');
-    expect(codexShellExcludeOverride('model = "gpt"\n[shell_environment_policy]\ninherit = "all"\n')).toBe('shell_environment_policy.exclude=["COMPANION_BRAIN_*"]');
+  // Both token patterns: the brains' and the private MCP proxy's (mcp-auth/).
+  it("adds the brain and MCP proxy token patterns when the config has no excludes", () => {
+    const ours = 'shell_environment_policy.exclude=["COMPANION_BRAIN_*", "COMPANION_MCP_AUTH_*"]';
+    expect(codexShellExcludeOverride("")).toBe(ours);
+    expect(codexShellExcludeOverride('model = "gpt"\n[shell_environment_policy]\ninherit = "all"\n')).toBe(ours);
   });
 
   it("keeps the excludes already in the session's config, without duplicates", () => {
@@ -208,7 +210,7 @@ describe("codexShellExcludeOverride", () => {
       "[mcp_servers.x]",
       'exclude = ["not-this-one"]',
     ].join("\n");
-    expect(codexShellExcludeOverride(toml)).toBe('shell_environment_policy.exclude=["AWS_*", "MY_SECRET", "COMPANION_BRAIN_*"]');
+    expect(codexShellExcludeOverride(toml)).toBe('shell_environment_policy.exclude=["AWS_*", "MY_SECRET", "COMPANION_BRAIN_*", "COMPANION_MCP_AUTH_*"]');
   });
 });
 
