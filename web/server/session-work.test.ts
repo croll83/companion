@@ -5,7 +5,7 @@ import { SessionStateMachine } from "./session-state-machine.js";
 import type { Session } from "./ws-bridge-types.js";
 import type { BrowserIncomingMessage } from "./session-types.js";
 
-function makeSession(phase: "ready" | "streaming" | "terminated" = "ready"): Session {
+function makeSession(phase: "ready" | "streaming" | "terminated" | "starting" | "initializing" = "ready"): Session {
   return {
     id: "s1",
     openToolCalls: new Set<string>(),
@@ -24,6 +24,20 @@ describe("session work detection", () => {
 
   it("treats an at-rest session with nothing outstanding as idle", () => {
     expect(isSessionWorking(session)).toBe(false);
+  });
+
+  // Over stdio the CLI reports init only with its first turn: a CLI just
+  // (re)launched and never written to sits in starting/initializing. That
+  // is idle (not amber, reclaimable), unless a turn shows up another way.
+  it("treats a CLI that is starting up with nothing outstanding as idle", () => {
+    expect(isSessionWorking(makeSession("starting"))).toBe(false);
+    expect(isSessionWorking(makeSession("initializing"))).toBe(false);
+    const booting = makeSession("initializing");
+    noteWorkFromCliMessage(booting, toolUse("t1"));
+    expect(isSessionWorking(booting)).toBe(true);
+    const running = makeSession("initializing");
+    running.cliState = "running";
+    expect(isSessionWorking(running)).toBe(true);
   });
 
   it("counts a session with an unfinished tool call as working", () => {
