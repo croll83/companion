@@ -3,6 +3,7 @@ import type { DomainMcpServerView, DomainSummary, DomainsResponse, PluginInfo } 
 import { useStore } from "../store.js";
 import { Toggle } from "./DomainToggle.js";
 import { McpServerAuth } from "./McpServerAuth.js";
+import { DomainMcpAuth, mcpAuthLabel, mcpAuthNeedsAction } from "./DomainMcpAuth.js";
 
 export type NewMcpServer = { url: string } | { command: string; args?: string[] };
 
@@ -17,7 +18,8 @@ const EMPTY: never[] = [];
  * to GLOBAL's choice; the details show where it runs now (live status of the
  * domain's open sessions), sign-in, removal, and the same switch for every
  * other domain. Claude and Codex sessions get the same servers, except the
- * Claude-only ones.
+ * Claude-only ones. HTTP servers of a mcp.json show their access (open,
+ * OAuth, API key): Companion signs in for them (DomainMcpAuth).
  */
 export function DomainMcpServers({
   domain,
@@ -30,6 +32,7 @@ export function DomainMcpServers({
   onSetMcp,
   onAdd,
   onRemove,
+  onReload,
 }: {
   domain: DomainSummary;
   domains: DomainSummary[];
@@ -44,6 +47,8 @@ export function DomainMcpServers({
   /** Resolves true when the server was saved. */
   onAdd: (slug: string, name: string, server: NewMcpServer) => Promise<boolean>;
   onRemove: (slug: string, name: string) => Promise<boolean>;
+  /** Reload the domains (after a change of a server's access). */
+  onReload: () => void;
 }) {
   const [filter, setFilter] = useState("");
   const [adding, setAdding] = useState(false);
@@ -104,6 +109,7 @@ export function DomainMcpServers({
                   busy={busy}
                   onSetMcp={onSetMcp}
                   onRemove={onRemove}
+                  onReload={onReload}
                 />
               ))}
             </ul>
@@ -193,6 +199,7 @@ function McpRow({
   busy,
   onSetMcp,
   onRemove,
+  onReload,
 }: {
   server: DomainMcpServerView;
   domain: DomainSummary;
@@ -201,8 +208,10 @@ function McpRow({
   busy: boolean;
   onSetMcp: (slug: string, name: string, value: boolean | null) => void;
   onRemove: (slug: string, name: string) => Promise<boolean>;
+  onReload: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const needsAction = mcpAuthNeedsAction(s.auth);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const isGlobal = domain.slug === "global";
   const removable = s.source === "domain" || (isGlobal && s.source === "global");
@@ -228,6 +237,9 @@ function McpRow({
           <span className="block text-[10px] text-cc-muted truncate">
             {s.type}{s.target ? ` · ${s.target}` : ""}{s.health && s.health !== "connected" ? ` · ${s.health}` : ""}
           </span>
+          {s.auth && (
+            <span className={`block text-[10px] truncate ${needsAction ? "text-cc-warning" : "text-cc-muted"}`}>{mcpAuthLabel(s.auth)}</span>
+          )}
         </button>
         <span className={`shrink-0 text-[10px] ${s.own ? "text-cc-fg" : "text-cc-muted"}`}>{stateLabel(s, isGlobal)}</span>
         {s.own && (
@@ -243,8 +255,9 @@ function McpRow({
         )}
       </div>
 
-      {(live?.signInSession || open) && (
+      {(live?.signInSession || open || needsAction) && (
         <div className="mt-2 pl-10 space-y-2 text-[11px]">
+          {s.auth && (open || needsAction) && <DomainMcpAuth slug={domain.slug} name={s.name} auth={s.auth} onChanged={onReload} />}
           {live?.signInSession && (
             <div>
               <McpServerAuth sessionId={live.signInSession} serverName={s.name} />
@@ -421,7 +434,10 @@ function AddServerForm({
           </select>
         </div>
       )}
-      <p className="text-cc-muted">Env variables and headers (tokens) go in mcp.json: use "Edit mcp.json" in the domain's menu.</p>
+      <p className="text-cc-muted">
+        A URL server is checked when added: if it needs a sign-in (OAuth) or an API key, Companion asks for it here and passes
+        it to every session. Env variables of a command go in mcp.json ("Edit mcp.json" in the domain's menu).
+      </p>
       <div className="flex gap-2">
         <button
           type="submit"

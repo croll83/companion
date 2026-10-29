@@ -25,6 +25,9 @@ let tmp: string;
 let sessions: { domain?: string; archived?: boolean }[];
 let app: Hono;
 let refreshAccountMcp: Mock<() => Promise<AccountMcpList>>;
+// Probes and OAuth calls of private MCP servers: never the network. By
+// default every server is open (initialize 200, no OAuth metadata).
+let mcpAuthFetch: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
 const saved = { root: process.env.COMPANION_DOMAINS_ROOT, claude: process.env.CLAUDE_CONFIG_DIR };
 
 const json = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -40,7 +43,8 @@ beforeEach(() => {
   app = new Hono();
   // Never run the real `claude mcp list` from tests.
   refreshAccountMcp = vi.fn(async (): Promise<AccountMcpList> => ({ servers: [], at: Date.now() }));
-  registerDomainRoutes(app, { listSessions: () => sessions }, { refreshAccountMcp });
+  mcpAuthFetch = vi.fn(async (_url: string, init?: RequestInit) => new Response("{}", { status: init?.method === "POST" ? 200 : 404 }));
+  registerDomainRoutes(app, { listSessions: () => sessions }, { refreshAccountMcp, mcpAuthFetch });
 });
 
 afterEach(() => {
@@ -233,8 +237,9 @@ describe("domain MCP servers", () => {
     await app.request("/domains", json({ name: "Herd" }));
     let res = await app.request("/domains/herd/mcp/brain", put({ url: "http://100.1.2.3:7421/mcp" }));
     expect(res.status).toBe(200);
+    // A URL server is probed when added: this one is open.
     expect((await res.json()).mcpServers).toEqual([
-      { name: "brain", source: "domain", enabled: true, own: false, type: "http", target: "http://100.1.2.3:7421/mcp" },
+      { name: "brain", source: "domain", enabled: true, own: false, type: "http", target: "http://100.1.2.3:7421/mcp", auth: { owner: "herd", state: "open" } },
     ]);
     res = await app.request("/domains/herd/mcp/brain", del);
     expect((await res.json()).mcpServers).toEqual([]);
@@ -249,6 +254,95 @@ describe("domain MCP servers", () => {
     expect((await app.request("/domains/global/mcp/missing", del)).status).toBe(404);
     const bad = await app.request("/domains/global/mcp/a", { method: "PUT", body: "not json" });
     expect(bad.status).toBe(400);
+  });
+});
+
+// Private servers (mcp-auth/): the page's buttons. Adding a URL probes it;
+// a failed probe leaves it unchecked instead of failing the add; the
+// actions work on the server's owner (GLOBAL's servers from any domain);
+// removing a server or a domain forgets its credentials.
+describe("private MCP server access", () => {
+  const ISS = "https://as.example";
+  const json200 = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
+  function oauthProvider(registration: boolean) {
+    mcpAuthFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST" && url === "https://p.example/mcp") return new Response("{}", { status: 401 });
+      if (url === "https://p.example/.well-known/oauth-protected-resource/mcp") return json200({ authorization_servers: [ISS], scopes_supported: ["s"] });
+      if (url === `${ISS}/.well-known/oauth-authorization-server`) {
+        return json200({ authorization_endpoint: `${ISS}/authorize`, token_endpoint: `${ISS}/token`, ...(registration ? { registration_endpoint: `${ISS}/reg` } : {}) });
+      }
+      if (url === `${ISS}/reg`) return json200({ client_id: "dyn" });
+      if (url === `${ISS}/token`) return json200({ access_token: "at", refresh_token: "rt", expires_in: 3600 });
+      return new Response("nf", { status: 404 });
+    });
+  }
+  const authOf = async (res: Response, name: string) => (await res.json()).mcpServers.find((s: { name: string }) => s.name === name)?.auth;
+
+  it("probes on add, then signs in through a pasted address", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    oauthProvider(true);
+    let res = await app.request("/domains/herd/mcp/p", put({ url: "https://p.example/mcp" }));
+    expect(await authOf(res, "p")).toMatchObject({ owner: "herd", state: "needs-sign-in", issuer: ISS, scopes: ["s"] });
+    res = await app.request("/domains/herd/mcp/p/auth/sign-in", json({}));
+    const { authUrl, redirectUri } = await res.json();
+    expect(redirectUri).toMatch(/\/api\/mcp-auth\/callback$/);
+    const state = new URL(authUrl).searchParams.get("state");
+    res = await app.request("/domains/herd/mcp/p/auth/finish", json({ url: `${redirectUri}?code=c&state=${state}` }));
+    expect(await authOf(res, "p")).toMatchObject({ state: "signed-in", dynamicClient: true });
+    res = await app.request("/domains/herd/mcp/p/auth/sign-out", json({}));
+    expect(await authOf(res, "p")).toMatchObject({ state: "needs-sign-in" });
+    // Removing the server forgets its credentials.
+    await app.request("/domains/herd/mcp/p", { method: "DELETE" });
+    expect(existsSync(join(h.home, "mcp-auth", "herd.json")) ? readFileSync(join(h.home, "mcp-auth", "herd.json"), "utf-8") : "").not.toContain("\"p\"");
+  });
+
+  it("takes a client ID when the provider cannot register one", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    oauthProvider(false);
+    let res = await app.request("/domains/herd/mcp/p", put({ url: "https://p.example/mcp" }));
+    expect(await authOf(res, "p")).toMatchObject({ state: "needs-client" });
+    res = await app.request("/domains/herd/mcp/p/auth/sign-in", json({}));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("needs-client");
+    res = await app.request("/domains/herd/mcp/p/auth/client", json({ clientId: "cid", clientSecret: "cs" }));
+    expect(await authOf(res, "p")).toMatchObject({ state: "needs-sign-in", clientId: "cid", hasClientSecret: true });
+  });
+
+  it("sets an API key on GLOBAL's server from a domain, and checks again", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    mcpAuthFetch.mockImplementation(async () => new Response("{}", { status: 403 }));
+    await app.request("/domains/global/mcp/k", put({ url: "https://k.example/mcp" }));
+    let res = await app.request("/domains/herd/mcp/k/auth/key", json({ header: "X-Key", value: "v" }));
+    expect(await authOf(res, "k")).toEqual({ owner: "global", state: "key-set", header: "X-Key" });
+    res = await app.request("/domains/herd/mcp/k/auth/check", json({}));
+    expect(await authOf(res, "k")).toMatchObject({ state: "key-set" });
+  });
+
+  it("keeps the server when the probe fails, and reports errors with their status", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mcpAuthFetch.mockImplementation(async () => { throw new Error("down"); });
+    let res = await app.request("/domains/herd/mcp/x", put({ url: "https://x.example/mcp" }));
+    expect(res.status).toBe(200);
+    expect(await authOf(res, "x")).toEqual({ owner: "herd", state: "unchecked" });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+    expect((await app.request("/domains/herd/mcp/x/auth/check", json({}))).status).toBe(502);
+    expect((await app.request("/domains/herd/mcp/x/auth/client", json({ clientId: "c" }))).status).toBe(400);
+    expect((await app.request("/domains/herd/mcp/x/auth/finish", json({ url: "bad" }))).status).toBe(400);
+    expect((await app.request("/domains/herd/mcp/x/auth/sign-out", json({}))).status).toBe(200);
+    expect((await app.request("/domains/herd/mcp/x/auth/zap", json({}))).status).toBe(404);
+    expect((await app.request("/domains/herd/mcp/none/auth/check", json({}))).status).toBe(404);
+    expect((await app.request("/domains/nope/mcp/x/auth/check", json({}))).status).toBe(404);
+  });
+
+  it("forgets a deleted domain's credentials", async () => {
+    await app.request("/domains", json({ name: "Herd" }));
+    mcpAuthFetch.mockImplementation(async () => new Response("{}", { status: 403 }));
+    await app.request("/domains/herd/mcp/k", put({ url: "https://k.example/mcp" }));
+    expect(existsSync(join(h.home, "mcp-auth", "herd.json"))).toBe(true);
+    await app.request("/domains/herd", { method: "DELETE" });
+    expect(existsSync(join(h.home, "mcp-auth", "herd.json"))).toBe(false);
   });
 });
 

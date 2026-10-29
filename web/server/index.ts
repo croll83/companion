@@ -49,6 +49,7 @@ import { setCompanionPort } from "./brain/brain-endpoints.js";
 import { brainSupervisor } from "./brain/brain-supervisor.js";
 import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consolidation.js";
 import { handleBrainProxy } from "./brain/brain-proxy.js";
+import { CALLBACK_PATH as MCP_AUTH_CALLBACK_PATH, handleMcpAuthProxy } from "./mcp-auth/mcp-auth-proxy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = process.env.__COMPANION_PACKAGE_ROOT || resolve(__dirname, "..");
@@ -225,6 +226,12 @@ const fetchHandler = async (req: Request, server: AnyBunServer): Promise<Respons
     // ── Embedded brains' MCP proxy — before Hono's auth: loopback + brn_ token (brain-proxy.ts)
     if (url.pathname.startsWith("/brains/")) {
       const proxied = await handleBrainProxy(req, reqAddr);
+      if (proxied) return proxied;
+    }
+
+    // ── Private MCP servers' proxy and OAuth callback — before Hono's auth: loopback + mca_ token (mcp-auth-proxy.ts)
+    if (url.pathname.startsWith("/mcp-auth/") || url.pathname === MCP_AUTH_CALLBACK_PATH) {
+      const proxied = await handleMcpAuthProxy(req, reqAddr);
       if (proxied) return proxied;
     }
 

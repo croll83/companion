@@ -29,6 +29,8 @@ import {
   type McpServerDef,
 } from "./domain-store.js";
 import { SKILL_TOGGLE_MARKER, tomlInlineTable, tomlKey, tomlString } from "./companion-mcp-config.js";
+import { currentServerAuth, mcpAuthView, type McpAuthView } from "./mcp-auth/mcp-auth-manage.js";
+import { mcpAuthProxyUrl, mintMcpAuthToken } from "./mcp-auth/mcp-auth-proxy.js";
 import {
   brainForDomain,
   claudeBrainServer,
@@ -67,7 +69,9 @@ import {
  *  - `--chrome` when the domain turns Claude in Chrome on,
  *  - the domain's brain (brain/brain-runtime.ts): its server last in
  *    --mcp-config, its plugin (skill) as one more `--plugin-dir`, and any
- *    plugin serving the same URL forced off in `enabledPlugins`.
+ *    plugin serving the same URL forced off in `enabledPlugins`,
+ *  - private HTTP servers (OAuth or API key, mcp-auth/) point at Companion's
+ *    proxy with the session's `mca_` token instead of their real URL.
  *
  * Codex (its own CODEX_HOME per session):
  *  - a generated AGENTS.md: the user's ~/.codex/AGENTS.md, the GLOBAL and
@@ -79,7 +83,9 @@ import {
  *  - the GLOBAL, domain and plugin skills linked into CODEX_HOME/skills,
  *  - the domain's brain: its server table last, its skill linked last, one
  *    line in AGENTS.md, and its token in the env of the Codex process
- *    (never in config.toml); colliding plugins are skipped.
+ *    (never in config.toml); colliding plugins are skipped,
+ *  - private HTTP servers through Companion's proxy, the `mca_` token in the
+ *    env of the Codex process like the brain's.
  *  Codex has no equivalent of plugin commands/agents or of `--chrome`: those
  *  stay Claude-only (the UI says so).
  *
@@ -141,6 +147,8 @@ export interface DomainMcpServerView {
   target: string;
   /** Account servers: health from the last `claude mcp list`. */
   health?: string;
+  /** HTTP servers of a mcp.json: the access they need and its state (mcp-auth/). */
+  auth?: McpAuthView;
 }
 
 /** The domain whose choices apply on top of GLOBAL's (none for GLOBAL itself). */
@@ -192,11 +200,13 @@ function mcpState(name: string, r: ResolvedDomain): Pick<DomainMcpServerView, "e
 export function domainMcpView(r: ResolvedDomain, account: AccountMcpServer[] = cachedAccountMcpServers().servers): DomainMcpServerView[] {
   const view = new Map<string, DomainMcpServerView>();
   for (const [name, def] of Object.entries(readDomainMcp(GLOBAL_DOMAIN).servers)) {
-    view.set(name, { name, source: "global", ...mcpState(name, r), type: mcpTypeOf(def), target: mcpTargetOf(def) });
+    const auth = mcpAuthView(GLOBAL_DOMAIN, name, def);
+    view.set(name, { name, source: "global", ...mcpState(name, r), type: mcpTypeOf(def), target: mcpTargetOf(def), ...(auth ? { auth } : {}) });
   }
   if (!r.isGlobal) {
     for (const [name, def] of Object.entries(readDomainMcp(r.domain.slug).servers)) {
-      view.set(name, { name, source: "domain", ...mcpState(name, r), type: mcpTypeOf(def), target: mcpTargetOf(def) });
+      const auth = mcpAuthView(r.domain.slug, name, def);
+      view.set(name, { name, source: "domain", ...mcpState(name, r), type: mcpTypeOf(def), target: mcpTargetOf(def), ...(auth ? { auth } : {}) });
     }
   }
   for (const a of account) {
@@ -218,6 +228,44 @@ export function domainMcpView(r: ResolvedDomain, account: AccountMcpServer[] = c
 export function deniedMcpServers(r: ResolvedDomain): string[] {
   const names = new Set([...Object.keys(r.global.mcp), ...(r.isGlobal ? [] : Object.keys(r.domain.mcp))]);
   return [...names].filter((n) => n !== "companion" && !isMcpOn(n, ownChoices(r), r.global)).sort();
+}
+
+/** Env var carrying a Codex session's `mca_` token (config.toml only names it). */
+export const MCP_AUTH_TOKEN_ENV = "COMPANION_MCP_AUTH_TOKEN";
+
+/**
+ * The servers with the private HTTP ones (OAuth or API key) rewritten to
+ * Companion's proxy (mcp-auth/mcp-auth-proxy.ts): the session sends
+ * `Authorization: Bearer <bearer>` (its `mca_` token, or `${VAR}` naming it
+ * for Codex) and Companion adds the real credentials. Their other headers
+ * stay (the proxy forwards them); a CLI OAuth client is dropped: Companion
+ * signs in, not the CLI. `proxied` says whether any server needs the token.
+ * A function as `bearer` is called only then: a domain without private
+ * servers never mints a token (nor creates the signing key).
+ */
+export function withCompanionAuth(
+  servers: Record<string, McpServerDef>,
+  r: ResolvedDomain,
+  bearer: string | (() => string),
+): { servers: Record<string, McpServerDef>; proxied: boolean } {
+  const out: Record<string, McpServerDef> = {};
+  let proxied = false;
+  let token: string | undefined;
+  const domainServers = r.isGlobal ? {} : readDomainMcp(r.domain.slug).servers;
+  for (const [name, def] of Object.entries(servers)) {
+    const owner = domainServers[name] ? r.domain.slug : GLOBAL_DOMAIN;
+    const auth = def.url ? currentServerAuth(owner, name, def) : undefined;
+    if (!auth || auth.kind === "open") {
+      out[name] = def;
+      continue;
+    }
+    const headers = Object.fromEntries(Object.entries(def.headers ?? {}).filter(([k]) => k.toLowerCase() !== "authorization"));
+    const { oauth: _oauth, ...rest } = def;
+    token ??= typeof bearer === "function" ? bearer() : bearer;
+    out[name] = { ...rest, type: "http", url: mcpAuthProxyUrl(owner, name), headers: { ...headers, Authorization: `Bearer ${token}` } };
+    proxied = true;
+  }
+  return { servers: out, proxied };
 }
 
 // ── Skill groups ────────────────────────────────────────────────────────────
@@ -288,7 +336,8 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
   if (!r.isGlobal) args.push("--add-dir", r.dir);
 
   const mcpPath = join(runtime, "mcp.json");
-  const servers = withBrainLast(effectiveMcpServers(r), brain, claudeBrainServer);
+  const authed = withCompanionAuth(effectiveMcpServers(r), r, () => mintMcpAuthToken(r.domain.slug, sessionId)).servers;
+  const servers = withBrainLast(authed, brain, claudeBrainServer);
   if (Object.keys(servers).length > 0) {
     // 0600: server env may hold tokens.
     writePrivateFile(mcpPath, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`);
@@ -459,6 +508,7 @@ export function codexDomainMcp(
   r: ResolvedDomain,
   plugins?: InstalledPlugin[],
   brain: DomainBrain | null = brainForDomain(r),
+  servers: Record<string, McpServerDef> = effectiveMcpServers(r),
 ): CodexDomainMcp {
   const domainPluginList = plugins ?? domainPlugins(r, brain);
   const previous = readCodexState(codexHome).mcpServers;
@@ -477,7 +527,7 @@ export function codexDomainMcp(
     tables.push(table);
     names.push(name);
   };
-  for (const [name, def] of Object.entries(effectiveMcpServers(r))) add(name, def);
+  for (const [name, def] of Object.entries(servers)) add(name, def);
   for (const p of domainPluginList) for (const [name, def] of Object.entries(p.mcpServers)) add(name, def, p.id);
   if (brain) add(brain.serverName, codexBrainServer(brain), { brain: brain.brain.slug });
   return { remove: [...new Set([...previous, ...names])], tables, names };
@@ -621,7 +671,8 @@ export function linkCodexSkills(
  * Make a Codex session's CODEX_HOME carry its domain: generated AGENTS.md and
  * linked skills. MCP servers are returned (not written) so the caller writes
  * config.toml once, together with the companion server. `env` goes on the
- * Codex process: the brain's token, which config.toml only names.
+ * Codex process: the brain's token and the private servers' `mca_` token,
+ * which config.toml only names.
  */
 export function prepareCodexDomainHome(
   codexHome: string,
@@ -645,14 +696,19 @@ export function prepareCodexDomainHome(
   const off = disabledDomainSkills(r, groups);
   const plugins = domainPlugins(r, brain);
   const skills = linkCodexSkills(codexHome, r, state.skills, off, plugins, brain);
-  const mcp = codexDomainMcp(codexHome, r, plugins, brain);
+  // Private servers through Companion's proxy; Codex reads the token from its env.
+  const authed = withCompanionAuth(effectiveMcpServers(r), r, `\${${MCP_AUTH_TOKEN_ENV}}`);
+  const mcp = codexDomainMcp(codexHome, r, plugins, brain, authed.servers);
   // Skills Codex finds by itself (repository ones, like the design group)
   // are turned off in config.toml; written in the same pass as the servers.
   mcp.tables.push(...codexSkillToggles(groups, off));
   return {
     resolved: r,
     mcp,
-    env: codexBrainEnv(brain),
+    env: {
+      ...codexBrainEnv(brain),
+      ...(authed.proxied ? { [MCP_AUTH_TOKEN_ENV]: mintMcpAuthToken(r.domain.slug, opts.sessionId ?? "codex") } : {}),
+    },
     // Called once config.toml has been written, so a failed write keeps the
     // old bookkeeping and the next spawn still knows what to remove.
     commit: () => {

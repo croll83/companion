@@ -27,6 +27,9 @@ import { domainMcpView, mcpTargetOf, mcpTypeOf, resolveDomain, type DomainMcpSer
 import { isSkillGroupOn, isSkillOn, listSkillGroups, skillDescription, skillKey, type SkillGroup } from "../skill-groups.js";
 import { isPluginOn, listInstalledPlugins, type InstalledPlugin } from "../claude-plugins.js";
 import { cachedAccountMcpServers, isAccountMcpStale, refreshAccountMcpServers, type AccountMcpList } from "../account-mcp.js";
+import { checkServer, mcpServerOwner, setApiKey } from "../mcp-auth/mcp-auth-manage.js";
+import { McpAuthError, finishSignIn, setGrantClient, signOut, startSignIn } from "../mcp-auth/mcp-auth-oauth.js";
+import { readOwnerAuth, removeOwnerAuth, removeServerAuth } from "../mcp-auth/mcp-auth-store.js";
 
 /** An installed plugin as the Domains page lists it (server env and headers left out). */
 export interface PluginView {
@@ -167,10 +170,13 @@ function validateDomainFile(name: string, content: string): string | null {
 export interface DomainRouteDeps {
   /** Re-read the account's MCP servers (`claude mcp list`); injected in tests. */
   refreshAccountMcp?: () => Promise<AccountMcpList>;
+  /** fetch for probing and signing in to private MCP servers; injected in tests. */
+  mcpAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
 export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, deps: DomainRouteDeps = {}): void {
   const refreshAccountMcp = deps.refreshAccountMcp ?? (() => refreshAccountMcpServers());
+  const authFetch = deps.mcpAuthFetch ?? fetch;
 
   api.get("/domains", (c) => {
     const global = ensureGlobalDomain();
@@ -217,9 +223,19 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
   // One MCP server of the domain's mcp.json: add or replace (URL or command), or remove.
   api.put("/domains/:slug/mcp/:name", async (c) => {
     const slug = c.req.param("slug");
+    const name = c.req.param("name");
     const body = (await c.req.json().catch(() => ({}))) as { url?: unknown; command?: unknown; args?: unknown };
-    const result = setDomainMcpServer(slug, c.req.param("name"), body);
+    const result = setDomainMcpServer(slug, name, body);
     if (!result.ok) return c.json({ error: result.error }, result.status);
+    // A URL server is probed at once, so the page shows whether it needs a
+    // sign-in or a key. A failed probe leaves it "unchecked" (Check retries).
+    if (typeof body.url === "string") {
+      try {
+        await checkServer(slug, name, authFetch);
+      } catch (err) {
+        console.warn(`[domain-routes] Could not probe MCP server ${name} of ${slug}:`, err);
+      }
+    }
     const domain = slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!;
     return c.json(summarize(domain, ensureGlobalDomain(), sessions, listSkillGroups()));
   });
@@ -228,7 +244,52 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
     const slug = c.req.param("slug");
     const result = setDomainMcpServer(slug, c.req.param("name"), null);
     if (!result.ok) return c.json({ error: result.error }, result.status);
+    removeServerAuth(slug, c.req.param("name"));
     const domain = slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug)!;
+    return c.json(summarize(domain, ensureGlobalDomain(), sessions, listSkillGroups()));
+  });
+
+  // Access to a private HTTP server (mcp-auth/): probe it again, set the
+  // OAuth client or the API key, sign in (URL to open), finish a sign-in
+  // from a pasted address, sign out. The credentials belong to the server's
+  // owner: the domain that declares it, or GLOBAL (shared by every domain).
+  api.post("/domains/:slug/mcp/:name/auth/:action", async (c) => {
+    const slug = c.req.param("slug");
+    const name = c.req.param("name");
+    const domain = slug === GLOBAL_DOMAIN ? ensureGlobalDomain() : getDomain(slug);
+    if (!domain) return c.json({ error: "Domain not found" }, 404);
+    const owner = mcpServerOwner(slug, name);
+    if (!owner) return c.json({ error: `No server "${name}" in this domain's or GLOBAL's mcp.json` }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string) : "");
+    const issuer = readOwnerAuth(owner).servers[name]?.issuer;
+    try {
+      switch (c.req.param("action")) {
+        case "check":
+          await checkServer(owner, name, authFetch);
+          break;
+        case "client":
+          if (!issuer) return c.json({ error: `${name} does not use OAuth: check it first` }, 400);
+          setGrantClient(owner, issuer, str("clientId").trim(), typeof body.clientSecret === "string" ? str("clientSecret").trim() : undefined);
+          break;
+        case "key":
+          setApiKey(owner, name, str("header"), str("value"));
+          break;
+        case "sign-in":
+          return c.json(await startSignIn(owner, name, authFetch));
+        case "finish":
+          await finishSignIn(str("url"), authFetch);
+          break;
+        case "sign-out":
+          if (issuer) await signOut(owner, issuer, authFetch);
+          break;
+        default:
+          return c.json({ error: "Unknown action" }, 404);
+      }
+    } catch (err) {
+      const status = err instanceof McpAuthError && err.code !== "provider" ? 400 : 502;
+      return c.json({ error: err instanceof Error ? err.message : String(err), ...(err instanceof McpAuthError ? { code: err.code } : {}) }, status);
+    }
     return c.json(summarize(domain, ensureGlobalDomain(), sessions, listSkillGroups()));
   });
 
@@ -259,6 +320,7 @@ export function registerDomainRoutes(api: Hono, sessions: DomainSessionSource, d
     }
     const result = deleteDomain(slug);
     if (!result.ok) return c.json({ error: result.error }, result.status);
+    removeOwnerAuth(slug);
     return c.json({ ok: true, keptOnDisk: domainDir(slug) });
   });
 
