@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.8.0](https://github.com/croll83/companion/compare/the-companion-v1.7.0...the-companion-v1.8.0) (2026-10-29)
+
+
+### Features
+
+* **domains:** private MCP servers with Companion-managed OAuth and API keys ([56ba360](https://github.com/croll83/companion/commit/56ba360dac9168b64a83ece0e7be2f5b89bf61f4))
+* **domains:** private MCP servers with Companion-managed OAuth and API keys ([457dbb4](https://github.com/croll83/companion/commit/457dbb45ef8340433e6251d420a41c4a66fb8946))
+* **llm-proxy:** answer Claude Code's WebSearch with a Tavily or Brave backend ([8b77234](https://github.com/croll83/companion/commit/8b77234e121bfddadc0f8d7bb18f4890ddec4b4d))
+* **local-llm:** keep WebSearch on providers whose proxy answers it ([4a23ee6](https://github.com/croll83/companion/commit/4a23ee6a81db8a1ab898716c8b621df8ff8c84f0))
+* **local-llm:** Local choice, provider settings and badges in the UI ([a8a993b](https://github.com/croll83/companion/commit/a8a993b51a34769f1caeb4e5c1b906afb67a5b60))
+* **local-llm:** run Claude Code sessions on a local model through a standalone proxy ([b633b32](https://github.com/croll83/companion/commit/b633b328bd7a97e733f6fff4272b47a21a0f6d5e))
+* **local-llm:** run Claude Code sessions on a local provider ([eaae59d](https://github.com/croll83/companion/commit/eaae59d01f8560052e2b6ecb73065a7f1713510b))
+* **local-llm:** standalone Companion LLM proxy for vLLM ([3a3f369](https://github.com/croll83/companion/commit/3a3f36982d89810b5d8c6f4778b4ace849010e29))
+* **sidebar:** unread results, busy dots, domain badges and result toasts ([b371a77](https://github.com/croll83/companion/commit/b371a77a6f11e6ee7f6b7c273c738dd947ca283f))
+* **sidebar:** unread results, busy dots, domain badges and result toasts ([926ed50](https://github.com/croll83/companion/commit/926ed508301238a535012e5534fb17fea02729d0))
+
+
+### Bug Fixes
+
+* **llm-proxy:** fold mid-conversation system messages into user turns ([ba33429](https://github.com/croll83/companion/commit/ba33429e14e3dd26dfbc9e4ca50d0a2289380a33))
+* **questions:** multiSelect questions use checkboxes and send every choice ([80c5240](https://github.com/croll83/companion/commit/80c5240f9a0cb70f0e2d58ea24e4410d5497dcf3))
+* **sessions:** let Claude ask questions and request approvals, Codex ask blocking questions ([ceeaed1](https://github.com/croll83/companion/commit/ceeaed10b48d3f0c9a783d70539525757c3db5de))
+* **sessions:** let Claude ask questions and request approvals, Codex ask blocking questions ([e1610cd](https://github.com/croll83/companion/commit/e1610cd1550ada785ef8cac0aa64b94d8d5112ad))
+* **sessions:** no stuck reconnecting spinner after idle-kill, no busy dot while a CLI boots ([eefb632](https://github.com/croll83/companion/commit/eefb632cf2fc9a031fc15edb9fdb0bb346e46774))
+
 ## [1.7.0](https://github.com/croll83/companion/compare/the-companion-v1.6.0...the-companion-v1.7.0) (2026-10-16)
 
 
