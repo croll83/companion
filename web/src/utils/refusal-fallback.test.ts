@@ -2,8 +2,9 @@ import { describe, it, expect } from "vitest";
 import { nextRefusalFallback, normalizeModelId, REFUSAL_CHAIN } from "./refusal-fallback.js";
 
 describe("refusal fallback chain", () => {
-  it("walks Fable 5.1 → Opus 5.5 → Opus 4.8, one step per refusal", () => {
-    expect(nextRefusalFallback("claude-fable-5-1")).toBe("claude-opus-5-5");
+  it("walks Fable 5.2 → Opus 5.5 → Opus 4.8, one step per refusal", () => {
+    expect(REFUSAL_CHAIN[0]).toBe("claude-fable-5-2");
+    expect(nextRefusalFallback("claude-fable-5-2")).toBe("claude-opus-5-5");
     expect(nextRefusalFallback("claude-opus-5-5")).toBe("claude-opus-4-8");
     // Opus 5 left the picker, so the chain no longer offers it as a step.
     expect(REFUSAL_CHAIN).not.toContain("claude-opus-5");
@@ -13,8 +14,10 @@ describe("refusal fallback chain", () => {
     expect(nextRefusalFallback("claude-opus-4-8")).toBeNull();
   });
 
+  // Sessions still on Fable 5.1 or 5 take the same next step as Fable 5.2.
   it("treats an older Fable like the current one", () => {
     expect(nextRefusalFallback("claude-fable-5")).toBe("claude-opus-5-5");
+    expect(nextRefusalFallback("claude-fable-5-1")).toBe("claude-opus-5-5");
   });
 
   it("sends a model outside the chain to the last resort, as before", () => {

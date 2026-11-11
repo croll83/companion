@@ -7,6 +7,7 @@ import {
   isValidEffort,
   getDefaultEffort,
   settleEffort,
+  supportsUltracode,
 } from "./effort.js";
 
 // The effort matrix mirrors the Claude Code CLI's per-model gating. These tests
@@ -21,13 +22,15 @@ describe("effort capability matrix", () => {
   });
 
   it("never offers `ultra` to a Claude model", () => {
-    for (const m of ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"]) {
+    for (const m of ["claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"]) {
       expect(getEffortLevels(m)).not.toContain("ultra");
     }
   });
 
-  it("gives fable-5 and Opus 4.8/4.7 all five levels", () => {
-    for (const m of ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-7"]) {
+  // Fable 5.2 probed on CLI 2.1.322: all five levels applied. 5.1 keeps its
+  // row so sessions started on it still get their effort.
+  it("gives Fable 5.2/5.1/5 and Opus 4.8/4.7 all five levels", () => {
+    for (const m of ["claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7"]) {
       expect(getEffortLevels(m)).toEqual(["low", "medium", "high", "xhigh", "max"]);
     }
   });
@@ -119,5 +122,16 @@ describe("settleEffort", () => {
     expect(settleEffort("high", [], null)).toEqual({ fallback: true });
     expect(settleEffort(undefined, [], null)).toEqual({ fallback: false });
     expect(settleEffort(undefined, ["low"], "high")).toEqual({ fallback: false });
+  });
+});
+
+// Ultracode needs xhigh: the toggle (UltracodeToggle) and the launch flag
+// follow the effort row, so a new flagship gets ultracode with its row.
+describe("supportsUltracode", () => {
+  it("is on for Fable 5.2 and 5.1, off for models without xhigh", () => {
+    expect(supportsUltracode("claude-fable-5-2")).toBe(true);
+    expect(supportsUltracode("claude-fable-5-1")).toBe(true);
+    expect(supportsUltracode("claude-opus-4-6")).toBe(false);
+    expect(supportsUltracode(undefined)).toBe(false);
   });
 });
