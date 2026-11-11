@@ -118,9 +118,11 @@ export async function checkForUpdate(): Promise<void> {
       return;
     }
 
-    // Find the most recent (releases are returned by GitHub in created order,
-    // newest first) release matching the current channel that has a parsable
-    // tag. Drafts are always skipped.
+    // Pick the highest version among the releases of the current channel
+    // with a parsable tag. Drafts are always skipped. The list order cannot
+    // be trusted: GitHub returned the-companion-v1.9.0 before
+    // the-companion-v1.10.0, so taking the first entry offered 1.9.0 to
+    // every install once 1.10.0 was out.
     const wantPrerelease = channel === "prerelease";
     let pick: { version: string; release: GitHubRelease } | null = null;
     for (const r of releases) {
@@ -128,8 +130,7 @@ export async function checkForUpdate(): Promise<void> {
       if (Boolean(r.prerelease) !== wantPrerelease) continue;
       const version = parseVersionFromTag(r.tag_name);
       if (!version) continue;
-      pick = { version, release: r };
-      break;
+      if (!pick || isNewerVersion(version, pick.version)) pick = { version, release: r };
     }
 
     if (pick) {
