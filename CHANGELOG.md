@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.10.0](https://github.com/croll83/companion/compare/the-companion-v1.9.0...the-companion-v1.10.0) (2026-11-11)
+
+
+### Features
+
+* **telegram:** voice notes reach the session as transcripts ([5bde1f7](https://github.com/croll83/companion/commit/5bde1f78a6c0a08f335d45c153341d7691463520))
+* **telegram:** voice notes reach the session as transcripts ([754cda7](https://github.com/croll83/companion/commit/754cda7ed5ea52c8f2ef49f8cd18e374845a6e1d))
+
+
+### Bug Fixes
+
+* **telegram:** bind and answer in a forum group's General topic ([bbc69a0](https://github.com/croll83/companion/commit/bbc69a0da601c387a04de0d5bd970dbe84bc10b6))
+* **telegram:** bind and answer in a forum group's General topic ([96af63b](https://github.com/croll83/companion/commit/96af63b85cbddc721a9356e3c74dd9306cd3261e))
+
 ## [1.9.0](https://github.com/croll83/companion/compare/the-companion-v1.8.0...the-companion-v1.9.0) (2026-11-11)
 
 
