@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/croll83/companion/compare/the-companion-v1.8.0...the-companion-v1.9.0) (2026-11-11)
+
+
+### Features
+
+* **models:** offer Fable 5.2 instead of Fable 5.1 ([26a734e](https://github.com/croll83/companion/commit/26a734e35a2408f2b4aa8bbcda021463b09423bc))
+* **models:** offer Fable 5.2 instead of Fable 5.1 ([e50720f](https://github.com/croll83/companion/commit/e50720f8f8a2a281237a9bf948dc9f538fb87cd9))
+
 ## [1.8.0](https://github.com/croll83/companion/compare/the-companion-v1.7.0...the-companion-v1.8.0) (2026-10-29)
 
 
