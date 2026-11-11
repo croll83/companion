@@ -270,7 +270,7 @@ describe("checkForUpdate", () => {
   });
 
   // The stable channel must skip prerelease entries even if they appear first
-  // in the releases array (GitHub orders by creation time, not stability).
+  // in the releases array, and even when they carry a higher version.
   it("picks the latest non-prerelease release for the stable channel", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -283,6 +283,23 @@ describe("checkForUpdate", () => {
 
     await checker.checkForUpdate();
     expect(checker.getUpdateState().latestVersion).toBe("99.0.0");
+  });
+
+  // GitHub does not list releases newest first: on the real repo it returned
+  // v1.9.0 before v1.10.0 and v1.8.0, so taking the first entry offered 1.9.0
+  // forever. The checker must compare versions, not trust the list order.
+  it("picks the highest version whatever the order GitHub lists them in", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([
+        release({ tag: "the-companion-v1.9.0" }),
+        release({ tag: "the-companion-v1.10.0" }),
+        release({ tag: "the-companion-v1.8.0" }),
+      ]),
+    });
+
+    await checker.checkForUpdate();
+    expect(checker.getUpdateState().latestVersion).toBe("1.10.0");
   });
 
   it("picks the latest prerelease for the prerelease channel", async () => {
