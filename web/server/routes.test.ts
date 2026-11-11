@@ -104,6 +104,9 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: "",
     updateChannel: "stable",
     telegramBotToken: "",
+    telegramSttUrl: "",
+    telegramSttApiKey: "",
+    telegramSttModel: "",
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -127,6 +130,9 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: patch.publicUrl ?? "",
     updateChannel: patch.updateChannel ?? "stable",
     telegramBotToken: "",
+    telegramSttUrl: "",
+    telegramSttApiKey: "",
+    telegramSttModel: "",
     updatedAt: Date.now(),
   })),
 }));
@@ -1149,6 +1155,9 @@ describe("GET /api/sessions/:id/archive-info", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -1496,6 +1505,9 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 123,
     });
 
@@ -1524,6 +1536,9 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotTokenConfigured: false,
+      telegramSttUrl: "",
+      telegramSttModel: "",
+      telegramSttApiKeyConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
       localLlmEnabled: false,
@@ -1555,6 +1570,9 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 123,
     });
 
@@ -1583,6 +1601,9 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotTokenConfigured: false,
+      telegramSttUrl: "",
+      telegramSttModel: "",
+      telegramSttApiKeyConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
       localLlmEnabled: false,
@@ -1615,6 +1636,9 @@ describe("GET /api/settings", () => {
       publicUrl: "https://example.com",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 100,
     });
 
@@ -1665,6 +1689,9 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 456,
     });
 
@@ -1715,10 +1742,48 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotTokenConfigured: false,
+      telegramSttUrl: "",
+      telegramSttModel: "",
+      telegramSttApiKeyConfigured: false,
       timeZone: "",
       companionMcpEnabled: true,
       localLlmEnabled: false,
     });
+  });
+
+  // Voice notes on the Telegram bridge: the transcription service. The URL
+  // and model come back to the page; the API key only as "configured".
+  it("saves the voice-note transcription settings without returning the key", async () => {
+    const saved = {
+      anthropicApiKey: "", anthropicModel: "claude-sonnet-4-6", linearApiKey: "",
+      linearAutoTransition: false, linearAutoTransitionStateId: "", linearAutoTransitionStateName: "",
+      linearArchiveTransition: false, linearArchiveTransitionStateId: "", linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "", linearOAuthClientSecret: "", linearOAuthWebhookSecret: "", linearOAuthAccessToken: "", linearOAuthRefreshToken: "",
+      claudeCodeOAuthToken: "", openaiApiKey: "", onboardingCompleted: false,
+      aiValidationEnabled: false, aiValidationAutoApprove: true, aiValidationAutoDeny: false,
+      publicUrl: "", updateChannel: "stable" as const, telegramBotToken: "",
+      telegramSttUrl: "http://stt.example/v1", telegramSttApiKey: "secret-key", telegramSttModel: "parakeet",
+      updatedAt: 1,
+    };
+    vi.mocked(settingsManager.updateSettings).mockReturnValue(saved);
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ telegramSttUrl: " http://stt.example/v1/ ", telegramSttApiKey: " secret-key ", telegramSttModel: " parakeet " }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      telegramSttUrl: "http://stt.example/v1", telegramSttApiKey: "secret-key", telegramSttModel: "parakeet",
+    }));
+    const json = await res.json();
+    expect(json).toMatchObject({ telegramSttUrl: "http://stt.example/v1", telegramSttModel: "parakeet", telegramSttApiKeyConfigured: true });
+    expect(JSON.stringify(json)).not.toContain("secret-key");
+  });
+
+  it("rejects a transcription URL that is not http(s) and non-string values", async () => {
+    const put = (body: unknown) => app.request("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect((await put({ telegramSttUrl: "ftp://x" })).status).toBe(400);
+    expect((await put({ telegramSttModel: 3 })).status).toBe(400);
   });
 
   it("trims key and falls back to default model for blank value", async () => {
@@ -1746,6 +1811,9 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 789,
     });
 
@@ -1791,6 +1859,9 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 999,
     });
 
@@ -1887,6 +1958,9 @@ describe("PUT /api/settings", () => {
       publicUrl: "https://my-server.com",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 500,
     });
 
@@ -2198,6 +2272,9 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2233,6 +2310,9 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2321,6 +2401,9 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2416,6 +2499,9 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2476,6 +2562,9 @@ describe("GET /api/linear/connection", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2511,6 +2600,9 @@ describe("GET /api/linear/connection", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2568,6 +2660,9 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2607,6 +2702,9 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2645,6 +2743,9 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2685,6 +2786,9 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2759,6 +2863,9 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2812,6 +2919,9 @@ describe("GET /api/linear/projects", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2847,6 +2957,9 @@ describe("GET /api/linear/projects", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -2912,6 +3025,9 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2947,6 +3063,9 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -3031,6 +3150,9 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 

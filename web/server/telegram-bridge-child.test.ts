@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 // The module's boot is guarded by `import.meta.main`, so importing it here does
 // not start the bot — only the pure helpers are exercised.
-import { GENERAL_TOPIC_ID, incomingTopicId, outgoingThreadId, safeName } from "./telegram-bridge-child.js";
+import { GENERAL_TOPIC_ID, incomingTopicId, outgoingThreadId, safeName, sttEndpoint, voiceNoteMessage } from "./telegram-bridge-child.js";
 
 describe("safeName (attachment filename hardening)", () => {
   it("keeps a normal filename", () => {
@@ -139,7 +139,10 @@ const tgState = {
   files: {} as Record<string, TgFile>,
   relaunches: [] as { url: string; init: any }[],
   relaunchError: false,
+  // Fake transcription service (STT_URL): what it answers and what it got.
+  stt: { status: 200, body: '{"text":"ciao dal vocale"}', calls: [] as { url: string; auth?: string; model?: unknown; file?: unknown }[] },
 };
+const STT_URL = "http://stt.test/v1";
 let poll: { res: (v: unknown) => void; rej: (e: unknown) => void } | null = null;
 let pollWaiters: (() => void)[] = [];
 let updateSeq = 0;
@@ -151,6 +154,11 @@ async function fakeFetch(input: unknown, init?: any): Promise<any> {
     tgState.relaunches.push({ url, init });
     if (tgState.relaunchError) throw new Error("ECONNREFUSED");
     return { status: 200 };
+  }
+  if (url.startsWith("http://stt.test")) {
+    const form = init?.body as FormData;
+    tgState.stt.calls.push({ url, auth: init?.headers?.Authorization, model: form.get("model"), file: form.get("file") });
+    return { ok: tgState.stt.status < 400, status: tgState.stt.status, text: async () => tgState.stt.body };
   }
   const filePrefix = `https://api.telegram.org/file/bot${TOKEN}/`;
   if (url.startsWith(filePrefix)) {
@@ -226,8 +234,8 @@ async function importBooted(): Promise<unknown> {
   }
 }
 
-async function boot(opts: { bindings?: Record<string, unknown>; token?: string; launcher?: unknown } = {}): Promise<FakeWS> {
-  writeFileSync(join(home, "settings.json"), JSON.stringify({ telegramBotToken: opts.token ?? TOKEN }));
+async function boot(opts: { bindings?: Record<string, unknown>; token?: string; launcher?: unknown; settings?: Record<string, unknown> } = {}): Promise<FakeWS> {
+  writeFileSync(join(home, "settings.json"), JSON.stringify({ telegramBotToken: opts.token ?? TOKEN, ...opts.settings }));
   writeFileSync(join(home, "auth.json"), JSON.stringify({ token: "s3c ret" }));
   writeFileSync(join(home, "session-telegram-bindings.json"), JSON.stringify(opts.bindings ?? { [SID]: binding() }));
   if (opts.launcher !== undefined) {
@@ -654,10 +662,15 @@ describe("routing & authorization", () => {
     expect(tgState.calls.filter((c) => c.method === "sendMessage").at(-1)!.body.message_thread_id).toBeUndefined();
   });
 
-  it("ignores updates without a message or without any usable content", async () => {
+  // Updates that are not messages are ignored; a message the bridge cannot
+  // use (sticker, empty photo list) gets a reply instead of vanishing: a
+  // silent drop is what made a voice note look lost.
+  it("ignores updates without a message, and answers unusable content as unsupported", async () => {
     await boot();
-    await deliver({ edited_message: { text: "x" } }, mediaMsg({ sticker: { file_id: "s" } }), mediaMsg({ photo: [] }));
+    await deliver({ edited_message: { text: "x" } });
     expect(tgState.calls.filter((c) => c.method !== "getMe")).toHaveLength(0);
+    await deliver(mediaMsg({ sticker: { file_id: "s" } }), mediaMsg({ photo: [] }));
+    expect(sentTexts().filter((t) => t.includes("non è supportato"))).toHaveLength(2);
   });
 
   it("ignores a disabled binding", async () => {
@@ -901,5 +914,77 @@ describe("forum topics (General topic = 1)", () => {
     expect(outgoingThreadId(1)).toBeUndefined();
     expect(outgoingThreadId(null)).toBeUndefined();
     expect(outgoingThreadId(3)).toBe(3);
+  });
+});
+
+// Voice notes: transcribed by an OpenAI-compatible service (Settings →
+// Telegram), echoed back so a wrong transcript is caught, and sent to the
+// session flagged as a transcript. Off when no service is set.
+describe("voice notes", () => {
+  const stt = { telegramSttUrl: STT_URL, telegramSttApiKey: "k-1", telegramSttModel: "parakeet" };
+  const voiceMsg = (extra: Record<string, unknown> = {}) => mediaMsg({ voice: { file_id: "v1", mime_type: "audio/ogg", duration: 3 }, ...extra });
+  beforeEach(() => {
+    tgState.files.v1 = { file_path: "voice/v1.oga", file_size: 5, bytes: Buffer.from("OPUS!") };
+    tgState.stt = { status: 200, body: '{"text":"  ciao dal vocale "}', calls: [] };
+  });
+
+  it("transcribes a voice note, echoes it and sends it to the session as a transcript", async () => {
+    const ws = await boot({ settings: stt });
+    await sendAndFlush(voiceMsg());
+    const [call] = tgState.stt.calls;
+    expect(call.url).toBe("http://stt.test/v1/audio/transcriptions");
+    expect(call.auth).toBe("Bearer k-1");
+    expect(call.model).toBe("parakeet");
+    expect(Buffer.from(await (call.file as Blob).arrayBuffer()).toString()).toBe("OPUS!");
+    expect(sentTexts()).toContain("🎙️ «ciao dal vocale»");
+    expect(ws.userMessages().map((f) => f.content)).toEqual([voiceNoteMessage("ciao dal vocale", "")]);
+    expect(readAudit().some((e) => e.event === "voice_transcribed")).toBe(true);
+  });
+
+  it("handles audio files too, with their caption in front", async () => {
+    const ws = await boot({ settings: stt });
+    await sendAndFlush(mediaMsg({ audio: { file_id: "v1", mime_type: "audio/mpeg", file_name: "memo.mp3" }, caption: "riassumi" }));
+    expect(ws.userMessages()[0].content).toBe(voiceNoteMessage("ciao dal vocale", "riassumi"));
+  });
+
+  it("says voice notes are off when no transcription service is set", async () => {
+    const ws = await boot();
+    await sendAndFlush(voiceMsg());
+    expect(sentTexts().at(-1)).toContain("le note vocali non sono attive");
+    expect(tgState.stt.calls).toHaveLength(0);
+    expect(ws.userMessages()).toHaveLength(0);
+  });
+
+  it("reports an empty transcript, a service error and a file too big", async () => {
+    const ws = await boot({ settings: stt });
+    tgState.stt.body = '{"text":""}';
+    await sendAndFlush(voiceMsg());
+    expect(sentTexts().at(-1)).toContain("non ho sentito parole");
+    tgState.stt = { status: 500, body: "boom", calls: [] };
+    await sendAndFlush(voiceMsg());
+    expect(sentTexts().at(-1)).toContain("errore gestione nota vocale: transcription service answered 500: boom");
+    tgState.stt = { status: 200, body: "<html>", calls: [] };
+    await sendAndFlush(voiceMsg());
+    expect(sentTexts().at(-1)).toContain("not JSON");
+    tgState.files.v1 = { file_path: "voice/v1.oga", file_size: T.MAX_FILE + 1 };
+    await sendAndFlush(voiceMsg());
+    expect(sentTexts().at(-1)).toContain("nota vocale troppo grande");
+    expect(ws.userMessages()).toHaveLength(0);
+  });
+
+  // In a group bound with requireMention a voice note cannot carry a tag:
+  // replying to the bot is how it addresses the bot.
+  it("in a mention-only group, takes a voice note that replies to the bot and ignores the others", async () => {
+    const ws = await boot({ settings: stt, bindings: { [SID]: binding({ requireMention: true }) } });
+    await sendAndFlush(voiceMsg());
+    expect(tgState.stt.calls).toHaveLength(0);
+    await sendAndFlush(voiceMsg({ reply_to_message: { from: { id: BOT_ID } } }));
+    expect(ws.userMessages()).toHaveLength(1);
+  });
+
+  it("builds the endpoint from a base URL or takes the full one", () => {
+    expect(sttEndpoint("http://h:9000/v1")).toBe("http://h:9000/v1/audio/transcriptions");
+    expect(sttEndpoint("http://h:9000/v1/")).toBe("http://h:9000/v1/audio/transcriptions");
+    expect(sttEndpoint("https://api.example/v1/audio/transcriptions")).toBe("https://api.example/v1/audio/transcriptions");
   });
 });

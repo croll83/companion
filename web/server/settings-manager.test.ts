@@ -59,6 +59,9 @@ describe("settings-manager", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
@@ -118,6 +121,9 @@ describe("settings-manager", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
@@ -201,6 +207,9 @@ describe("settings-manager", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       cliBridgeMode: "loopback",
       timeZone: "",
       companionMcpEnabled: true,
@@ -410,5 +419,12 @@ describe("settings-manager", () => {
     writeFileSync(settingsPath, JSON.stringify({ companionMcpEnabled: "no" }), "utf-8");
     _resetForTest(settingsPath);
     expect(getSettings().companionMcpEnabled).toBe(true);
+  });
+
+  // The transcription URL is stored without trailing slashes (the bridge appends the path).
+  it("reads the voice-note transcription settings, trimming the URL", () => {
+    writeFileSync(settingsPath, JSON.stringify({ telegramSttUrl: " http://stt.example/v1/ ", telegramSttApiKey: "k", telegramSttModel: " m " }));
+    _resetForTest(settingsPath);
+    expect(getSettings()).toMatchObject({ telegramSttUrl: "http://stt.example/v1", telegramSttApiKey: "k", telegramSttModel: "m" });
   });
 });

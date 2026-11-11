@@ -76,6 +76,57 @@ function readJson<T>(file: string, fallback: T): T {
 function loadToken(): string {
   return (readJson<Record<string, unknown>>(SETTINGS_FILE, {}).telegramBotToken as string) || "";
 }
+/** Voice-note transcription service (Settings → Telegram), read at each voice note. */
+export interface SttConfig { url: string; apiKey: string; model: string }
+function loadStt(): SttConfig {
+  const s = readJson<Record<string, unknown>>(SETTINGS_FILE, {});
+  const str = (k: string) => (typeof s[k] === "string" ? (s[k] as string).trim() : "");
+  return { url: str("telegramSttUrl"), apiKey: str("telegramSttApiKey"), model: str("telegramSttModel") };
+}
+
+/** The transcription endpoint: a base URL (…/v1) gets the OpenAI path appended. */
+export function sttEndpoint(url: string): string {
+  const base = url.replace(/\/+$/, "");
+  return /\/audio\/transcriptions$/.test(base) ? base : `${base}/audio/transcriptions`;
+}
+
+/**
+ * Transcribe audio with an OpenAI-compatible `/audio/transcriptions` service
+ * (OpenAI, Groq, a local Whisper or Parakeet server). Returns the text, "" when
+ * nothing was heard. Throws with the service's answer when it fails.
+ */
+export async function transcribeAudio(
+  audio: Buffer,
+  mime: string,
+  filename: string,
+  cfg: SttConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  const form = new FormData();
+  form.append("file", new Blob([new Uint8Array(audio)], { type: mime || "audio/ogg" }), filename);
+  form.append("model", cfg.model || "whisper-1");
+  const res = await fetchImpl(sttEndpoint(cfg.url), {
+    method: "POST",
+    body: form,
+    headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : undefined,
+    signal: AbortSignal.timeout(120_000),
+  });
+  const body = await res.text();
+  if (!res.ok) throw new Error(`transcription service answered ${res.status}: ${body.slice(0, 200)}`);
+  try {
+    const text = (JSON.parse(body) as { text?: unknown }).text;
+    return typeof text === "string" ? text.trim() : "";
+  } catch {
+    throw new Error(`transcription service answered something that is not JSON: ${body.slice(0, 120)}`);
+  }
+}
+
+/** What a voice note turns into for the session: the transcript, flagged as such. */
+export function voiceNoteMessage(transcript: string, caption: string): string {
+  const note = `🎙️ Nota vocale trascritta automaticamente (nomi e termini tecnici possono essere storpiati):\n${transcript}`;
+  return caption ? `${caption}\n\n${note}` : note;
+}
+
 function loadCompanionAuth(): string {
   return (readJson<Record<string, unknown>>(AUTH_FILE, {}).token as string) || "";
 }
@@ -503,7 +554,12 @@ async function handleUpdate(u: any): Promise<void> {
   const msg = u.message;
   const hasPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0;
   const hasDoc = !!msg?.document;
-  if (!msg || (!msg.text && !msg.caption && !hasPhoto && !hasDoc)) return;
+  const voice = msg?.voice ?? msg?.audio;
+  const hasVoice = !!voice;
+  if (!msg) return;
+  // Stickers, video, locations...: answered as unsupported once the message
+  // passed the checks below (bound chat, allowlist, mention), never dropped silently.
+  const unsupported = !msg.text && !msg.caption && !hasPhoto && !hasDoc && !hasVoice;
   const chatId: number = msg.chat?.id;
   const topicId = incomingTopicId(msg);
   const br = findBridge(chatId, topicId);
@@ -538,8 +594,13 @@ async function handleUpdate(u: any): Promise<void> {
     }
   }
 
+  if (unsupported) {
+    await sendText(br.binding.groupId, br.binding.topicId, "⚠️ questo tipo di messaggio non è supportato: manda testo, immagini, file o note vocali.");
+    return;
+  }
+
   // Commands only apply to plain-text messages.
-  if (!hasPhoto && !hasDoc) {
+  if (!hasPhoto && !hasDoc && !hasVoice) {
     if (text === "/stop") { br.stop(); await sendText(br.binding.groupId, br.binding.topicId, "⏹️ bridge fermato. /resume per riprendere."); return; }
     if (text === "/resume") { br.resume(); await sendText(br.binding.groupId, br.binding.topicId, "▶️ bridge ripreso."); return; }
     if (text === "/status") { await sendText(br.binding.groupId, br.binding.topicId, "ℹ️ " + br.statusLine()); return; }
@@ -549,9 +610,24 @@ async function handleUpdate(u: any): Promise<void> {
     return;
   }
 
-  // ── Attachment: photo → inline image; document → saved to the session's inbox ──
+  // ── Attachment: voice → transcript; photo → inline image; document → saved to the session's inbox ──
   try {
-    if (hasPhoto) {
+    if (hasVoice) {
+      const stt = loadStt();
+      if (!stt.url) {
+        await sendText(br.binding.groupId, br.binding.topicId, "🎙️ le note vocali non sono attive: imposta la trascrizione in Companion → Settings → Telegram.");
+        return;
+      }
+      const buf = await downloadTelegramFile(voice.file_id);
+      if (!buf) { await sendText(br.binding.groupId, br.binding.topicId, `⚠️ nota vocale troppo grande o non scaricabile (max ${Math.round(MAX_FILE_BYTES / 1e6)}MB).`); return; }
+      await typing(br.binding.groupId, br.binding.topicId).catch(() => {});
+      const transcript = await transcribeAudio(buf, voice.mime_type || "audio/ogg", voice.file_name || "voice.ogg", stt);
+      audit({ event: "voice_transcribed", session: br.sessionId, bytes: buf.length, chars: transcript.length });
+      if (!transcript) { await sendText(br.binding.groupId, br.binding.topicId, "🎙️ non ho sentito parole nella nota vocale."); return; }
+      // Show what was understood: a wrong transcript is caught before the answer.
+      await sendText(br.binding.groupId, br.binding.topicId, `🎙️ «${transcript}»`);
+      br.ingest(voiceNoteMessage(transcript, text), fromId, chatId, msg.message_id);
+    } else if (hasPhoto) {
       const largest = msg.photo[msg.photo.length - 1];
       const buf = await downloadTelegramFile(largest.file_id);
       if (!buf) { await sendText(br.binding.groupId, br.binding.topicId, `⚠️ immagine troppo grande o non scaricabile (max ${Math.round(MAX_FILE_BYTES / 1e6)}MB).`); return; }
@@ -576,7 +652,7 @@ async function handleUpdate(u: any): Promise<void> {
       }
     }
   } catch (e) {
-    await sendText(br.binding.groupId, br.binding.topicId, `⚠️ errore gestione file: ${(e as Error).message}`);
+    await sendText(br.binding.groupId, br.binding.topicId, `⚠️ errore gestione ${hasVoice ? "nota vocale" : "file"}: ${(e as Error).message}`);
   }
 }
 
