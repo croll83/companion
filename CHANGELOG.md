@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.1](https://github.com/croll83/companion/compare/the-companion-v1.10.0...the-companion-v1.10.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **update:** offer the highest release, not the first one GitHub lists ([023b5b1](https://github.com/croll83/companion/commit/023b5b1abb7ef9436ad135ba6ebb3ae677e9097e))
+* **update:** offer the highest release, not the first one GitHub lists ([8991f7a](https://github.com/croll83/companion/commit/8991f7a996949ac83127d2f538268617faafedea))
+
 ## [1.10.0](https://github.com/croll83/companion/compare/the-companion-v1.9.0...the-companion-v1.10.0) (2026-11-11)
 
 
