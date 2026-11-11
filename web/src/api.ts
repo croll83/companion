@@ -439,6 +439,10 @@ export interface AppSettings {
   updateChannel: "stable" | "prerelease";
   cliBridgeMode: CliBridgeMode;
   telegramBotTokenConfigured: boolean;
+  /** Voice-note transcription for the Telegram bridge (empty = off). */
+  telegramSttUrl: string;
+  telegramSttModel: string;
+  telegramSttApiKeyConfigured: boolean;
   /** IANA zone for chat times; "" = Automatic (the viewing device's zone). */
   timeZone: string;
   /** Give sessions the built-in `companion` MCP tools (wake-ups, agents). */
@@ -1772,6 +1776,9 @@ export const api = {
     updateChannel?: "stable" | "prerelease";
     cliBridgeMode?: CliBridgeMode;
     telegramBotToken?: string;
+    telegramSttUrl?: string;
+    telegramSttApiKey?: string;
+    telegramSttModel?: string;
     timeZone?: string;
     companionMcpEnabled?: boolean;
     localLlmEnabled?: boolean;

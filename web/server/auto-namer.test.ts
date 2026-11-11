@@ -37,6 +37,9 @@ beforeEach(() => {
     publicUrl: "",
     updateChannel: "stable",
     telegramBotToken: "",
+    telegramSttUrl: "",
+    telegramSttApiKey: "",
+    telegramSttModel: "",
     updatedAt: 0,
   });
 });
@@ -80,6 +83,9 @@ describe("generateSessionTitle", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
 
@@ -130,6 +136,9 @@ describe("generateSessionTitle", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -209,6 +218,9 @@ describe("generateSessionTitle", () => {
       publicUrl: "",
       updateChannel: "stable",
       telegramBotToken: "",
+      telegramSttUrl: "",
+      telegramSttApiKey: "",
+      telegramSttModel: "",
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({

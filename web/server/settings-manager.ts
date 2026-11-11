@@ -54,6 +54,14 @@ export interface CompanionSettings {
   /** Telegram bot token (single bot bridging sessions to Telegram groups/topics). */
   telegramBotToken: string;
   /**
+   * Voice notes on the Telegram bridge: an OpenAI-compatible transcription
+   * service (base URL like https://host/v1, or the full /audio/transcriptions
+   * URL), its optional API key and model. Empty URL = voice notes off.
+   */
+  telegramSttUrl: string;
+  telegramSttApiKey: string;
+  telegramSttModel: string;
+  /**
    * IANA zone chat times and day separators are shown in (e.g. "Europe/Rome").
    * "" = Automatic: each viewing device uses its own zone. Optional in
    * fixtures; normalize() applies the default.
@@ -105,6 +113,9 @@ let settings: CompanionSettings = {
   updateChannel: "stable",
   cliBridgeMode: DEFAULT_CLI_BRIDGE_MODE,
   telegramBotToken: "",
+  telegramSttUrl: "",
+  telegramSttApiKey: "",
+  telegramSttModel: "",
   timeZone: "",
   companionMcpEnabled: true,
   updatedAt: 0,
@@ -139,6 +150,9 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     cliBridgeMode: isCliBridgeMode(raw?.cliBridgeMode) ? raw.cliBridgeMode : DEFAULT_CLI_BRIDGE_MODE,
     telegramBotToken: typeof raw?.telegramBotToken === "string" ? raw.telegramBotToken : "",
+    telegramSttUrl: typeof raw?.telegramSttUrl === "string" ? raw.telegramSttUrl.trim().replace(/\/+$/, "") : "",
+    telegramSttApiKey: typeof raw?.telegramSttApiKey === "string" ? raw.telegramSttApiKey : "",
+    telegramSttModel: typeof raw?.telegramSttModel === "string" ? raw.telegramSttModel.trim() : "",
     timeZone:
       typeof raw?.timeZone === "string" && isValidTimeZoneSetting(raw.timeZone.trim())
         ? raw.timeZone.trim()
@@ -175,7 +189,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "timeZone" | "companionMcpEnabled" | "localLlmEnabled">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "cliBridgeMode" | "telegramBotToken" | "telegramSttUrl" | "telegramSttApiKey" | "telegramSttModel" | "timeZone" | "companionMcpEnabled" | "localLlmEnabled">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -203,6 +217,9 @@ export function updateSettings(
     updateChannel: patch.updateChannel ?? settings.updateChannel,
     cliBridgeMode: patch.cliBridgeMode ?? settings.cliBridgeMode,
     telegramBotToken: patch.telegramBotToken ?? settings.telegramBotToken,
+    telegramSttUrl: patch.telegramSttUrl ?? settings.telegramSttUrl,
+    telegramSttApiKey: patch.telegramSttApiKey ?? settings.telegramSttApiKey,
+    telegramSttModel: patch.telegramSttModel ?? settings.telegramSttModel,
     timeZone: patch.timeZone ?? settings.timeZone,
     companionMcpEnabled: patch.companionMcpEnabled ?? settings.companionMcpEnabled,
     localLlmEnabled: patch.localLlmEnabled ?? settings.localLlmEnabled,

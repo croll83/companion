@@ -6,6 +6,7 @@ import { navigateToSession, navigateHome } from "../utils/routing.js";
 import { getDeviceTimeZone, listTimeZones } from "../utils/message-time.js";
 import { CompanionMcpToggle } from "./CompanionMcpToggle.js";
 import { LocalLlmSettings } from "./LocalLlmSettings.js";
+import { TelegramVoiceSettings, type TelegramVoiceValues } from "./TelegramVoiceSettings.js";
 import { DEFAULT_CLI_BRIDGE_MODE, isCliBridgeMode, type CliBridgeMode } from "../../server/cli-bridge-mode.js";
 
 interface SettingsPageProps {
@@ -91,6 +92,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [telegramSaving, setTelegramSaving] = useState(false);
   const [telegramSaved, setTelegramSaved] = useState(false);
   const [telegramError, setTelegramError] = useState("");
+  const [telegramVoice, setTelegramVoice] = useState<TelegramVoiceValues>({ url: "", model: "", apiKeyConfigured: false });
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
   const [providerError, setProviderError] = useState("");
@@ -160,6 +162,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         setClaudeCodeTokenConfigured(s.claudeCodeOAuthTokenConfigured);
         setOpenaiApiKeyConfigured(s.openaiApiKeyConfigured);
         setTelegramBotTokenConfigured(s.telegramBotTokenConfigured);
+        setTelegramVoice({ url: s.telegramSttUrl ?? "", model: s.telegramSttModel ?? "", apiKeyConfigured: !!s.telegramSttApiKeyConfigured });
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
@@ -811,6 +814,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     {telegramSaving ? "Saving…" : "Save Telegram token"}
                   </button>
                 </div>
+
+                <TelegramVoiceSettings initial={telegramVoice} />
 
                 {providerError && (
                   <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">

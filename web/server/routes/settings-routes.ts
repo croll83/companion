@@ -37,6 +37,9 @@ function settingsView(settings: ReturnType<typeof getSettings>, connections: Ret
     updateChannel: settings.updateChannel,
     cliBridgeMode: settings.cliBridgeMode,
     telegramBotTokenConfigured: !!settings.telegramBotToken.trim(),
+    telegramSttUrl: settings.telegramSttUrl,
+    telegramSttModel: settings.telegramSttModel,
+    telegramSttApiKeyConfigured: !!settings.telegramSttApiKey.trim(),
     timeZone: settings.timeZone ?? "",
     companionMcpEnabled: settings.companionMcpEnabled !== false,
     localLlmEnabled: settings.localLlmEnabled === true,
@@ -118,6 +121,12 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
     if (body.telegramBotToken !== undefined && typeof body.telegramBotToken !== "string") {
       return c.json({ error: "telegramBotToken must be a string" }, 400);
     }
+    for (const k of ["telegramSttUrl", "telegramSttApiKey", "telegramSttModel"] as const) {
+      if (body[k] !== undefined && typeof body[k] !== "string") return c.json({ error: `${k} must be a string` }, 400);
+    }
+    if (typeof body.telegramSttUrl === "string" && body.telegramSttUrl.trim() && !/^https?:\/\/\S+$/.test(body.telegramSttUrl.trim())) {
+      return c.json({ error: "telegramSttUrl must start with http:// or https://" }, 400);
+    }
     if (body.timeZone !== undefined) {
       if (typeof body.timeZone !== "string") {
         return c.json({ error: "timeZone must be a string" }, 400);
@@ -155,6 +164,7 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
       || body.updateChannel !== undefined
       || body.cliBridgeMode !== undefined
       || body.telegramBotToken !== undefined
+      || body.telegramSttUrl !== undefined || body.telegramSttApiKey !== undefined || body.telegramSttModel !== undefined
       || body.timeZone !== undefined
       || body.companionMcpEnabled !== undefined
       || body.localLlmEnabled !== undefined;
@@ -253,6 +263,9 @@ export function registerSettingsRoutes(api: Hono, hooks: SettingsRouteHooks = {}
         typeof body.telegramBotToken === "string"
           ? body.telegramBotToken.trim()
           : undefined,
+      telegramSttUrl: typeof body.telegramSttUrl === "string" ? body.telegramSttUrl.trim().replace(/\/+$/, "") : undefined,
+      telegramSttApiKey: typeof body.telegramSttApiKey === "string" ? body.telegramSttApiKey.trim() : undefined,
+      telegramSttModel: typeof body.telegramSttModel === "string" ? body.telegramSttModel.trim() : undefined,
       timeZone:
         typeof body.timeZone === "string"
           ? body.timeZone.trim()
