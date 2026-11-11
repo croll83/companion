@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 // The module's boot is guarded by `import.meta.main`, so importing it here does
 // not start the bot — only the pure helpers are exercised.
-import { safeName } from "./telegram-bridge-child.js";
+import { GENERAL_TOPIC_ID, incomingTopicId, outgoingThreadId, safeName } from "./telegram-bridge-child.js";
 
 describe("safeName (attachment filename hardening)", () => {
   it("keeps a normal filename", () => {
@@ -873,5 +873,33 @@ describe("signals", () => {
     await advance(T.TIMEOUT * 2);
     expect(tgState.relaunches).toHaveLength(0);
     expect(FakeWS.instances).toHaveLength(1);
+  });
+});
+
+// Forum groups: the General topic has id 1 but its messages arrive without
+// message_thread_id, so a binding to "topic 1" never matched (seen live: a
+// session bound to topic 1 got nothing, every message logged as "no topic").
+// And Telegram refuses message_thread_id=1 on sends to General.
+describe("forum topics (General topic = 1)", () => {
+  const forum = { is_forum: true };
+
+  it("reads a General-topic message in a forum as topic 1", () => {
+    expect(GENERAL_TOPIC_ID).toBe(1);
+    expect(incomingTopicId({ chat: forum })).toBe(1);
+    // A reply in General carries the replied message id, not a topic.
+    expect(incomingTopicId({ chat: forum, message_thread_id: 4321, is_topic_message: false })).toBe(1);
+  });
+
+  it("keeps a real topic's id, in forums and outside them", () => {
+    expect(incomingTopicId({ chat: forum, message_thread_id: 3, is_topic_message: true })).toBe(3);
+    expect(incomingTopicId({ chat: {}, message_thread_id: 7 })).toBe(7);
+    expect(incomingTopicId({ chat: {} })).toBeNull();
+    expect(incomingTopicId({})).toBeNull();
+  });
+
+  it("sends to General and to 'no topic' without a thread id, to other topics with theirs", () => {
+    expect(outgoingThreadId(1)).toBeUndefined();
+    expect(outgoingThreadId(null)).toBeUndefined();
+    expect(outgoingThreadId(3)).toBe(3);
   });
 });

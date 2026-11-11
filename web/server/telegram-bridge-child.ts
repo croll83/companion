@@ -112,6 +112,27 @@ async function tg(method: string, body: Record<string, unknown>): Promise<any> {
   }
 }
 /**
+ * The General topic of a forum group has id 1, but Telegram sends its
+ * messages WITHOUT message_thread_id and refuses message_thread_id=1 on
+ * sends. A binding to "topic 1" therefore never matched (its messages came
+ * in as "no topic") and replies there would fail. Incoming: a forum message
+ * that is not a topic message is the General topic (1); a reply in General
+ * carries the replied message id as message_thread_id, hence the
+ * is_topic_message test. Outside forums the thread id is used as before.
+ */
+export const GENERAL_TOPIC_ID = 1;
+
+export function incomingTopicId(msg: { message_thread_id?: number; is_topic_message?: boolean; chat?: { is_forum?: boolean } }): number | null {
+  if (msg.chat?.is_forum) return msg.is_topic_message && msg.message_thread_id ? msg.message_thread_id : GENERAL_TOPIC_ID;
+  return msg.message_thread_id ?? null;
+}
+
+/** The message_thread_id to send with: none for "no topic" and for the General topic. */
+export function outgoingThreadId(topicId: number | null): number | undefined {
+  return topicId == null || topicId === GENERAL_TOPIC_ID ? undefined : topicId;
+}
+
+/**
  * Send the model's Markdown so Telegram actually renders it.
  *
  * Without a parse_mode Telegram prints the source verbatim (`**bold**`, `###`,
@@ -124,7 +145,7 @@ async function sendText(chatId: number, topicId: number | null, text: string): P
   for (const chunk of chunks) {
     const res = await tg("sendMessage", {
       chat_id: chatId,
-      message_thread_id: topicId ?? undefined,
+      message_thread_id: outgoingThreadId(topicId),
       text: chunk,
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -137,7 +158,7 @@ async function sendText(chatId: number, topicId: number | null, text: string): P
     for (let i = 0; i < plain.length; i += TG_CHUNK) {
       await tg("sendMessage", {
         chat_id: chatId,
-        message_thread_id: topicId ?? undefined,
+        message_thread_id: outgoingThreadId(topicId),
         text: plain.slice(i, i + TG_CHUNK),
         disable_web_page_preview: true,
       });
@@ -148,7 +169,7 @@ async function react(chatId: number, messageId: number, emoji: string): Promise<
   await tg("setMessageReaction", { chat_id: chatId, message_id: messageId, reaction: emoji ? [{ type: "emoji", emoji }] : [] });
 }
 async function typing(chatId: number, topicId: number | null): Promise<void> {
-  await tg("sendChatAction", { chat_id: chatId, message_thread_id: topicId ?? undefined, action: "typing" });
+  await tg("sendChatAction", { chat_id: chatId, message_thread_id: outgoingThreadId(topicId), action: "typing" });
 }
 
 /** Download a Telegram file (getFile → file server). Enforces the size cap. */
@@ -484,7 +505,7 @@ async function handleUpdate(u: any): Promise<void> {
   const hasDoc = !!msg?.document;
   if (!msg || (!msg.text && !msg.caption && !hasPhoto && !hasDoc)) return;
   const chatId: number = msg.chat?.id;
-  const topicId: number | null = msg.message_thread_id ?? null;
+  const topicId = incomingTopicId(msg);
   const br = findBridge(chatId, topicId);
   if (!br) {
     console.log(`[discover] chat.id=${chatId} type=${msg.chat?.type} topic=${topicId ?? "none"} from.id=${msg.from?.id} (@${msg.from?.username}) text=${JSON.stringify((msg.text || msg.caption || "").slice(0, 40))}`);
