@@ -40,6 +40,8 @@ export const DEFAULT_EFFORT: EffortLevel = "high";
  * session that runs at a level other than the one shown.
  */
 const MODEL_EFFORT_LEVELS: Record<string, EffortLevel[]> = {
+  // Probed on CLI 2.1.322 (get_settings `applied.effort`): all five applied as given.
+  "claude-fable-5-2": ["low", "medium", "high", "xhigh", "max"],
   "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
   "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],

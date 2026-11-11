@@ -13,7 +13,7 @@ export interface ClaudeModelOption {
 }
 
 export const CLAUDE_MODELS: ClaudeModelOption[] = [
-  { value: "claude-fable-5-1", label: "Fable 5.1", icon: "" },
+  { value: "claude-fable-5-2", label: "Fable 5.2", icon: "" },
   { value: "claude-opus-5-5", label: "Opus 5.5", icon: "" },
   { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
   { value: "claude-opus-4-6", label: "Opus 4.6", icon: "" },

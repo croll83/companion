@@ -8,7 +8,7 @@
 
 /** The chain, most capable first. Each refusal moves one step to the right. */
 export const REFUSAL_CHAIN = [
-  "claude-fable-5-1",
+  "claude-fable-5-2",
   "claude-opus-5-5",
   "claude-opus-4-8",
 ] as const;
@@ -18,11 +18,12 @@ const OFF_CHAIN_FALLBACK = REFUSAL_CHAIN[REFUSAL_CHAIN.length - 1];
 
 /** Older revisions of a chain model take the same next step as the current one. */
 const CHAIN_ALIASES: Record<string, (typeof REFUSAL_CHAIN)[number]> = {
-  "claude-fable-5": "claude-fable-5-1",
+  "claude-fable-5": "claude-fable-5-2",
+  "claude-fable-5-1": "claude-fable-5-2",
 };
 
 const LABELS: Record<string, string> = {
-  "claude-fable-5-1": "Fable 5.1",
+  "claude-fable-5-2": "Fable 5.2",
   "claude-opus-5-5": "Opus 5.5",
   "claude-opus-4-8": "Opus 4.8",
 };
