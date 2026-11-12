@@ -11,6 +11,7 @@ import { BrainPages } from "./BrainPages.js";
 import { BrainInbox } from "./BrainInbox.js";
 import { WikiCheck } from "./WikiCheck.js";
 import { BrainConsolidation } from "./BrainConsolidation.js";
+import { BrainMemorySync } from "./BrainMemorySync.js";
 
 export interface BrainActions {
   onUpdate: (slug: string, input: BrainInput) => Promise<boolean>;
@@ -255,6 +256,8 @@ export function BrainDetail({
             same tools, the skill, and a line in their AGENTS.md. Changes apply when a session starts or reloads.
           </p>
         </section>
+
+        <BrainMemorySync brain={brain} />
 
         {/* A remote brain is consolidated on its own server: only its owners may run that from Companion, so it hides under Advanced. */}
         {!embedded && (

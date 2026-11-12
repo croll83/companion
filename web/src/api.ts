@@ -887,6 +887,47 @@ export interface BrainConsolidationRun {
   lint?: { errors: number; warnings: number };
 }
 
+/** A brain's memory sync settings (server/brain/memory-sync.ts MemorySyncConfig). */
+export interface BrainMemorySyncConfig {
+  enabled: boolean;
+  schedule: string;
+  maxFiles: number;
+  /** Remote brains: the base URL of the brain server's management API. */
+  ingestUrl?: string;
+}
+
+/** What one memory sync run did for one domain. */
+export interface BrainMemorySyncDomainReport {
+  domain: string;
+  sent: string[];
+  deleted: string[];
+  unchanged: number;
+  deferred: string[];
+  skipped: { file: string; reason: string }[];
+  redacted: { file: string; count: number }[];
+  failed: { file: string; error: string }[];
+}
+
+export interface BrainMemorySyncRun {
+  at: number;
+  trigger: "schedule" | "manual";
+  ok: boolean;
+  error?: string;
+  domains: BrainMemorySyncDomainReport[];
+}
+
+/** GET /brains/:slug/memory-sync. */
+export interface BrainMemorySyncView {
+  config: BrainMemorySyncConfig;
+  tokenConfigured: boolean;
+  domains: string[];
+  running: boolean;
+  lastRun?: BrainMemorySyncRun;
+}
+
+/** PUT /brains/:slug/memory-sync: token and ingestUrl null (or "") remove them. */
+export type BrainMemorySyncPatch = Partial<{ enabled: boolean; schedule: string; maxFiles: number; ingestUrl: string | null; token: string | null }>;
+
 /** GET /brains/:slug/consolidation. */
 export interface BrainConsolidationView {
   config: BrainConsolidationConfig;
@@ -1673,6 +1714,12 @@ export const api = {
   /** Retry the sync of a not-synced run into the wiki folder. */
   syncBrainConsolidation: (slug: string) =>
     post<{ run: BrainConsolidationRun; consolidation: BrainConsolidationView }>(`/brains/${encodeURIComponent(slug)}/consolidation/sync`, {}),
+  brainMemorySync: (slug: string) => get<BrainMemorySyncView>(`/brains/${encodeURIComponent(slug)}/memory-sync`),
+  updateBrainMemorySync: (slug: string, input: BrainMemorySyncPatch) =>
+    put<BrainMemorySyncView>(`/brains/${encodeURIComponent(slug)}/memory-sync`, input),
+  /** "Sync now": send the domains' memory changes to the brain. */
+  runBrainMemorySync: (slug: string) =>
+    post<{ run: BrainMemorySyncRun; memorySync: BrainMemorySyncView }>(`/brains/${encodeURIComponent(slug)}/memory-sync/run`, {}),
   /** Where the plugin is on, the brain replaces it (plugin turned off there). */
   adoptPluginAsBrain: (slug: string, pluginId: string) =>
     post<{ adoptedIn: string[]; brain: BrainInfo }>(`/brains/${encodeURIComponent(slug)}/adopt-plugin`, { pluginId }),

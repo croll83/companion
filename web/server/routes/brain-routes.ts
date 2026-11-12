@@ -28,6 +28,7 @@ import { ScaffoldError, scaffoldWiki } from "../brain/wiki-scaffold.js";
 import { applyLintFix, checkAdoptFolder, explainLint, isLintFix, type LintFinding, type LintReport } from "../brain/wiki-lint-guide.js";
 import { slugify } from "../domain-store.js";
 import { getBrainConsolidation, type BrainConsolidation, type ConsolidationRunStatus } from "../brain/brain-consolidation.js";
+import { getMemorySync, markMemorySent, memorySyncDomains, type MemorySync } from "../brain/memory-sync.js";
 import type { Context } from "hono";
 
 /**
@@ -146,6 +147,8 @@ export interface BrainRouteDeps {
   curatorFetch?: CuratorFetch;
   /** The consolidation service (default: the server's, set at startup); a fake in tests. */
   consolidation?: Consolidation;
+  /** The memory sync service (default: the server's, set at startup). */
+  memorySync?: Pick<MemorySync, "view" | "configure" | "run" | "schedule">;
 }
 
 /** Statuses of the Inbox tab ("discarded" is shown as Dismissed). */
@@ -167,6 +170,7 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
   const supervisor: Supervisor = deps.supervisor ?? brainSupervisor;
   const readyWaitMs = deps.readyWaitMs ?? 15_000;
   const consolidation = () => deps.consolidation ?? getBrainConsolidation();
+  const memorySync = () => deps.memorySync ?? getMemorySync();
   const context = () => {
     const global = ensureGlobalDomain();
     return { global, domains: listDomains(), plugins: listInstalledPlugins(), supervisor, consolidation: consolidation() };
@@ -308,6 +312,7 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
     if (embeddedOr404(c.req.param("slug"))) await supervisor.stop(c.req.param("slug"));
     const result = deleteBrain(c.req.param("slug"));
     if (!result.ok) return c.json({ error: result.error }, result.status);
+    memorySync()?.schedule(c.req.param("slug"));
     return c.json(result);
   });
 
@@ -452,6 +457,43 @@ export function registerBrainRoutes(api: Hono, deps: BrainRouteDeps = {}): void 
     const result = await svc.retrySync(slug);
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json({ run: result.run, consolidation: svc.view(slug) });
+  }));
+
+  // ── Memory sync (brain/memory-sync.ts) ──────────────────────────────────
+  const withMemorySync = (fn: (svc: NonNullable<ReturnType<typeof memorySync>>, slug: string, c: Context) => Promise<Response> | Response) => async (c: Context) => {
+    const svc = memorySync();
+    if (!svc) return c.json({ error: "Memory sync is not available on this server" }, 503);
+    const slug = c.req.param("slug") ?? "";
+    if (!getBrain(slug)) return c.json({ error: "Brain not found" }, 404);
+    return fn(svc, slug, c);
+  };
+
+  api.get("/brains/:slug/memory-sync", withMemorySync((svc, slug, c) => c.json(svc.view(slug))));
+
+  // {enabled, schedule, maxFiles, ingestUrl, token}: the token is stored apart and never returned.
+  api.put("/brains/:slug/memory-sync", withMemorySync(async (svc, slug, c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const patch = Object.fromEntries(["enabled", "schedule", "maxFiles", "ingestUrl", "token"].filter((k) => body[k] !== undefined).map((k) => [k, body[k]]));
+    const result = svc.configure(slug, patch);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result.value);
+  }));
+
+  // "Sync now": the same run as the nightly one, even when the schedule is off.
+  api.post("/brains/:slug/memory-sync/run", withMemorySync(async (svc, slug, c) => {
+    const result = await svc.run(slug, "manual");
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ run: result.value, memorySync: svc.view(slug) });
+  }));
+
+  // A domain's memory already moved into the brain by hand: record it as sent
+  // (`before`, epoch ms: only the files not modified since then).
+  api.post("/brains/:slug/memory-sync/mark-sent", withMemorySync(async (svc, slug, c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { domain?: unknown; before?: unknown };
+    if (typeof body.domain !== "string" || !memorySyncDomains(slug).includes(body.domain)) return c.json({ error: "Not a domain of this brain" }, 400);
+    if (body.before !== undefined && (typeof body.before !== "number" || !Number.isFinite(body.before))) return c.json({ error: "before must be a time in milliseconds" }, 400);
+    const marked = markMemorySent(slug, body.domain, body.before !== undefined ? { before: body.before as number } : {});
+    return c.json({ marked, memorySync: svc.view(slug) });
   }));
 
   // "Adopt plugin as brain": where the plugin is on, the brain replaces it (one registry write).
