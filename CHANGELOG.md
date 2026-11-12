@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/croll83/companion/compare/the-companion-v1.10.1...the-companion-v1.11.0) (2026-11-12)
+
+
+### Features
+
+* **brains:** send the domains' memory to their brain every night ([d34662d](https://github.com/croll83/companion/commit/d34662df755ae29c39599f8394f89fb4cfbb2ef3))
+* **brains:** send the domains' memory to their brain every night ([4609c1c](https://github.com/croll83/companion/commit/4609c1c6f7657b2d000db5dbbdf7dd6db891cccb))
+
 ## [1.10.1](https://github.com/croll83/companion/compare/the-companion-v1.10.0...the-companion-v1.10.1) (2026-11-11)
 
 
