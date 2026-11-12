@@ -48,6 +48,7 @@ import { warnIfLegacyTailscaleFunnel } from "./legacy-tailscale-funnel.js";
 import { setCompanionPort } from "./brain/brain-endpoints.js";
 import { brainSupervisor } from "./brain/brain-supervisor.js";
 import { BrainConsolidation, setBrainConsolidation } from "./brain/brain-consolidation.js";
+import { MemorySync, setMemorySync } from "./brain/memory-sync.js";
 import { handleBrainProxy } from "./brain/brain-proxy.js";
 import { localProviderHealth } from "./local-provider-health.js";
 import { CALLBACK_PATH as MCP_AUTH_CALLBACK_PATH, handleMcpAuthProxy } from "./mcp-auth/mcp-auth-proxy.js";
@@ -74,6 +75,8 @@ const agentExecutor = new AgentExecutor(launcher, wsBridge);
 // Brains' consolidation: triggers, the curator clone and the verified sync around their agents' runs.
 const brainConsolidation = new BrainConsolidation({ executor: agentExecutor });
 setBrainConsolidation(brainConsolidation);
+const memorySync = new MemorySync();
+setMemorySync(memorySync);
 agentExecutor.setRunHooks(brainConsolidation);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
@@ -418,6 +421,7 @@ trackSessionResults();
 brainSupervisor.startAll();
 // Consolidation crons, and the threshold / catch-up checks on each health tick.
 brainConsolidation.startAll();
+memorySync.startAll();
 brainSupervisor.addHealthListener((slug, tick) => brainConsolidation.onHealth(slug, tick.inbox));
 
 // ── Local providers ─────────────────────────────────────────────────────────
@@ -469,6 +473,7 @@ setInterval(() => {
 function gracefulShutdown() {
   telegramBridgeManager.stop();
   brainSupervisor.stopAll();
+  memorySync.stopAll();
   localProviderHealth.stop();
   closeLogFile();
   process.exit(0);

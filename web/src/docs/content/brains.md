@@ -204,6 +204,19 @@ A brain server can publish its own skill at `<base>/skill`, a public endpoint (j
 
 Changes apply when a session starts or reloads. Sessions from before domains ("legacy") never get a brain.
 
+## Domain memory
+
+Each domain has its own memory: the note files in `companion_domain_<slug>/memory/`, written by its Claude Code and Codex sessions. **Domain memory** in a brain's page sends that memory to the brain, so the brain stays in line with it without the sessions writing every fact twice.
+
+- **When**: every night, by default at 03:00 (Companion's time zone), before a consolidation at dawn. **Sync now** runs it at once.
+- **What goes**: the memory of every domain using the brain (its own choice or GLOBAL's). A new file goes whole. A changed file goes whole too, with the lines that changed, so the consolidation merges only those. A deleted file sends a notice. `MEMORY.md`, the index, never goes. Nothing goes when nothing changed.
+- **How**: as sources the brain's consolidation turns into pages. A remote brain receives them through its server's ingest API (`<ingest URL>/api/v1/ingest/text`, the management address of a brains server), with an optional token of the curator scope. An embedded brain receives them through its curator API, like **Add source**, and must be running.
+- **What never goes**: private keys and certificates (PEM blocks), and crypto keys and seed phrases on lines that name them, are replaced by a placeholder. A file with `brain: no` in its frontmatter is skipped. The run report lists what was replaced or skipped.
+- **Limit**: at most 40 files per domain and run (configurable). The rest waits for the next run and shows in the report, so the first send of a large memory spreads over a few nights.
+- **Safe for the memory**: the memory is only read. What was sent is recorded under the brain's folder in `~/.companion/brains/<slug>/memory-sync/`. A file refused by the brain is tried again at the next run. A brain that refuses every call (wrong token or address, server down) stops the run.
+
+When it is on, sessions of those domains read a short rule in their instructions: write facts in the memory as usual, use the brain's note tool only to correct brain pages, read the brain for shared knowledge.
+
 ## What the sessions get
 
 Both CLIs get the brain's MCP server under the same name, `<slug>-brain`, and a skill with the same name. The skill comes from the server, is generated from the name and about text, or is your own text (a body, or a whole `SKILL.md` with frontmatter) written in the brain's page.

@@ -31,6 +31,7 @@ import {
 import { SKILL_TOGGLE_MARKER, tomlInlineTable, tomlKey, tomlString } from "./companion-mcp-config.js";
 import { currentServerAuth, mcpAuthView, type McpAuthView } from "./mcp-auth/mcp-auth-manage.js";
 import { mcpAuthProxyUrl, mintMcpAuthToken } from "./mcp-auth/mcp-auth-proxy.js";
+import { memorySyncNotice } from "./brain/memory-sync.js";
 import {
   brainForDomain,
   claudeBrainServer,
@@ -301,7 +302,7 @@ export function removeDomainRuntime(sessionId: string): void {
   }
 }
 
-function globalMemoryPrompt(r: ResolvedDomain): string {
+function globalMemoryPrompt(r: ResolvedDomain, brain: DomainBrain | null): string {
   const index = readMemoryIndex(r.globalMemoryDir).trim();
   return [
     "# Companion GLOBAL memory",
@@ -315,6 +316,7 @@ function globalMemoryPrompt(r: ResolvedDomain): string {
     "",
     index || "(empty)",
     "",
+    ...memorySyncNotice(brain?.brain),
   ].join("\n");
 }
 
@@ -348,7 +350,7 @@ export function buildClaudeDomainSpawn(sessionId: string, slug: string | undefin
 
   const promptPath = join(runtime, "global-memory.md");
   if (!r.isGlobal) {
-    writePrivateFile(promptPath, globalMemoryPrompt(r));
+    writePrivateFile(promptPath, globalMemoryPrompt(r, brain));
     args.push("--append-system-prompt-file", promptPath);
   } else {
     rmSync(promptPath, { force: true });
@@ -605,6 +607,7 @@ export function buildCodexAgentsMd(
       "",
     );
   }
+  parts.push(...memorySyncNotice(brain?.brain));
   return parts.join("\n");
 }
 

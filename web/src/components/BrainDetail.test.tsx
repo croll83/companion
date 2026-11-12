@@ -15,6 +15,8 @@ const consolidationView = { config: { enabled: false, schedule: "0 5 * * *", mod
 const mockApi = vi.hoisted(() => ({
   brainPages: vi.fn(), brainPage: vi.fn(), brainInbox: vi.fn(), brainLint: vi.fn(), fixBrainLint: vi.fn(),
   brainConsolidation: vi.fn(), listAgents: vi.fn(async () => []),
+  // The Domain memory section (overview, both kinds) loads its view: sync off, no run.
+  brainMemorySync: vi.fn(async () => ({ config: { enabled: false, schedule: "0 3 * * *", maxFiles: 40 }, tokenConfigured: false, domains: [], running: false })),
 }));
 mockApi.brainConsolidation.mockImplementation(async () => consolidationView);
 vi.mock("../api.js", () => ({ api: mockApi }));
