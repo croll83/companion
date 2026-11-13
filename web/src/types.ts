@@ -21,6 +21,8 @@ export interface ChatMessage {
   content: string;
   contentBlocks?: ContentBlock[];
   images?: { media_type: string; data: string }[];
+  /** Attachments saved on the server (user messages from the history): shown by path. */
+  attachments?: { path: string; name: string; media_type: string }[];
   timestamp: number;
   parentToolUseId?: string | null;
   isStreaming?: boolean;

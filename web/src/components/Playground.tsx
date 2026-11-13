@@ -338,6 +338,27 @@ const MSG_USER_IMAGE: ChatMessage = {
   timestamp: Date.now() - 55000,
 };
 
+// From the history: the attachments are files on the server (the paths do not
+// exist here, so the image shows "Image not available" and the PDF a chip).
+const MSG_USER_ATTACHMENTS: ChatMessage = {
+  id: "msg-2b",
+  role: "user",
+  content: "Photo and datasheet of the board",
+  attachments: [
+    { path: "/tmp/playground-uploads/board.jpg", name: "board.jpg", media_type: "image/jpeg" },
+    { path: "/tmp/playground-uploads/datasheet.pdf", name: "datasheet.pdf", media_type: "application/pdf" },
+  ],
+  timestamp: Date.now() - 50000,
+};
+
+// An answer showing an image the model wrote on disk (loaded through /fs/raw).
+const MSG_ASSISTANT_LOCAL_IMAGE: ChatMessage = {
+  id: "msg-2c",
+  role: "assistant",
+  content: "Here is the drawing:\n\n![board](/tmp/playground-uploads/drawing.png)",
+  timestamp: Date.now() - 45000,
+};
+
 const MSG_ASSISTANT: ChatMessage = {
   id: "msg-3",
   role: "assistant",
@@ -1139,6 +1160,12 @@ export function Playground() {
             </Card>
             <Card label="User message with image">
               <MessageBubble message={MSG_USER_IMAGE} />
+            </Card>
+            <Card label="User message with saved attachments (history)">
+              <MessageBubble message={MSG_USER_ATTACHMENTS} />
+            </Card>
+            <Card label="Assistant message with a local image">
+              <MessageBubble message={MSG_ASSISTANT_LOCAL_IMAGE} />
             </Card>
             <Card label="Assistant message (markdown)">
               <MessageBubble message={MSG_ASSISTANT} />

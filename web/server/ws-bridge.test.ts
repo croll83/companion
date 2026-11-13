@@ -19,6 +19,13 @@ if (typeof globalThis.Bun === "undefined") {
 const mockExecSync = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ execSync: mockExecSync }));
 vi.mock("node:crypto", () => ({ randomUUID: () => "test-uuid" }));
+// Attachments of user messages are saved as files: never under the real ~/.companion in tests.
+const mockStoreAttachments = vi.hoisted(() => vi.fn((sessionId: string, images: { media_type: string; name?: string }[]) =>
+  images.map((img, i) => ({ path: `/uploads/${sessionId}/${i}-${img.name ?? "image"}`, name: img.name ?? "image", media_type: img.media_type }))));
+vi.mock("./attachment-store.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./attachment-store.js")>()),
+  storeMessageAttachments: mockStoreAttachments,
+}));
 
 // Mock settings-manager to prevent AI validation from interfering with tests.
 // Without this mock, the real settings file (~/.companion/settings.json) may have
@@ -2330,6 +2337,22 @@ describe("Browser message routing", () => {
     // Second block should be the text
     expect(sent.message.content[1].type).toBe("text");
     expect(sent.message.content[1].text).toBe("What's in this image?");
+  });
+
+  // The history keeps the attachments as saved files (paths, no base64), so a
+  // reload or reconnect of the chat still shows them; text-only messages carry none.
+  it("user_message with images: the history keeps them as saved files", () => {
+    bridge.handleBrowserMessage(browser, JSON.stringify({
+      type: "user_message",
+      content: "Look",
+      images: [{ media_type: "image/jpeg", data: "abc=", name: "board.jpg" }],
+    }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "No image" }));
+    const users = bridge.getSession("s1")!.messageHistory.filter((m) => m.type === "user_message");
+    expect(mockStoreAttachments).toHaveBeenCalledWith("s1", [{ media_type: "image/jpeg", data: "abc=", name: "board.jpg" }]);
+    expect(users[0]).toMatchObject({ content: "Look", attachments: [{ path: "/uploads/s1/0-board.jpg", name: "board.jpg", media_type: "image/jpeg" }] });
+    expect(JSON.stringify(users[0])).not.toContain("abc=");
+    expect(users[1]).not.toHaveProperty("attachments");
   });
 
   it("permission_response allow: sends control_response to CLI", async () => {

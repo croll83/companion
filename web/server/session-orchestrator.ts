@@ -1,4 +1,5 @@
 import { resolveLocalChoice } from "./local-providers.js";
+import { removeSessionAttachments } from "./attachment-store.js";
 import { usesDomain, type CliLauncher, type SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { SessionStore } from "./session-store.js";
@@ -933,6 +934,7 @@ export class SessionOrchestrator {
     sessionLinearIssues.removeLinearIssue(sessionId);
     this.launcher.removeSession(sessionId);
     this.wsBridge.closeSession(sessionId);
+    removeSessionAttachments(sessionId);
     this.agentExecutor.handleSessionClosed(sessionId);
     this.wakeupScheduler?.handleSessionDeleted(sessionId);
     this.autoRelaunchCounts.delete(sessionId);

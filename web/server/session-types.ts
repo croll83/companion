@@ -379,7 +379,7 @@ export type BrowserIncomingMessageBase =
   | { type: "refusal"; category?: string; explanation?: string; model?: string; timestamp?: number }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
-  | { type: "user_message"; content: string; timestamp: number; id?: string }
+  | { type: "user_message"; content: string; timestamp: number; id?: string; attachments?: { path: string; name: string; media_type: string }[] }
   | {
     type: "message_history";
     messages: BrowserIncomingMessage[];

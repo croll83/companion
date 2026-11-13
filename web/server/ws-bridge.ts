@@ -53,6 +53,7 @@ import { metricsCollector } from "./metrics-collector.js";
 import { isSessionWorking, isTurnInFlight, liveBackgroundWork, noteWorkFromCliMessage, clearWorkTracking } from "./session-work.js";
 import { getCodexEffortLevels, getCodexDefaultEffort } from "./codex-models.js";
 import { log } from "./logger.js";
+import { storeMessageAttachments } from "./attachment-store.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
@@ -1592,11 +1593,15 @@ export class WsBridge {
       session.lastUserActivityTs = Date.now();
       metricsCollector.recordTurnStarted(session.id);
       const ts = Date.now();
+      // Attachments are kept as files: the history (and every reload of the
+      // chat) shows them by path instead of carrying their base64.
+      const attachments = msg.images?.length ? storeMessageAttachments(session.id, msg.images) : [];
       const userMessage: BrowserIncomingMessage = {
         type: "user_message",
         content: msg.content,
         timestamp: ts,
         id: msg.client_msg_id || `user-${ts}-${this.userMsgCounter++}`,
+        ...(attachments.length ? { attachments } : {}),
       };
       this.appendHistory(session, userMessage);
       const transitioned = session.stateMachine.transition("streaming", "user_message");

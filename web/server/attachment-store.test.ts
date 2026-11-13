@@ -15,6 +15,7 @@ vi.mock("./paths.js", async () => {
 
 import {
   safeAttachmentName, attachmentNote, INLINE_IMAGE_TYPES, uploadsDir, saveAttachment,
+  storeMessageAttachments, removeSessionAttachments,
 } from "./attachment-store.js";
 
 afterAll(() => { if (home.dir) rmSync(home.dir, { recursive: true, force: true }); });
@@ -123,3 +124,35 @@ describe("INLINE_IMAGE_TYPES", () => {
     expect(INLINE_IMAGE_TYPES.has("application/pdf")).toBe(false);
   });
 });
+
+// The chat history shows a user message's attachments by path: they must be
+// on disk, one failing write must not drop the others, and deleting the
+// session removes them.
+describe("storeMessageAttachments / removeSessionAttachments", () => {
+  it("saves each attachment and returns path, name and type", () => {
+    const stored = storeMessageAttachments("hist-1", [
+      { data: Buffer.from("img").toString("base64"), media_type: "image/png", name: "a.png" },
+      { data: Buffer.from("pdf").toString("base64"), media_type: "application/pdf", name: "b.pdf" },
+    ]);
+    expect(stored.map((s) => [s.name, s.media_type])).toEqual([["a.png", "image/png"], ["b.pdf", "application/pdf"]]);
+    expect(readFileSync(stored[0].path, "utf-8")).toBe("img");
+    expect(stored[1].path.startsWith(uploadsDir("hist-1"))).toBe(true);
+  });
+
+  it("leaves out an attachment that cannot be written", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bad = { get data(): string { throw new Error("unreadable"); }, media_type: "image/png", name: "x.png" };
+    const stored = storeMessageAttachments("hist-2", [bad, { data: "aGk=", media_type: "image/png", name: "ok.png" }]);
+    expect(stored.map((s) => s.name)).toEqual(["ok.png"]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("removes a session's uploads", () => {
+    storeMessageAttachments("hist-3", [{ data: "aGk=", media_type: "image/png", name: "z.png" }]);
+    removeSessionAttachments("hist-3");
+    expect(() => readdirSync(uploadsDir("hist-3"))).toThrow();
+    removeSessionAttachments("never-existed");
+  });
+});
+

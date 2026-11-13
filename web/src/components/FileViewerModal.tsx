@@ -128,7 +128,7 @@ export function FileViewerModal() {
           )}
 
           {!loading && !error && kind === "markdown" && content !== null && (
-            <MarkdownContent text={content} />
+            <MarkdownContent text={content} baseDir={path.slice(0, path.lastIndexOf("/")) || "/"} />
           )}
 
           {!loading && !error && kind === "text" && content !== null && (

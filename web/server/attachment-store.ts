@@ -9,7 +9,7 @@
  * Files land OUTSIDE any repository (under COMPANION_HOME) so an upload never
  * dirties the session's working tree or shows up in `git status`.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 
@@ -67,3 +67,37 @@ export function attachmentNote(saved: SavedAttachment[]): string {
   const plural = saved.length > 1 ? "i" : "o";
   return `\n\n[File allegat${plural} salvat${plural} su disco, leggil${plural} da lì:]\n${lines.join("\n")}`;
 }
+
+/** An attachment of a user message as the chat history keeps it: a file, not its bytes. */
+export interface StoredAttachment { path: string; name: string; media_type: string }
+
+/**
+ * Save the attachments of a user message so the chat can show them again
+ * after a reload or a reconnect (the history keeps paths, not base64). One
+ * that cannot be written is left out: the message still goes.
+ */
+export function storeMessageAttachments(
+  sessionId: string,
+  attachments: { data: string; media_type: string; name?: string }[],
+): StoredAttachment[] {
+  const stored: StoredAttachment[] = [];
+  for (const a of attachments) {
+    try {
+      const saved = saveAttachment(sessionId, a);
+      stored.push({ path: saved.path, name: saved.name, media_type: saved.mediaType });
+    } catch (err) {
+      console.warn(`[attachments] ${sessionId}: could not save ${a.name ?? a.media_type}:`, err);
+    }
+  }
+  return stored;
+}
+
+/** A deleted session's uploads go with it. */
+export function removeSessionAttachments(sessionId: string): void {
+  try {
+    rmSync(uploadsDir(sessionId), { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+}
+
