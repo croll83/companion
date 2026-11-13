@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.1](https://github.com/croll83/companion/compare/the-companion-v1.11.0...the-companion-v1.11.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **chat:** show images from disk and keep attachments after a reload ([7c225db](https://github.com/croll83/companion/commit/7c225db976c7087c7509b6c7a2b2e92214eec5ae))
+* **chat:** show images from disk and keep attachments after a reload ([181e81d](https://github.com/croll83/companion/commit/181e81d58719c16913b9e7dbdb08fae9e36f5f74))
+
 ## [1.11.0](https://github.com/croll83/companion/compare/the-companion-v1.10.1...the-companion-v1.11.0) (2026-11-12)
 
 
