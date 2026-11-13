@@ -1,12 +1,13 @@
 import { useState, useMemo, type ComponentProps } from "react";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { CopyButton } from "./CopyButton.js";
 import { RefusalBanner } from "./RefusalBanner.js";
 import { useStore } from "../store.js";
-import { parseLocalFileLink } from "../utils/local-file-link.js";
+import { localImagePath, parseLocalFileLink } from "../utils/local-file-link.js";
+import { LocalImage } from "./LocalImage.js";
 import {
   formatMessageTime,
   formatMessageTooltip,
@@ -45,6 +46,38 @@ function SmartLink({ href, children }: { href?: string; children?: React.ReactNo
     <a href={href} target="_blank" rel="noopener noreferrer" className="text-cc-primary hover:underline">
       {children}
     </a>
+  );
+}
+
+/**
+ * The attachments of a user message, from the history: images as thumbnails,
+ * other files as a chip; a click opens the file viewer.
+ */
+function MessageAttachments({ attachments }: { attachments: NonNullable<ChatMessage["attachments"]> }) {
+  const openFileViewer = useStore((s) => s.openFileViewer);
+  return (
+    <div className="flex gap-2 flex-wrap mb-2">
+      {attachments.map((a) =>
+        a.media_type.startsWith("image/") ? (
+          <LocalImage
+            key={a.path}
+            path={a.path}
+            alt={a.name}
+            className="max-w-[150px] sm:max-w-[200px] max-h-[120px] sm:max-h-[150px] rounded-xl object-cover border border-cc-border/30"
+          />
+        ) : (
+          <button
+            key={a.path}
+            type="button"
+            title={a.path}
+            onClick={() => openFileViewer(a.path)}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-cc-border/40 bg-cc-bg/40 text-[12px] hover:bg-cc-hover cursor-pointer"
+          >
+            📎 {a.name}
+          </button>
+        ),
+      )}
+    </div>
   );
 }
 
@@ -141,6 +174,9 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
                 />
               ))}
             </div>
+          )}
+          {!message.images?.length && message.attachments && message.attachments.length > 0 && (
+            <MessageAttachments attachments={message.attachments} />
           )}
           <div className="text-[13px] sm:text-[14px] leading-relaxed break-words">
             <MarkdownContent text={message.content} />
@@ -306,19 +342,31 @@ function AssistantAvatar() {
 }
 
 /**
- * Markdown with the app's styling applied element by element.
- *
- * Tailwind's preflight strips the browser defaults for headings, lists and
- * emphasis, so a bare <Markdown> renders as flat body text (tables survive
- * because the browser lays them out natively). Every consumer must go through
- * here, or it silently loses that formatting.
+ * An image in a markdown text: a file on this machine (absolute path, or
+ * relative to `baseDir`) goes through LocalImage, since the browser cannot
+ * load a filesystem path from Companion's origin; anything else is a plain
+ * <img>.
  */
-export function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
-  return (
-    <div className="markdown-body text-[14px] sm:text-[15px] text-cc-fg leading-relaxed overflow-hidden">
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        components={{
+function MarkdownImage({ src, alt, baseDir }: { src?: string; alt?: string; baseDir?: string }) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const local = localImagePath(src, origin, baseDir);
+  if (local) return <LocalImage path={local} alt={alt} className="max-w-full max-h-[480px] rounded-lg border border-cc-border" />;
+  return <img src={src} alt={alt ?? ""} loading="lazy" className="max-w-full rounded-lg" />;
+}
+
+/**
+ * The element overrides of MarkdownContent, built once per base folder. They
+ * must keep the same identity across renders: new component functions at
+ * every render made React remount the whole rendered text on each update of
+ * the chat, reloading its images (the chat jumped).
+ */
+const componentsByDir = new Map<string, Components>();
+function markdownComponents(baseDir?: string): Components {
+  const key = baseDir ?? "";
+  let components = componentsByDir.get(key);
+  if (!components) {
+    components = {
+      ...({
           p: ({ children }) => (
             <p className="mb-3 last:mb-0">{children}</p>
           ),
@@ -418,7 +466,28 @@ export function MarkdownContent({ text, showCursor = false }: { text: string; sh
               {children}
             </td>
           ),
-        }}
+        } satisfies Components),
+      img: ({ src, alt }) => <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt} baseDir={baseDir} />,
+    };
+    componentsByDir.set(key, components);
+  }
+  return components;
+}
+
+/**
+ * Markdown with the app's styling applied element by element.
+ *
+ * Tailwind's preflight strips the browser defaults for headings, lists and
+ * emphasis, so a bare <Markdown> renders as flat body text (tables survive
+ * because the browser lays them out natively). Every consumer must go through
+ * here, or it silently loses that formatting.
+ */
+export function MarkdownContent({ text, showCursor = false, baseDir }: { text: string; showCursor?: boolean; baseDir?: string }) {
+  return (
+    <div className="markdown-body text-[14px] sm:text-[15px] text-cc-fg leading-relaxed overflow-hidden">
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        components={markdownComponents(baseDir)}
       >
         {text}
       </Markdown>

@@ -70,3 +70,27 @@ export function parseLocalFileLink(href: string | undefined, origin: string): st
   if (!last.includes(".") || last === "." || last === "..") return null;
   return path;
 }
+
+/**
+ * The file an image of a markdown text points at: an absolute path (as
+ * parseLocalFileLink reads it), or a relative one resolved against `baseDir`
+ * (the folder of the markdown file shown in the viewer). Null for images on
+ * other sites, data URLs and anything that is not an image file.
+ */
+export function localImagePath(src: string | undefined, origin: string, baseDir?: string): string | null {
+  if (!src) return null;
+  let path: string | null;
+  if (baseDir && !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith("/") && !src.startsWith("#")) {
+    const parts: string[] = [];
+    for (const seg of `${baseDir}/${decodeURIComponent(src.split(/[?#]/)[0])}`.split("/")) {
+      if (!seg || seg === ".") continue;
+      if (seg === "..") parts.pop();
+      else parts.push(seg);
+    }
+    path = `/${parts.join("/")}`;
+  } else {
+    path = parseLocalFileLink(src, origin);
+  }
+  return path && fileKind(path) === "image" ? path : null;
+}
+

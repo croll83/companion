@@ -947,6 +947,7 @@ function handleParsedMessage(
         id: data.id || nextId(),
         role: "user",
         content: data.content,
+        ...(data.attachments?.length ? { attachments: data.attachments } : {}),
         ...messageTime(data.timestamp),
       });
       store.clearPromptSuggestions(sessionId);
@@ -1111,6 +1112,7 @@ function handleParsedMessage(
             id: histMsg.id || nextId(),
             role: "user",
             content: histMsg.content,
+            ...(histMsg.attachments?.length ? { attachments: histMsg.attachments } : {}),
             ...messageTime(histMsg.timestamp, 0),
           });
         } else if (histMsg.type === "assistant") {

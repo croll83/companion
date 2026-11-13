@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseLocalFileLink, fileKind, fileExtension } from "./local-file-link.js";
+import { parseLocalFileLink, fileKind, fileExtension, localImagePath } from "./local-file-link.js";
 
 const ORIGIN = "https://companion.mintwork.it";
 
@@ -73,3 +73,23 @@ describe("fileKind", () => {
     expect(fileKind("/a/.gitignore")).toBe("text");
   });
 });
+
+// Which markdown images Companion loads from disk: absolute image paths, and
+// relative ones only when the folder of the markdown file is known.
+describe("localImagePath", () => {
+  const origin = "https://companion.example";
+  it("takes absolute image paths and leaves the rest", () => {
+    expect(localImagePath("/home/u/a.png", origin)).toBe("/home/u/a.png");
+    expect(localImagePath("/home/u/a.md", origin)).toBeNull();
+    expect(localImagePath("https://example.com/a.png", origin)).toBeNull();
+    expect(localImagePath("data:image/png;base64,AAAA", origin)).toBeNull();
+    expect(localImagePath(undefined, origin)).toBeNull();
+  });
+  it("resolves relative paths against the base folder", () => {
+    expect(localImagePath("img/a.png", origin, "/home/u/docs")).toBe("/home/u/docs/img/a.png");
+    expect(localImagePath("./x/../b%20c.png", origin, "/home/u")).toBe("/home/u/b c.png");
+    expect(localImagePath("data:image/png;base64,AAAA", origin, "/home/u")).toBeNull();
+    expect(localImagePath("#frag", origin, "/home/u")).toBeNull();
+  });
+});
+

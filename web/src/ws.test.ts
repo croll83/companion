@@ -256,6 +256,18 @@ describe("handleMessage: user_message", () => {
     ]);
   });
 
+  // Attachments saved by the server travel with the message (live and from the
+  // history below), so the chat can show them after a reload.
+  it("keeps the saved attachments of a user message, live and from the history", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    const attachments = [{ path: "/u/s1/1-a.png", name: "a.png", media_type: "image/png" }];
+    fireMessage({ type: "user_message", id: "live-att", content: "live", timestamp: 1000, attachments });
+    expect(useStore.getState().messages.get("s1")?.[0]).toMatchObject({ id: "live-att", attachments });
+    fireMessage({ type: "message_history", messages: [{ type: "user_message", id: "hist-att", content: "old", timestamp: 900, attachments }] });
+    expect(useStore.getState().messages.get("s1")?.find((m) => m.id === "hist-att")).toMatchObject({ attachments });
+  });
+
   it("deduplicates optimistic user messages when the server echoes the same id", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });
