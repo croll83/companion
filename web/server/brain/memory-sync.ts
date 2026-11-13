@@ -57,7 +57,12 @@ const MAX_DIFF_LINES = 400;
 const MAX_LCS_CELLS = 4_000_000;
 /** The ingest API caps a text at 2 MB; Companion's own "Add source" at 1 MB. */
 const MAX_SOURCE_BYTES = 1_000_000;
-const SEND_TIMEOUT_MS = 30_000;
+/**
+ * How long one source may take. A brains server stores each ingest as a git
+ * commit: on a small instance with a large wiki that took about 40 s, and a
+ * 30 s limit stopped the run while the brain was still accepting the file.
+ */
+export const SEND_TIMEOUT_MS = 300_000;
 
 export type MemorySyncTrigger = "schedule" | "manual";
 

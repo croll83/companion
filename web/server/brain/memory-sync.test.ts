@@ -44,6 +44,7 @@ import {
   updateMemorySync,
   getMemorySync,
   setMemorySync,
+  SEND_TIMEOUT_MS,
 } from "./memory-sync.js";
 import { createEmbeddedBrain, createRemoteBrain, deleteBrain, getBrain } from "./brain-store.js";
 import { createDomain, domainMemoryDir, updateDomain } from "../domain-store.js";
@@ -285,6 +286,19 @@ describe("runs", () => {
     const ok = fakeIngest();
     await new MemorySync({ fetch: ok.fetch, now: () => NOW }).run("jarvis", "manual");
     expect(ok.calls).toHaveLength(2);
+  });
+
+  // A slow brain (about 40 s per ingest on a small server) must not be cut off:
+  // the request carries a timeout of minutes, not seconds.
+  it("gives each send minutes, not seconds", async () => {
+    setup();
+    memory("jarvis", { "a.md": "A" });
+    const timeouts: number[] = [];
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => { timeouts.push(ms); return new AbortController().signal; });
+    await new MemorySync({ fetch: fakeIngest().fetch, now: () => NOW }).run("jarvis", "manual");
+    spy.mockRestore();
+    expect(timeouts).toEqual([SEND_TIMEOUT_MS]);
+    expect(SEND_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
   });
 
   it("goes on after one refused file, and stops when the brain does not answer", async () => {
