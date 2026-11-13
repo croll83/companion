@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.2](https://github.com/croll83/companion/compare/the-companion-v1.11.1...the-companion-v1.11.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **brains:** give each memory sync send minutes, not 30 seconds ([916c6ea](https://github.com/croll83/companion/commit/916c6ea8516fab31723c3eaa4975f658c38f2105))
+* **brains:** give each memory sync send minutes, not 30 seconds ([e22acf7](https://github.com/croll83/companion/commit/e22acf7f2777e3101f87328e4d94eaacdfe8ff43))
+
 ## [1.11.1](https://github.com/croll83/companion/compare/the-companion-v1.11.0...the-companion-v1.11.1) (2026-11-13)
 
 
