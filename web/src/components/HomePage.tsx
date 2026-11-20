@@ -22,7 +22,7 @@ import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMod
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
 import { DomainFolderPicker, folderSlug, type FolderMode } from "./home/DomainFolderPicker.js";
-import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
+import { readAttachments, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
 import { LocalProviderPicker, defaultModelOf, type LocalChoice } from "./home/LocalProviderPicker.js";
@@ -141,6 +141,8 @@ export function HomePage() {
   // Git (branch picker, worktrees, pull) only applies to an existing folder.
   const gitCwd = folderMode === "existing" ? cwd : "";
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  // Picked or pasted images still being scaled down: sending waits for them.
+  const [preparing, setPreparing] = useState(0);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [dynamicModels, setDynamicModels] = useState<ModelOption[] | null>(null);
@@ -502,17 +504,21 @@ export function HomePage() {
     setVisibleResumeCandidateRows(INITIAL_VISIBLE_SESSION_ROWS);
   }, [normalizedResumeSearchQuery, showOlderResumeCandidates]);
 
-  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = e.target.files;
-    if (!files) return;
-    const newImages: ImageAttachment[] = [];
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
-      const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: file.name, base64, mediaType });
+  /** Add picked or pasted images, scaled down first (utils/image.ts). */
+  async function addImages(files: File[]) {
+    setPreparing((n) => n + 1);
+    try {
+      const added = await readAttachments(files, { fallbackName: (f) => `pasted-${Date.now()}.${f.type.split("/")[1]}` });
+      setImages((prev) => [...prev, ...added]);
+    } finally {
+      setPreparing((n) => n - 1);
     }
-    setImages((prev) => [...prev, ...newImages]);
+  }
+
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = "";
+    if (files.length) await addImages(files);
   }
 
   function removeImage(index: number) {
@@ -522,18 +528,13 @@ export function HomePage() {
   async function handlePaste(e: React.ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const newImages: ImageAttachment[] = [];
-    for (const item of Array.from(items)) {
-      if (!item.type.startsWith("image/")) continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: `pasted-${Date.now()}.${file.type.split("/")[1]}`, base64, mediaType });
-    }
-    if (newImages.length > 0) {
-      e.preventDefault();
-      setImages((prev) => [...prev, ...newImages]);
-    }
+    const files = Array.from(items)
+      .filter((item) => item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => !!f);
+    if (files.length === 0) return;
+    e.preventDefault();
+    await addImages(files);
   }
 
   function handleInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
@@ -599,7 +600,7 @@ export function HomePage() {
 
   async function handleSend() {
     const msg = text.trim();
-    if (!msg || sending) return;
+    if (!msg || sending || preparing > 0) return;
 
     setSending(true);
     setError("");
@@ -877,7 +878,7 @@ export function HomePage() {
   }, [gitRepoInfo]);
 
   // A local provider without a model cannot start a session.
-  const canSend = text.trim().length > 0 && !sending && !(isLocal && !localChoice?.model);
+  const canSend = text.trim().length > 0 && !sending && preparing === 0 && !(isLocal && !localChoice?.model);
 
   return (
     <div className="flex-1 h-full flex flex-col items-center px-3 sm:px-6 pb-6 pb-safe overflow-y-auto overscroll-y-contain">
@@ -917,8 +918,9 @@ export function HomePage() {
             className="absolute left-2 right-2 bottom-full mb-1"
           />
           {/* Context badges (Linear issue, images) — inside card to avoid external shift */}
-          {(selectedLinearIssue || images.length > 0) && (
+          {(selectedLinearIssue || images.length > 0 || preparing > 0) && (
             <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
+              {preparing > 0 && <span role="status" className="text-[12px] text-cc-muted">Preparing images…</span>}
               {selectedLinearIssue && (
                 <div className="inline-flex max-w-full items-center gap-2 rounded-md border border-cc-border bg-cc-hover/60 px-2.5 py-1.5 text-[11px] text-cc-muted">
                   <span className="shrink-0">Linear</span>
