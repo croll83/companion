@@ -10,7 +10,7 @@ import { UltracodeToggle } from "./UltracodeToggle.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 
-import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
+import { readAttachments, type ImageAttachment } from "../utils/image.js";
 
 /** Stable reference to avoid infinite re-renders in Zustand selectors. */
 const emptyStringArray: string[] = [];
@@ -23,6 +23,8 @@ interface CommandItem {
 export function Composer({ sessionId }: { sessionId: string }) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  // Picked or pasted images still being scaled down: sending waits for them.
+  const [preparing, setPreparing] = useState(0);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [savePromptOpen, setSavePromptOpen] = useState(false);
@@ -138,7 +140,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   function handleSend() {
     const msg = text.trim();
-    if (!msg || !isConnected) return;
+    if (!msg || !isConnected || preparing > 0) return;
     const clientMsgId = createClientMessageId();
 
     sendToSession(sessionId, {
@@ -245,18 +247,24 @@ export function Composer({ sessionId }: { sessionId: string }) {
     sendToSession(sessionId, { type: "interrupt" });
   }
 
-  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = e.target.files;
-    if (!files) return;
-    const newImages: ImageAttachment[] = [];
-    for (const file of Array.from(files)) {
-      const isPdf = file.type === "application/pdf";
-      if (!file.type.startsWith("image/") && !isPdf) continue;
-      const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: file.name, base64, mediaType });
+  /** Add picked or pasted files: images are scaled down first (utils/image.ts). */
+  async function addAttachments(files: File[]) {
+    setPreparing((n) => n + 1);
+    try {
+      const added = await readAttachments(files, {
+        pdf: true,
+        fallbackName: (f) => `pasted-${Date.now()}.${f.type === "application/pdf" ? "pdf" : f.type.split("/")[1]}`,
+      });
+      setImages((prev) => [...prev, ...added]);
+    } finally {
+      setPreparing((n) => n - 1);
     }
-    setImages((prev) => [...prev, ...newImages]);
+  }
+
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = "";
+    if (files.length) await addAttachments(files);
   }
 
   function removeImage(index: number) {
@@ -266,20 +274,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
   async function handlePaste(e: React.ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const newImages: ImageAttachment[] = [];
-    for (const item of Array.from(items)) {
-      const isPdf = item.type === "application/pdf";
-      if (!item.type.startsWith("image/") && !isPdf) continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      const { base64, mediaType } = await readFileAsBase64(file);
-      const ext = file.type === "application/pdf" ? "pdf" : file.type.split("/")[1];
-      newImages.push({ name: file.name || `pasted-${Date.now()}.${ext}`, base64, mediaType });
-    }
-    if (newImages.length > 0) {
-      e.preventDefault();
-      setImages((prev) => [...prev, ...newImages]);
-    }
+    const files = Array.from(items)
+      .filter((item) => item.type.startsWith("image/") || item.type === "application/pdf")
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => !!f);
+    if (files.length === 0) return;
+    e.preventDefault();
+    await addAttachments(files);
   }
 
   function toggleMode() {
@@ -335,7 +336,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // turn/steer, Claude because the adapter writes the message straight to the
   // CLI's stdin and the CLI picks it up mid-turn. Nothing is queued on our side.
   const willSteer = isRunning;
-  const canSend = text.trim().length > 0 && isConnected;
+  const canSend = text.trim().length > 0 && isConnected && preparing === 0;
   // While a turn runs the send button stays next to stop: on a phone Enter only
   // inserts a newline, so without it there is no way to steer mid-turn.
   const sendTitle = willSteer ? "Add to what it's doing now" : "Send message";
@@ -343,6 +344,9 @@ export function Composer({ sessionId }: { sessionId: string }) {
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
       <div className="max-w-3xl mx-auto">
+        {preparing > 0 && (
+          <p role="status" className="mb-2 px-3 sm:px-0 text-[12px] text-cc-muted">Preparing images…</p>
+        )}
         {/* Attachment previews: image thumbnail, or a file chip for PDFs */}
         {images.length > 0 && (
           <div className="flex items-center gap-2 mb-2 px-3 sm:px-0 flex-wrap">

@@ -16,8 +16,22 @@ let mockStoreState: Record<string, unknown> = {};
 
 const mockReadFileAsBase64 = vi.fn();
 
+// readAttachments (scaling images down) is tested in utils/image.test.ts; here it
+// only filters and reads through the mocked reader, and can be held to test
+// the "Preparing images" state.
+const attachmentGate = vi.hoisted(() => ({ wait: null as Promise<void> | null }));
 vi.mock("../utils/image.js", () => ({
   readFileAsBase64: (...args: unknown[]) => mockReadFileAsBase64(...args),
+  readAttachments: async (files: File[], opts: { pdf?: boolean; fallbackName?: (f: File) => string } = {}) => {
+    if (attachmentGate.wait) await attachmentGate.wait;
+    const out: { name: string; base64: string; mediaType: string }[] = [];
+    for (const f of files) {
+      if (!f.type.startsWith("image/") && !(opts.pdf && f.type === "application/pdf")) continue;
+      const { base64, mediaType } = await mockReadFileAsBase64(f);
+      out.push({ name: f.name || opts.fallbackName?.(f) || "image", base64, mediaType });
+    }
+    return out;
+  },
 }));
 
 vi.mock("../ws.js", () => ({
@@ -1029,6 +1043,31 @@ describe("Composer toolbar interactions", () => {
     const { container } = render(<Composer sessionId="s1" />);
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
     expect(fileInput.getAttribute("accept")).toContain("application/pdf");
+  });
+
+  it("waits for picked images to be prepared before sending", async () => {
+    // Phone photos are scaled down before they are added: until then the
+    // composer says so and the send button stays off, so a photo is never
+    // sent half-ready or left out of the message.
+    let release: () => void = () => {};
+    attachmentGate.wait = new Promise<void>((r) => { release = r; });
+    try {
+      mockReadFileAsBase64.mockResolvedValue({ base64: "jpg64", mediaType: "image/jpeg" });
+      const { container } = render(<Composer sessionId="s1" />);
+      fireEvent.change(container.querySelector("textarea")!, { target: { value: "look" } });
+      fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+        target: { files: [new File(["x"], "photo.jpg", { type: "image/jpeg" })] },
+      });
+      expect(await screen.findByText("Preparing images…")).toBeTruthy();
+      for (const b of screen.getAllByTitle("Send message")) expect((b as HTMLButtonElement).disabled).toBe(true);
+      release();
+      await waitFor(() => expect(screen.queryByText("Preparing images…")).toBeNull());
+      expect(screen.getByAltText("photo.jpg")).toBeTruthy();
+      for (const b of screen.getAllByTitle("Send message")) expect((b as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      release();
+      attachmentGate.wait = null;
+    }
   });
 
   it("attaching a PDF adds a file chip with the filename", async () => {
