@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.0](https://github.com/croll83/companion/compare/the-companion-v1.11.2...the-companion-v1.12.0) (2026-11-20)
+
+
+### Features
+
+* **composer:** scale large photos down before sending them ([f1a3a3e](https://github.com/croll83/companion/commit/f1a3a3eb119ad8f2177374413e7a69cf4c1026b7))
+* **composer:** scale large photos down before sending them ([6a55d50](https://github.com/croll83/companion/commit/6a55d50acea00751f43a780787a5b1b2cf251542))
+
 ## [1.11.2](https://github.com/croll83/companion/compare/the-companion-v1.11.1...the-companion-v1.11.2) (2026-11-13)
 
 
